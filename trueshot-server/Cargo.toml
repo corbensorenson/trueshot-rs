@@ -60,3 +60,5 @@ utoipa = { version = "4.2.3", features = ["chrono", "uuid"] }
 tar = "0.4"
 flate2 = "1.0"
 redis = { version = "0.24", features = ["tokio-comp"] }
+[lints]
+workspace = true

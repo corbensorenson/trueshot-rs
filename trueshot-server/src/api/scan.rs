@@ -1,13 +1,13 @@
 //! ScanWizard API - Intelligent scanning endpoints
-//! 
+//!
 //! Provides endpoints for the smart scanning wizard:
 //! - Background calibration
 //! - Object detection & analysis
 //! - Scan plan computation
 //! - Guided capture execution
 
-use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use actix_web::http::StatusCode;
+use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use anyhow::{Context, Result};
 use image::{DynamicImage, GrayImage, Rgb, RgbImage};
 use ndarray::{Array2, Array3};
@@ -17,27 +17,29 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::info;
 
-use crate::auth::require_admin;
 use crate::audit::AuditEvent;
-use crate::scan_types::{
-    BackgroundStatus, BoundingBox, ComputePlanRequest, ExecuteStepRequest, ObjectAnalysis,
-    ObjectDetection, ScanPlan, ScanProgress, ScanStep, SDCardStatus, SizeInfo, ComplexityInfo,
-    SurfaceInfo, StepIntegrity, QualityAssessment, QualityDefectScore, QualityHistoryEntry,
-    ScaleAnchorRequest, ScaleAnchorStatus, ScaleAnchor, CoverageStatus,
-};
-use crate::scan_wizard::{DetectionState, ScanRuntime, ScanWizardState, QualityHistoryEntry as WizardQualityHistoryEntry};
-use crate::licensing::{enforce_scan_limit, require_license_feature};
-use crate::state::AppState;
+use crate::auth::require_admin;
 use crate::fs_safety::available_space_bytes;
+use crate::licensing::{enforce_scan_limit, require_license_feature};
+use crate::scan_types::{
+    BackgroundStatus, BoundingBox, ComplexityInfo, ComputePlanRequest, CoverageStatus,
+    ExecuteStepRequest, ObjectAnalysis, ObjectDetection, QualityAssessment, QualityDefectScore,
+    QualityHistoryEntry, SDCardStatus, ScaleAnchor, ScaleAnchorRequest, ScaleAnchorStatus,
+    ScanPlan, ScanProgress, ScanStep, SizeInfo, StepIntegrity, SurfaceInfo,
+};
+use crate::scan_wizard::{
+    DetectionState, QualityHistoryEntry as WizardQualityHistoryEntry, ScanRuntime, ScanWizardState,
+};
+use crate::state::AppState;
 
+use sha2::{Digest, Sha256};
+use std::io::Cursor;
 use trueshot_core::ai::material::MaterialEstimator;
+use trueshot_core::inventory::CameraCalibration;
 use trueshot_core::quality_analyzer::{Analyzer, Defect, ProcessingParams};
 use trueshot_core::vision::features::NativeFeatureExtractor;
 use trueshot_device_manager::{CameraConfig, CameraRole};
-use trueshot_core::inventory::CameraCalibration;
 use uuid::Uuid;
-use sha2::{Digest, Sha256};
-use std::io::Cursor;
 
 // ============================================================================
 // Background Calibration Endpoints
@@ -80,10 +82,7 @@ pub async fn get_background_status(req: HttpRequest, state: web::Data<AppState>)
     )
 )]
 #[post("/api/wizard/background/capture")]
-pub async fn capture_background(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> impl Responder {
+pub async fn capture_background(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -99,9 +98,7 @@ pub async fn capture_background(
                 "timestamp": timestamp.to_rfc3339()
             }))
         }
-        Err(err) => {
-            HttpResponse::InternalServerError().body(err.to_string())
-        }
+        Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
     }
 }
 
@@ -120,10 +117,7 @@ pub async fn capture_background(
     )
 )]
 #[get("/api/wizard/detection/status")]
-pub async fn get_detection_status(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> impl Responder {
+pub async fn get_detection_status(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -143,7 +137,9 @@ pub async fn get_detection_status(
         let mut wizard = state.scan_wizard.lock().await;
         wizard.last_detection = Some(result.state.clone());
         if result.detection.detected {
-            if let Ok((assessment, uncertainty)) = compute_quality_assessment(&frame, result.width, result.height, &result.mask) {
+            if let Ok((assessment, uncertainty)) =
+                compute_quality_assessment(&frame, result.width, result.height, &result.mask)
+            {
                 record_quality_assessment(&mut wizard, assessment, uncertainty);
             }
         }
@@ -305,9 +301,7 @@ pub async fn get_uncertainty_map(req: HttpRequest, state: web::Data<AppState>) -
     {
         return HttpResponse::InternalServerError().body("Failed to encode uncertainty map");
     }
-    HttpResponse::Ok()
-        .content_type("image/png")
-        .body(buf)
+    HttpResponse::Ok().content_type("image/png").body(buf)
 }
 
 // ============================================================================
@@ -325,10 +319,7 @@ pub async fn get_uncertainty_map(req: HttpRequest, state: web::Data<AppState>) -
     )
 )]
 #[post("/api/wizard/analyze")]
-pub async fn analyze_object(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> impl Responder {
+pub async fn analyze_object(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -382,39 +373,61 @@ pub async fn compute_scan_plan(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    info!("📐 Computing scan plan for quality: {}", request.quality_level);
+    info!(
+        "📐 Computing scan plan for quality: {}",
+        request.quality_level
+    );
 
     if let Some(preset) = request.preset.as_ref() {
         let preset_norm = preset.to_lowercase();
         if preset_norm == "room" {
-            if let Err(resp) = require_license_feature(&state, trueshot_core::licensing::Feature::RoomReconstruction, "room_reconstruction") {
+            if let Err(resp) = require_license_feature(
+                &state,
+                trueshot_core::licensing::Feature::RoomReconstruction,
+                "room_reconstruction",
+            ) {
                 return resp;
             }
         } else if preset_norm == "human" {
-            if let Err(resp) = require_license_feature(&state, trueshot_core::licensing::Feature::AvatarReconstruction, "avatar_reconstruction") {
+            if let Err(resp) = require_license_feature(
+                &state,
+                trueshot_core::licensing::Feature::AvatarReconstruction,
+                "avatar_reconstruction",
+            ) {
                 return resp;
             }
         } else if preset_norm == "dynamic" || preset_norm == "4dgs" {
-            if let Err(resp) = require_license_feature(&state, trueshot_core::licensing::Feature::FourDGS, "dynamic_4dgs") {
+            if let Err(resp) = require_license_feature(
+                &state,
+                trueshot_core::licensing::Feature::FourDGS,
+                "dynamic_4dgs",
+            ) {
                 return resp;
             }
         }
     }
-    
+
     let (uncertainty, quality) = {
         let wizard = state.scan_wizard.lock().await;
         (wizard.last_uncertainty.clone(), wizard.last_quality.clone())
     };
-    let plan = compute_optimal_plan(&request.quality_level, &request.analysis, uncertainty.as_ref(), quality.as_ref());
+    let plan = compute_optimal_plan(
+        &request.quality_level,
+        &request.analysis,
+        uncertainty.as_ref(),
+        quality.as_ref(),
+    );
 
     {
         let mut wizard = state.scan_wizard.lock().await;
         wizard.plan = Some(plan.clone());
     }
-    
-    info!("✅ Plan: {} photos, {} orientations, {} positions", 
-        plan.total_photos, plan.object_orientations, plan.camera_positions_per_orientation);
-    
+
+    info!(
+        "✅ Plan: {} photos, {} orientations, {} positions",
+        plan.total_photos, plan.object_orientations, plan.camera_positions_per_orientation
+    );
+
     HttpResponse::Ok().json(plan)
 }
 
@@ -425,13 +438,14 @@ fn compute_optimal_plan(
     quality_state: Option<&QualityAssessment>,
 ) -> ScanPlan {
     // Quality configuration
-    let (mut angular_resolution, mut camera_elevations, min_orientations): (f32, Vec<i32>, u32) = match quality {
-        "preview" => (30.0, vec![0, 45], 1),
-        "standard" => (15.0, vec![0, 30, 60], 2),
-        "high" => (10.0, vec![-15, 0, 30, 60], 2),
-        "ultra" => (7.5, vec![-15, 0, 15, 30, 45, 60], 2),
-        _ => (15.0, vec![0, 30, 60], 2),
-    };
+    let (mut angular_resolution, mut camera_elevations, min_orientations): (f32, Vec<i32>, u32) =
+        match quality {
+            "preview" => (30.0, vec![0, 45], 1),
+            "standard" => (15.0, vec![0, 30, 60], 2),
+            "high" => (10.0, vec![-15, 0, 30, 60], 2),
+            "ultra" => (7.5, vec![-15, 0, 15, 30, 45, 60], 2),
+            _ => (15.0, vec![0, 30, 60], 2),
+        };
 
     if analysis.complexity.score > 0.7 {
         angular_resolution *= 0.85;
@@ -448,21 +462,21 @@ fn compute_optimal_plan(
             angular_resolution *= 0.85;
         }
     }
-    
+
     // Adjust for object properties
-    let orientations = if analysis.has_underside_detail { 
-        min_orientations.max(2) 
-    } else { 
-        min_orientations 
+    let orientations = if analysis.has_underside_detail {
+        min_orientations.max(2)
+    } else {
+        min_orientations
     };
-    
-    let camera_positions = camera_elevations.len() as u32 + 
-        if analysis.aspect_ratio > 1.5 { 1 } else { 0 };
-    
+
+    let camera_positions =
+        camera_elevations.len() as u32 + if analysis.aspect_ratio > 1.5 { 1 } else { 0 };
+
     let photos_per_rotation = (360.0 / angular_resolution).ceil() as u32;
     // Time estimation: 3 sec/photo + setup
     let setup_time = (orientations * 30) + (camera_positions * orientations * 15);
-    
+
     let extra_angles = uncertainty
         .map(|map| select_uncertainty_angles(map, photos_per_rotation as usize, 2))
         .unwrap_or_default();
@@ -470,7 +484,7 @@ fn compute_optimal_plan(
     // Generate steps
     let mut steps = Vec::new();
     let mut photo_index = 0u32;
-    
+
     for orient in 0..orientations {
         if orient > 0 {
             steps.push(ScanStep {
@@ -486,7 +500,7 @@ fn compute_optimal_plan(
                 photo_index: None,
             });
         }
-        
+
         for cam in 0..camera_positions {
             let elevation = camera_elevations.get(cam as usize).copied().unwrap_or(0);
             steps.push(ScanStep {
@@ -497,7 +511,7 @@ fn compute_optimal_plan(
                 rotation_angle: None,
                 photo_index: None,
             });
-            
+
             let mut angle = 0.0f32;
             while angle < 360.0 {
                 steps.push(ScanStep {
@@ -659,9 +673,7 @@ async fn preflight_capture_quality(state: &AppState) -> Result<CaptureGateDecisi
     let motion_score = last_preview
         .as_ref()
         .map(|prev| compute_motion_score(prev, &frame, &mask, frame.width(), frame.height()));
-    let parallax_ok = parallax_score
-        .map(|score| score >= 0.035)
-        .unwrap_or(true);
+    let parallax_ok = parallax_score.map(|score| score >= 0.035).unwrap_or(true);
     if !parallax_ok {
         let issue = "Insufficient viewpoint change detected";
         if !assessment.issues.iter().any(|entry| entry == issue) {
@@ -775,7 +787,9 @@ fn select_any_camera(state: &AppState) -> Option<Arc<dyn trueshot_device_manager
     None
 }
 
-async fn capture_background_sequence(state: &AppState) -> Result<(u32, chrono::DateTime<chrono::Utc>)> {
+async fn capture_background_sequence(
+    state: &AppState,
+) -> Result<(u32, chrono::DateTime<chrono::Utc>)> {
     let steps = 24u32;
     let mut frames: Vec<RgbImage> = Vec::new();
 
@@ -819,7 +833,8 @@ fn median_stack(frames: &[RgbImage]) -> Result<RgbImage> {
     let mut normalized: Vec<RgbImage> = Vec::with_capacity(frames.len());
     for frame in frames {
         if frame.dimensions() != (w, h) {
-            let resized = image::imageops::resize(frame, w, h, image::imageops::FilterType::Lanczos3);
+            let resized =
+                image::imageops::resize(frame, w, h, image::imageops::FilterType::Lanczos3);
             normalized.push(resized);
         } else {
             normalized.push(frame.clone());
@@ -1012,7 +1027,11 @@ fn compute_quality_assessment(
             defect: format!("{:?}", defect),
             score: *score,
             threshold,
-            status: if is_bad { "warn".to_string() } else { "ok".to_string() },
+            status: if is_bad {
+                "warn".to_string()
+            } else {
+                "ok".to_string()
+            },
         });
     }
 
@@ -1051,14 +1070,22 @@ fn compute_uncertainty_map(frame: &RgbImage, width: u32, height: u32, mask: &[u8
             let mut value = 255u8;
             if mask.get(idx).copied().unwrap_or(0) > 0 {
                 let p = frame.get_pixel(x, y);
-                let right = if x + 1 < width { frame.get_pixel(x + 1, y) } else { p };
-                let down = if y + 1 < height { frame.get_pixel(x, y + 1) } else { p };
-                let grad = (p[0] as i16 - right[0] as i16).abs() as u16
-                    + (p[1] as i16 - right[1] as i16).abs() as u16
-                    + (p[2] as i16 - right[2] as i16).abs() as u16;
-                let grad2 = (p[0] as i16 - down[0] as i16).abs() as u16
-                    + (p[1] as i16 - down[1] as i16).abs() as u16
-                    + (p[2] as i16 - down[2] as i16).abs() as u16;
+                let right = if x + 1 < width {
+                    frame.get_pixel(x + 1, y)
+                } else {
+                    p
+                };
+                let down = if y + 1 < height {
+                    frame.get_pixel(x, y + 1)
+                } else {
+                    p
+                };
+                let grad = (p[0] as i16 - right[0] as i16).unsigned_abs()
+                    + (p[1] as i16 - right[1] as i16).unsigned_abs()
+                    + (p[2] as i16 - right[2] as i16).unsigned_abs();
+                let grad2 = (p[0] as i16 - down[0] as i16).unsigned_abs()
+                    + (p[1] as i16 - down[1] as i16).unsigned_abs()
+                    + (p[2] as i16 - down[2] as i16).unsigned_abs();
                 let total = (grad + grad2) as f32;
                 let norm = (total / (3.0 * 255.0 * 2.0)).clamp(0.0, 1.0);
                 value = ((1.0 - norm) * 255.0) as u8;
@@ -1267,11 +1294,10 @@ fn analyze_frame(
     };
 
     let model_path = std::env::var("TRUESHOT_MATERIAL_MODEL").unwrap_or_default();
-    let mut estimator = MaterialEstimator::new(&model_path)
-        .or_else(|e| {
-            tracing::warn!("Material model load failed: {e}. Falling back to heuristic");
-            MaterialEstimator::new("")
-        })?;
+    let mut estimator = MaterialEstimator::new(&model_path).or_else(|e| {
+        tracing::warn!("Material model load failed: {e}. Falling back to heuristic");
+        MaterialEstimator::new("")
+    })?;
     let (rough_img, metal_img) = estimator.estimate(&DynamicImage::ImageRgb8(cropped.clone()))?;
     let rough = rough_img.to_luma8();
     let metal = metal_img.to_luma8();
@@ -1289,11 +1315,7 @@ fn analyze_frame(
 
     let specular_ratio = (1.0 - avg_rough).clamp(0.0, 1.0);
 
-    let turntable_diameter = state
-        .config
-        .hardware
-        .turntable_diameter_cm
-        .unwrap_or(30.0);
+    let turntable_diameter = state.config.hardware.turntable_diameter_cm.unwrap_or(30.0);
     let cm_per_px = turntable_diameter / w.max(1) as f32;
     let width_cm = rect.2 as f32 * cm_per_px;
     let height_cm = rect.3 as f32 * cm_per_px;
@@ -1376,14 +1398,24 @@ fn underside_detail_from_mask(mask: &[u8], width: u32, height: u32, bbox: &Bound
 }
 
 async fn ensure_scan_session_dir(state: &AppState, session_id: &str) -> Result<PathBuf> {
-    let base = state.config.paths.projects_dir.join("_wizard").join(session_id);
+    let base = state
+        .config
+        .paths
+        .projects_dir
+        .join("_wizard")
+        .join(session_id);
     let raw_dir = base.join("raw");
     tokio::fs::create_dir_all(&raw_dir).await?;
     Ok(raw_dir)
 }
 
 async fn ensure_manual_capture_dir(state: &AppState) -> PathBuf {
-    let base = state.config.paths.projects_dir.join("_wizard").join("manual");
+    let base = state
+        .config
+        .paths
+        .projects_dir
+        .join("_wizard")
+        .join("manual");
     let _ = tokio::fs::create_dir_all(&base).await;
     base
 }
@@ -1449,7 +1481,8 @@ async fn run_scan(state: &AppState, start_index: usize) -> Result<()> {
                     if let Some(runtime) = wizard.runtime.as_mut() {
                         runtime.status = "paused".to_string();
                         runtime.waiting_step = Some(idx);
-                        runtime.current_instruction = "Adjust capture quality before continuing".to_string();
+                        runtime.current_instruction =
+                            "Adjust capture quality before continuing".to_string();
                         let mut warnings = gate.assessment.issues.clone();
                         warnings.extend(gate.assessment.actions.clone());
                         runtime.set_warnings(warnings);
@@ -1469,7 +1502,9 @@ async fn run_scan(state: &AppState, start_index: usize) -> Result<()> {
                 let mut wizard = state.scan_wizard.lock().await;
                 let uncertainty = wizard.last_uncertainty.clone();
                 if let Some(runtime) = wizard.runtime.as_mut() {
-                    runtime.photos_captured = runtime.photos_captured.saturating_add(verification.verified as u32);
+                    runtime.photos_captured = runtime
+                        .photos_captured
+                        .saturating_add(verification.verified as u32);
                     runtime.record_integrity(StepIntegrity {
                         step_index: idx as u32,
                         expected_files: verification.expected as u32,
@@ -1507,9 +1542,15 @@ async fn run_scan(state: &AppState, start_index: usize) -> Result<()> {
 }
 
 fn update_coverage(runtime: &mut ScanRuntime, step: &ScanStep) {
-    let Some(angle) = step.rotation_angle else { return };
-    let Some(orientation) = step.object_orientation else { return };
-    let Some(camera_position) = step.camera_position else { return };
+    let Some(angle) = step.rotation_angle else {
+        return;
+    };
+    let Some(orientation) = step.object_orientation else {
+        return;
+    };
+    let Some(camera_position) = step.camera_position else {
+        return;
+    };
     let orient_idx = orientation as usize;
     if orient_idx >= runtime.coverage.len() {
         return;
@@ -1542,20 +1583,29 @@ fn maybe_adapt_plan(
             return 0;
         }
     }
-    let Some(orientation) = step.object_orientation else { return 0 };
-    let Some(camera_position) = step.camera_position else { return 0 };
+    let Some(orientation) = step.object_orientation else {
+        return 0;
+    };
+    let Some(camera_position) = step.camera_position else {
+        return 0;
+    };
     let orient_idx = orientation as usize;
     if orient_idx >= runtime.coverage.len() {
         return 0;
     }
     let grid = &runtime.coverage[orient_idx];
     let uncertainty_bins = select_uncertainty_bins(uncertainty, grid.azimuth_bins);
-        let candidates = rank_next_best_bins(grid, &uncertainty_bins, camera_position, 2);
+    let candidates = rank_next_best_bins(grid, &uncertainty_bins, camera_position, 2);
     if candidates.is_empty() {
         return 0;
     }
 
-    let insertion_idx = find_insertion_index(&runtime.plan.steps, current_step, camera_position, orientation);
+    let insertion_idx = find_insertion_index(
+        &runtime.plan.steps,
+        current_step,
+        camera_position,
+        orientation,
+    );
     let mut added = 0usize;
     let mut photo_index = runtime.plan.total_photos;
     for bin in candidates {
@@ -1564,7 +1614,12 @@ fn maybe_adapt_plan(
             continue;
         }
         let angle = (bin as f32 + 0.5) * (360.0 / grid.azimuth_bins as f32);
-        if angle_exists(&runtime.plan.steps, angle, Some(camera_position), Some(orientation)) {
+        if angle_exists(
+            &runtime.plan.steps,
+            angle,
+            Some(camera_position),
+            Some(orientation),
+        ) {
             continue;
         }
         runtime.plan.steps.insert(
@@ -1584,20 +1639,28 @@ fn maybe_adapt_plan(
     }
     if added > 0 {
         runtime.plan.total_photos = photo_index;
-        runtime.plan.estimated_time_seconds = runtime.plan.total_photos * 3 + estimate_setup_time(&runtime.plan);
+        runtime.plan.estimated_time_seconds =
+            runtime.plan.total_photos * 3 + estimate_setup_time(&runtime.plan);
         runtime.last_adapt_step = Some(current_step);
     }
     added
 }
 
-fn find_insertion_index(steps: &[ScanStep], current_idx: usize, camera_position: u32, orientation: u32) -> usize {
+fn find_insertion_index(
+    steps: &[ScanStep],
+    current_idx: usize,
+    camera_position: u32,
+    orientation: u32,
+) -> usize {
     let mut idx = current_idx + 1;
     while idx < steps.len() {
         let step = &steps[idx];
         if step.step_type != "capture" {
             break;
         }
-        if step.camera_position != Some(camera_position) || step.object_orientation != Some(orientation) {
+        if step.camera_position != Some(camera_position)
+            || step.object_orientation != Some(orientation)
+        {
             break;
         }
         idx += 1;
@@ -1638,7 +1701,11 @@ fn rank_next_best_bins(
         scored.push((bin, score));
     }
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.into_iter().take(max_bins).map(|(bin, _)| bin).collect()
+    scored
+        .into_iter()
+        .take(max_bins)
+        .map(|(bin, _)| bin)
+        .collect()
 }
 
 fn estimate_setup_time(plan: &ScanPlan) -> u32 {
@@ -1660,7 +1727,12 @@ async fn persist_plan_history(state: &AppState, session_id: &str) -> Result<()> 
         (runtime.plan.clone(), runtime.plan_history.clone())
     };
     let history = PlanHistoryFile { plan, revisions };
-    let base = state.config.paths.projects_dir.join("_wizard").join(session_id);
+    let base = state
+        .config
+        .paths
+        .projects_dir
+        .join("_wizard")
+        .join(session_id);
     tokio::fs::create_dir_all(&base).await?;
     let path = base.join("plan_history.json");
     let payload = serde_json::to_vec_pretty(&history)?;
@@ -1679,7 +1751,11 @@ struct CaptureVerification {
     best_scores: Vec<f32>,
 }
 
-async fn perform_capture(state: &AppState, angle: Option<f32>, output_dir: &Path) -> Result<CaptureVerification> {
+async fn perform_capture(
+    state: &AppState,
+    angle: Option<f32>,
+    output_dir: &Path,
+) -> Result<CaptureVerification> {
     if let Some(angle) = angle {
         if let Some(mut tt) = state.turntable.lock().await.take() {
             let _ = tt.rotate_to(angle).await;
@@ -1689,7 +1765,11 @@ async fn perform_capture(state: &AppState, angle: Option<f32>, output_dir: &Path
 
     let cameras = list_cameras_by_role(state, CameraRole::HighResCapture).await;
     let fallback = list_cameras_by_role(state, CameraRole::LiveFeedback).await;
-    let active = if cameras.is_empty() { fallback } else { cameras };
+    let active = if cameras.is_empty() {
+        fallback
+    } else {
+        cameras
+    };
 
     if active.is_empty() {
         anyhow::bail!("No cameras available for capture");
@@ -1739,7 +1819,9 @@ async fn perform_capture(state: &AppState, angle: Option<f32>, output_dir: &Path
             match cam.capture(&config) {
                 Ok(path) => {
                     if path.exists() {
-                        let _ = wait_for_stable_file(&path, 5, std::time::Duration::from_millis(200)).await;
+                        let _ =
+                            wait_for_stable_file(&path, 5, std::time::Duration::from_millis(200))
+                                .await;
                         let filename = format!(
                             "{}__{}_b{}__{}",
                             id_safe,
@@ -1923,7 +2005,11 @@ fn compute_laplacian_sharpness(image: &DynamicImage) -> f32 {
     (lap_sq_sum / count) - (mean * mean)
 }
 
-async fn write_camera_calibration(output_dir: &Path, filename: &str, cal: &CameraCalibration) -> Result<()> {
+async fn write_camera_calibration(
+    output_dir: &Path,
+    filename: &str,
+    cal: &CameraCalibration,
+) -> Result<()> {
     tokio::fs::create_dir_all(output_dir).await?;
     let payload = serde_json::json!({
         "camera_id": cal.camera_id,
@@ -1942,7 +2028,13 @@ async fn write_camera_calibration(output_dir: &Path, filename: &str, cal: &Camer
 fn sanitize_camera_id(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -2053,29 +2145,46 @@ fn sdcard_mount_roots() -> Vec<PathBuf> {
 fn is_media_extension(ext: &str) -> bool {
     matches!(
         ext,
-        "jpg" | "jpeg" | "png" | "tif" | "tiff" | "heic" | "heif" | "bmp"
-            | "raw" | "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf"
-            | "rw2" | "srw"
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "tif"
+            | "tiff"
+            | "heic"
+            | "heif"
+            | "bmp"
+            | "raw"
+            | "dng"
+            | "cr2"
+            | "cr3"
+            | "nef"
+            | "arw"
+            | "raf"
+            | "orf"
+            | "rw2"
+            | "srw"
     )
 }
 
 fn count_media_files(dir: &Path) -> (u32, u64) {
     let mut count = 0u32;
     let mut total = 0u64;
-    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
-        if let Ok(entry) = entry {
-            if entry.file_type().is_file() {
-                let ext = entry
-                    .path()
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|s| s.to_ascii_lowercase());
-                if let Some(ext) = ext {
-                    if is_media_extension(&ext) {
-                        count = count.saturating_add(1);
-                        if let Ok(meta) = entry.metadata() {
-                            total = total.saturating_add(meta.len());
-                        }
+    for entry in walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
+        if entry.file_type().is_file() {
+            let ext = entry
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            if let Some(ext) = ext {
+                if is_media_extension(&ext) {
+                    count = count.saturating_add(1);
+                    if let Ok(meta) = entry.metadata() {
+                        total = total.saturating_add(meta.len());
                     }
                 }
             }
@@ -2114,13 +2223,15 @@ fn find_sdcard_info() -> Option<SdCardInfo> {
 
 fn list_media_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(root).follow_links(false) {
-        if let Ok(entry) = entry {
-            if entry.file_type().is_file() {
-                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                    if is_media_extension(&ext.to_ascii_lowercase()) {
-                        files.push(entry.path().to_path_buf());
-                    }
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
+        if entry.file_type().is_file() {
+            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                if is_media_extension(&ext.to_ascii_lowercase()) {
+                    files.push(entry.path().to_path_buf());
                 }
             }
         }
@@ -2383,8 +2494,16 @@ pub async fn get_scan_coverage(req: HttpRequest, state: web::Data<AppState>) -> 
         density += value.min(1.0);
     }
     let total_bins_f = total_bins as f32;
-    let coverage_score = if total_bins == 0 { 0.0 } else { coverage_hits as f32 / total_bins_f };
-    let coverage_density = if total_bins == 0 { 0.0 } else { density / total_bins_f };
+    let coverage_score = if total_bins == 0 {
+        0.0
+    } else {
+        coverage_hits as f32 / total_bins_f
+    };
+    let coverage_density = if total_bins == 0 {
+        0.0
+    } else {
+        density / total_bins_f
+    };
     HttpResponse::Ok().json(CoverageStatus {
         orientation_index: orientation_index as u32,
         azimuth_bins: grid.azimuth_bins as u32,
@@ -2467,10 +2586,7 @@ pub async fn execute_step(
     )
 )]
 #[post("/api/scan/capture")]
-pub async fn trigger_capture(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> impl Responder {
+pub async fn trigger_capture(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -2758,12 +2874,14 @@ fn total_files_bytes(files: &[PathBuf]) -> u64 {
 
 fn dir_size_bytes(root: &Path) -> u64 {
     let mut total = 0u64;
-    for entry in walkdir::WalkDir::new(root).follow_links(false) {
-        if let Ok(entry) = entry {
-            if entry.file_type().is_file() {
-                if let Ok(meta) = entry.metadata() {
-                    total = total.saturating_add(meta.len());
-                }
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
+        if entry.file_type().is_file() {
+            if let Ok(meta) = entry.metadata() {
+                total = total.saturating_add(meta.len());
             }
         }
     }
@@ -2780,7 +2898,10 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state.audit.append_with_redaction(event, &state.config.privacy) {
+    if let Err(err) = state
+        .audit
+        .append_with_redaction(event, &state.config.privacy)
+    {
         tracing::warn!("audit log failed for {}: {}", req.path(), err);
     }
 }

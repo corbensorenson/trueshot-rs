@@ -422,7 +422,7 @@ impl StreamEncoder {
         for &idx in &mesh.indices {
             let delta = (idx as i32) - (prev_idx as i32);
             // Variable-length encoding
-            if delta >= -127 && delta <= 127 {
+            if (-127..=127).contains(&delta) {
                 data.push(delta as i8 as u8);
             } else {
                 data.push(0x80); // Escape

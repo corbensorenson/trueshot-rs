@@ -876,7 +876,7 @@ impl AvatarCaptureSession {
             .get("head")
             .cloned()
             .unwrap_or_else(|| average_point(vertices));
-        let neck = joint_map.get("neck").cloned().unwrap_or_else(|| head);
+        let neck = joint_map.get("neck").cloned().unwrap_or(head);
         let height = body_height_from_vertices(vertices);
         let face_radius = 0.14 * height;
 
@@ -1442,7 +1442,7 @@ fn compute_skin_weights_for_vertices(
 
         for (slot, (joint_idx, dist)) in distances.iter().take(4).enumerate() {
             let w = 1.0 / (dist + 1e-4);
-            joint_ids[slot] = (*joint_idx as u8).min(u8::MAX);
+            joint_ids[slot] = *joint_idx as u8;
             joint_weights[slot] = w;
             total += w;
         }
@@ -1563,10 +1563,8 @@ fn push_clothing_layer(
         return;
     }
 
-    let skin_weights = match compute_skin_weights_for_vertices(&layer_vertices, skeleton) {
-        Ok(weights) => weights,
-        Err(_) => Vec::new(),
-    };
+    let skin_weights =
+        compute_skin_weights_for_vertices(&layer_vertices, skeleton).unwrap_or_default();
 
     layers.push(ClothingLayer {
         id: id.to_string(),

@@ -31,7 +31,9 @@ impl SegmentationEngine {
     pub fn new(model_path: &str) -> anyhow::Result<Self> {
         let path = model_path.trim();
         if path.is_empty() {
-            return Ok(Self { backend: SegmentationBackend::Heuristic });
+            return Ok(Self {
+                backend: SegmentationBackend::Heuristic,
+            });
         }
 
         let model_path = Path::new(path);
@@ -57,10 +59,7 @@ impl SegmentationEngine {
             .commit_from_file(model_path)
             .context("Failed to load ONNX segmentation model")?;
 
-        let input = session
-            .inputs
-            .get(0)
-            .context("ONNX model has no inputs")?;
+        let input = session.inputs.first().context("ONNX model has no inputs")?;
         let input_name = input.name.clone();
         let layout = infer_layout(&input.input_type);
         let (target_width, target_height) = infer_target_dimensions(&input.input_type, layout);
@@ -155,7 +154,8 @@ fn run_onnx_segmentation(
     let mut mask = build_mask_from_output(shape, data)?;
 
     if mask.dimensions() != (orig_w, orig_h) {
-        mask = image::imageops::resize(&mask, orig_w, orig_h, image::imageops::FilterType::Lanczos3);
+        mask =
+            image::imageops::resize(&mask, orig_w, orig_h, image::imageops::FilterType::Lanczos3);
     }
 
     Ok(mask)
@@ -165,7 +165,7 @@ fn build_input_nchw(rgb: &image::RgbImage) -> (Vec<usize>, Vec<f32>) {
     let (width, height) = rgb.dimensions();
     let h = height as usize;
     let w = width as usize;
-    let mut data = vec![0.0f32; 1 * 3 * h * w];
+    let mut data = vec![0.0f32; 3 * h * w];
     for y in 0..h {
         for x in 0..w {
             let pixel = rgb.get_pixel(x as u32, y as u32);
@@ -173,8 +173,8 @@ fn build_input_nchw(rgb: &image::RgbImage) -> (Vec<usize>, Vec<f32>) {
             let g = pixel[1] as f32 / 255.0;
             let b = pixel[2] as f32 / 255.0;
             let base = y * w + x;
-            data[0 * h * w + base] = r;
-            data[1 * h * w + base] = g;
+            data[base] = r;
+            data[h * w + base] = g;
             data[2 * h * w + base] = b;
         }
     }
@@ -185,7 +185,7 @@ fn build_input_nhwc(rgb: &image::RgbImage) -> (Vec<usize>, Vec<f32>) {
     let (width, height) = rgb.dimensions();
     let h = height as usize;
     let w = width as usize;
-    let mut data = vec![0.0f32; 1 * h * w * 3];
+    let mut data = vec![0.0f32; h * w * 3];
     for y in 0..h {
         for x in 0..w {
             let pixel = rgb.get_pixel(x as u32, y as u32);
@@ -277,7 +277,11 @@ fn build_mask_from_output(shape: &ort::tensor::Shape, data: &[f32]) -> anyhow::R
     let mut values = vec![0.0f32; height * width];
     for idx in 0..values.len() {
         let raw = data.get(idx).copied().unwrap_or(0.0);
-        values[idx] = if use_sigmoid { 1.0 / (1.0 + (-raw).exp()) } else { raw };
+        values[idx] = if use_sigmoid {
+            1.0 / (1.0 + (-raw).exp())
+        } else {
+            raw
+        };
     }
 
     let threshold = otsu_threshold(&values);
@@ -310,7 +314,10 @@ fn infer_layout(value_type: &ValueType) -> ModelLayout {
     }
 }
 
-fn infer_target_dimensions(value_type: &ValueType, layout: ModelLayout) -> (Option<u32>, Option<u32>) {
+fn infer_target_dimensions(
+    value_type: &ValueType,
+    layout: ModelLayout,
+) -> (Option<u32>, Option<u32>) {
     if let ValueType::Tensor { shape, .. } = value_type {
         if shape.len() == 4 {
             let (h, w) = match layout {
@@ -389,14 +396,13 @@ fn sobel_magnitude(luma: &[f32], width: usize, height: usize) -> Vec<f32> {
     let idx = |x: usize, y: usize| y * width + x;
     for y in 1..height - 1 {
         for x in 1..width - 1 {
-            let gx = -1.0 * luma[idx(x - 1, y - 1)]
-                + 1.0 * luma[idx(x + 1, y - 1)]
+            let gx = -luma[idx(x - 1, y - 1)] + 1.0 * luma[idx(x + 1, y - 1)]
                 - 2.0 * luma[idx(x - 1, y)]
                 + 2.0 * luma[idx(x + 1, y)]
                 - 1.0 * luma[idx(x - 1, y + 1)]
                 + 1.0 * luma[idx(x + 1, y + 1)];
 
-            let gy = -1.0 * luma[idx(x - 1, y - 1)]
+            let gy = -luma[idx(x - 1, y - 1)]
                 - 2.0 * luma[idx(x, y - 1)]
                 - 1.0 * luma[idx(x + 1, y - 1)]
                 + 1.0 * luma[idx(x - 1, y + 1)]

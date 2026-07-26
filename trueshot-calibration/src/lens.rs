@@ -1,8 +1,8 @@
 use anyhow::Result;
 #[cfg(feature = "opencv")]
 use opencv::{
-    core::{self, Mat, Point2f, Point3f, Size, TermCriteria, Vector},
     calib3d,
+    core::{self, Mat, Point2f, Point3f, Size, TermCriteria, Vector},
     imgproc,
     prelude::*,
     types::VectorOfPoint3f,
@@ -35,24 +35,25 @@ pub fn calibrate_checkerboard(
     // The checkerboard typically has (rows-1) * (cols-1) internal corners
     let pattern_size = Size::new(cols - 1, rows - 1);
     let mut obj_points_vec = VectorOfPoint3f::new();
-    
+
     // Create the standard grid of points (Z=0)
     for i in 0..pattern_size.height {
         for j in 0..pattern_size.width {
-             obj_points_vec.push(Point3f::new(
-                 j as f32 * square_size_mm,
-                 i as f32 * square_size_mm,
-                 0.0
-             ));
+            obj_points_vec.push(Point3f::new(
+                j as f32 * square_size_mm,
+                i as f32 * square_size_mm,
+                0.0,
+            ));
         }
     }
 
     let mut object_points = Vector::<VectorOfPoint3f>::new();
-    let mut image_points = Vector::<Vector::<Point2f>>::new();
+    let mut image_points = Vector::<Vector<Point2f>>::new();
     let mut image_size = Size::default();
 
     for path in image_paths {
-        let img = opencv::imgcodecs::imread(path.to_str().unwrap(), opencv::imgcodecs::IMREAD_GRAYSCALE)?;
+        let img =
+            opencv::imgcodecs::imread(path.to_str().unwrap(), opencv::imgcodecs::IMREAD_GRAYSCALE)?;
         if img.empty() {
             tracing::warn!("Failed to load image: {:?}", path);
             continue;
@@ -87,7 +88,10 @@ pub fn calibrate_checkerboard(
     }
 
     if image_points.len() < 5 {
-        anyhow::bail!("Not enough valid images for calibration (need 5+, got {})", image_points.len());
+        anyhow::bail!(
+            "Not enough valid images for calibration (need 5+, got {})",
+            image_points.len()
+        );
     }
 
     // Run calibration

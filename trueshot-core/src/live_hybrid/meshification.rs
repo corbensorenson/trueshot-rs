@@ -766,7 +766,7 @@ impl MeshificationPipeline {
                     geometry: MeshData {
                         vertices: vertices.to_vec(),
                         indices: indices.to_vec(),
-                        name: format!("lod_0"),
+                        name: "lod_0".to_string(),
                     },
                     distance_threshold: 0.0,
                 });
@@ -806,7 +806,7 @@ impl MeshificationPipeline {
         MeshData {
             vertices: vertices.to_vec(),
             indices: new_indices,
-            name: format!("decimated"),
+            name: "decimated".to_string(),
         }
     }
 
@@ -848,13 +848,13 @@ fn sh_basis_2(dir: &na::Vector3<f32>) -> [f32; 9] {
     let y = dir.y;
     let z = dir.z;
 
-    let c0 = 0.28209479177387814f32;
-    let c1 = 0.4886025119029199f32;
-    let c2_0 = 1.0925484305920792f32;
-    let c2_1 = -1.0925484305920792f32;
-    let c2_2 = 0.31539156525252005f32;
-    let c2_3 = -1.0925484305920792f32;
-    let c2_4 = 0.5462742152960396f32;
+    let c0 = 0.282_094_8_f32;
+    let c1 = 0.488_602_52_f32;
+    let c2_0 = 1.092_548_5_f32;
+    let c2_1 = -1.092_548_5_f32;
+    let c2_2 = 0.315_391_57_f32;
+    let c2_3 = -1.092_548_5_f32;
+    let c2_4 = 0.546_274_24_f32;
 
     [
         c0,

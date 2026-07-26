@@ -1,4 +1,4 @@
-use trueshot_core::vision::{autocrop, markers};
+use crate::{autocrop, markers};
 use image::{DynamicImage, RgbImage};
 
 #[test]
@@ -10,11 +10,11 @@ fn test_autocrop_logic() {
             mask[y * 100 + x] = 255;
         }
     }
-    
+
     let bounds = autocrop::calculate_bounds_from_mask(&mask, 100, 100);
     assert!(bounds.is_some());
     let (x, y, w, h) = bounds.unwrap();
-    // Padding logic: 10px pad. 
+    // Padding logic: 10px pad.
     // Center 45..55 (size 10). Min=45-10=35. Max=55+10=65. W=30?
     // Let's just assert it contains the center.
     assert!(x <= 45);

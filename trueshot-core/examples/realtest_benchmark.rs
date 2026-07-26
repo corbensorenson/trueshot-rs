@@ -5,22 +5,20 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde::Serialize;
 use image::{DynamicImage, GrayImage, RgbImage};
+use serde::Serialize;
 
+use trueshot_core::ai::segmentation::SegmentationEngine;
+use trueshot_core::metrics::geometry_metrics::{
+    compute_geometry_metrics, load_point_cloud_with_normals, GeometryMetrics,
+    GeometryMetricsOptions,
+};
+use trueshot_core::metrics::image_metrics::{psnr_rgb_u8, ssim_luma_u8};
+use trueshot_core::nef::parser::Z9NefParser;
 use trueshot_core::object_detection::detect_object_bbox;
 use trueshot_core::smart_loader::SmartLoader;
 use trueshot_core::timing::{HierarchicalTimer, TimingStats};
 use trueshot_core::types::ProcessingOptions;
-use trueshot_core::ai::segmentation::SegmentationEngine;
-use trueshot_core::nef::parser::Z9NefParser;
-use trueshot_core::metrics::image_metrics::{psnr_rgb_u8, ssim_luma_u8};
-use trueshot_core::metrics::geometry_metrics::{
-    compute_geometry_metrics,
-    load_point_cloud_with_normals,
-    GeometryMetrics,
-    GeometryMetricsOptions,
-};
 
 #[derive(Serialize)]
 struct SequenceMetrics {
@@ -69,7 +67,15 @@ struct DatasetMetrics {
     sequences: Vec<SequenceMetrics>,
 }
 
-fn parse_args() -> Result<(PathBuf, PathBuf, Option<PathBuf>, Option<PathBuf>, Option<PathBuf>, Option<PathBuf>, Option<PathBuf>)> {
+fn parse_args() -> Result<(
+    PathBuf,
+    PathBuf,
+    Option<PathBuf>,
+    Option<PathBuf>,
+    Option<PathBuf>,
+    Option<PathBuf>,
+    Option<PathBuf>,
+)> {
     let mut args = env::args().skip(1);
     let input = args.next().context("usage: realtest_benchmark <nef_dir> [--out <path>] [--gt <dir>] [--gt-mesh <dir>] [--pred-mesh <dir>] [--gt-mask <dir>] [--seg-model <path>]")?;
     let mut out_path: Option<PathBuf> = None;
@@ -106,7 +112,15 @@ fn parse_args() -> Result<(PathBuf, PathBuf, Option<PathBuf>, Option<PathBuf>, O
         Utc::now().format("%Y%m%dT%H%M%SZ")
     ));
 
-    Ok((PathBuf::from(input), out_path.unwrap_or(default_out), gt_dir, gt_mesh_dir, pred_mesh_dir, gt_mask_dir, seg_model_path))
+    Ok((
+        PathBuf::from(input),
+        out_path.unwrap_or(default_out),
+        gt_dir,
+        gt_mesh_dir,
+        pred_mesh_dir,
+        gt_mask_dir,
+        seg_model_path,
+    ))
 }
 
 fn compute_bbox_coverage(path: &Path) -> Result<(f64, u32, u32)> {
@@ -169,7 +183,10 @@ fn find_gt_mask(gt_dir: &Path, nef_path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn compute_preview_metrics(seq: &trueshot_core::types::Sequence, gt_dir: &Path) -> Result<(Option<f64>, Option<f64>, usize)> {
+fn compute_preview_metrics(
+    seq: &trueshot_core::types::Sequence,
+    gt_dir: &Path,
+) -> Result<(Option<f64>, Option<f64>, usize)> {
     if seq.paths.is_empty() {
         return Ok((None, None, 0));
     }
@@ -182,7 +199,12 @@ fn compute_preview_metrics(seq: &trueshot_core::types::Sequence, gt_dir: &Path) 
     let mut gt = load_gt_image(&gt_path)?;
 
     if preview.width() != gt.width() || preview.height() != gt.height() {
-        let resized = image::imageops::resize(&gt, preview.width(), preview.height(), image::imageops::FilterType::Lanczos3);
+        let resized = image::imageops::resize(
+            &gt,
+            preview.width(),
+            preview.height(),
+            image::imageops::FilterType::Lanczos3,
+        );
         gt = resized;
     }
 
@@ -211,7 +233,12 @@ fn compute_segmentation_metrics(
     let mut gt_mask = load_gt_mask(&gt_path)?;
 
     if pred_mask.dimensions() != gt_mask.dimensions() {
-        gt_mask = image::imageops::resize(&gt_mask, pred_mask.width(), pred_mask.height(), image::imageops::FilterType::Nearest);
+        gt_mask = image::imageops::resize(
+            &gt_mask,
+            pred_mask.width(),
+            pred_mask.height(),
+            image::imageops::FilterType::Nearest,
+        );
     }
 
     let (iou, dice) = match compute_iou_dice(&pred_mask, &gt_mask) {
@@ -291,27 +318,42 @@ fn compute_geometry_for_sequence(
     let stem = ref_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let gt_path = match find_mesh_file(gt_mesh_dir, stem) {
         Some(path) => path,
-        None => return Ok((None, 0)),
+        None => {
+            return Ok((
+                GeometryMetrics {
+                    chamfer: None,
+                    hausdorff: None,
+                    fscore: None,
+                    precision: None,
+                    recall: None,
+                    normal_consistency: None,
+                },
+                0,
+            ))
+        }
     };
     let pred_path = match find_mesh_file(pred_mesh_dir, stem) {
         Some(path) => path,
-        None => return Ok((
-            GeometryMetrics {
-                chamfer: None,
-                hausdorff: None,
-                fscore: None,
-                precision: None,
-                recall: None,
-                normal_consistency: None,
-            },
-            0,
-        )),
+        None => {
+            return Ok((
+                GeometryMetrics {
+                    chamfer: None,
+                    hausdorff: None,
+                    fscore: None,
+                    precision: None,
+                    recall: None,
+                    normal_consistency: None,
+                },
+                0,
+            ))
+        }
     };
 
     let gt_cloud = load_point_cloud_with_normals(&gt_path)?;
     let pred_cloud = load_point_cloud_with_normals(&pred_path)?;
     let metrics = compute_geometry_metrics(&pred_cloud, &gt_cloud, options);
-    Ok((metrics, if metrics.chamfer.is_some() { 1 } else { 0 }))
+    let matched = usize::from(metrics.chamfer.is_some());
+    Ok((metrics, matched))
 }
 
 fn geometry_options_from_env() -> GeometryMetricsOptions {
@@ -339,26 +381,41 @@ fn geometry_options_from_env() -> GeometryMetricsOptions {
 }
 
 fn main() -> Result<()> {
-    let (input_dir, out_path, gt_dir, gt_mesh_dir, pred_mesh_dir, gt_mask_dir, seg_model_path) = parse_args()?;
-    let input_dir = input_dir.canonicalize().context("failed to resolve input dir")?;
+    let (input_dir, out_path, gt_dir, gt_mesh_dir, pred_mesh_dir, gt_mask_dir, seg_model_path) =
+        parse_args()?;
+    let input_dir = input_dir
+        .canonicalize()
+        .context("failed to resolve input dir")?;
     let gt_dir = match gt_dir {
         Some(path) => Some(path.canonicalize().context("failed to resolve gt dir")?),
         None => None,
     };
     let gt_mesh_dir = match gt_mesh_dir {
-        Some(path) => Some(path.canonicalize().context("failed to resolve gt mesh dir")?),
+        Some(path) => Some(
+            path.canonicalize()
+                .context("failed to resolve gt mesh dir")?,
+        ),
         None => None,
     };
     let pred_mesh_dir = match pred_mesh_dir {
-        Some(path) => Some(path.canonicalize().context("failed to resolve pred mesh dir")?),
+        Some(path) => Some(
+            path.canonicalize()
+                .context("failed to resolve pred mesh dir")?,
+        ),
         None => None,
     };
     let gt_mask_dir = match gt_mask_dir {
-        Some(path) => Some(path.canonicalize().context("failed to resolve gt mask dir")?),
+        Some(path) => Some(
+            path.canonicalize()
+                .context("failed to resolve gt mask dir")?,
+        ),
         None => None,
     };
     let seg_model_path = match seg_model_path {
-        Some(path) => Some(path.canonicalize().context("failed to resolve segmentation model path")?),
+        Some(path) => Some(
+            path.canonicalize()
+                .context("failed to resolve segmentation model path")?,
+        ),
         None => None,
     };
 
@@ -402,7 +459,9 @@ fn main() -> Result<()> {
         } else {
             (None, None, 0)
         };
-        let (geometry_metrics, mesh_match) = if let (Some(gt_mesh), Some(pred_mesh)) = (gt_mesh_dir.as_ref(), pred_mesh_dir.as_ref()) {
+        let (geometry_metrics, mesh_match) = if let (Some(gt_mesh), Some(pred_mesh)) =
+            (gt_mesh_dir.as_ref(), pred_mesh_dir.as_ref())
+        {
             compute_geometry_for_sequence(seq, gt_mesh, pred_mesh, &geometry_options)?
         } else {
             (
@@ -423,11 +482,12 @@ fn main() -> Result<()> {
         let precision = geometry_metrics.precision;
         let recall = geometry_metrics.recall;
         let normal_consistency = geometry_metrics.normal_consistency;
-        let (seg_iou, seg_dice, seg_match) = if let (Some(mask_dir), Some(engine)) = (gt_mask_dir.as_ref(), seg_engine.as_mut()) {
-            compute_segmentation_metrics(seq, mask_dir, engine)?
-        } else {
-            (None, None, 0)
-        };
+        let (seg_iou, seg_dice, seg_match) =
+            if let (Some(mask_dir), Some(engine)) = (gt_mask_dir.as_ref(), seg_engine.as_mut()) {
+                compute_segmentation_metrics(seq, mask_dir, engine)?
+            } else {
+                (None, None, 0)
+            };
         if let Some(value) = psnr_db {
             psnr_values.push(value);
         }

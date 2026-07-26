@@ -509,16 +509,23 @@ mod tests {
             }
         }
 
-        let mask = Array2::<bool>::from_elem((100, 100), true);
-        let params = GradingParams::default();
+        let mut mask = Array2::<bool>::from_elem((100, 100), true);
+        for y in 50..100 {
+            for x in 50..100 {
+                mask[[y, x]] = false;
+            }
+        }
+        let params = GradingParams {
+            percentile_thresholds: [75.0, 50.0, 25.0],
+            ..GradingParams::default()
+        };
 
         let grades = grade_pixels(&sharpness, &mask, &params).unwrap();
         let stats = compute_grade_stats(&grades);
 
-        // Should have roughly equal distribution
-        assert!(stats.percent_a > 20.0 && stats.percent_a < 30.0);
-        assert!(stats.percent_b > 20.0 && stats.percent_b < 30.0);
-        assert!(stats.percent_c > 20.0 && stats.percent_c < 30.0);
-        assert!(stats.percent_d > 20.0 && stats.percent_d < 30.0);
+        assert_eq!(stats.count_a, 2_500);
+        assert_eq!(stats.count_b, 2_500);
+        assert_eq!(stats.count_c, 2_500);
+        assert_eq!(stats.count_d, 2_500);
     }
 }

@@ -10,11 +10,11 @@ use crate::fs_safety::{ensure_filename, resolve_project_child, resolve_project_c
 use crate::state::AppState;
 
 use trueshot_core::export::ply::{export_ply, PlyExportOptions};
-use trueshot_core::mesh::editing::{apply_mesh_edits, MeshEditOp};
-use trueshot_core::mesh::io::load_mesh;
 use trueshot_core::gaussian_splatting::splat_edit::{
     apply_splat_edits, load_splat, save_splat, save_spz, SplatEditOp,
 };
+use trueshot_core::mesh::editing::{apply_mesh_edits, MeshEditOp};
+use trueshot_core::mesh::io::load_mesh;
 
 #[derive(Debug, Deserialize)]
 pub struct MeshEditRequest {
@@ -76,7 +76,12 @@ pub async fn edit_mesh(
     if input.is_empty() {
         return HttpResponse::BadRequest().body("Missing input_path");
     }
-    let input_path = match resolve_project_child_file(&state.config.paths.projects_dir, &project_id, "output", input) {
+    let input_path = match resolve_project_child_file(
+        &state.config.paths.projects_dir,
+        &project_id,
+        "output",
+        input,
+    ) {
         Ok(path) => path,
         Err(resp) => return resp,
     };
@@ -88,10 +93,13 @@ pub async fn edit_mesh(
     if output_format != "ply" {
         return HttpResponse::BadRequest().body("Only ply output_format is supported");
     }
-    let output_dir = match resolve_project_child(&state.config.paths.projects_dir, &project_id, "output") {
-        Ok(path) => path.join("edits").join(Utc::now().format("%Y%m%dT%H%M%SZ").to_string()),
-        Err(resp) => return resp,
-    };
+    let output_dir =
+        match resolve_project_child(&state.config.paths.projects_dir, &project_id, "output") {
+            Ok(path) => path
+                .join("edits")
+                .join(Utc::now().format("%Y%m%dT%H%M%SZ").to_string()),
+            Err(resp) => return resp,
+        };
     if let Err(err) = tokio::fs::create_dir_all(&output_dir).await {
         return HttpResponse::InternalServerError().body(err.to_string());
     }
@@ -113,15 +121,20 @@ pub async fn edit_mesh(
                 created_at: Utc::now().to_rfc3339(),
                 asset_type: "mesh".to_string(),
                 input_path: input.to_string(),
-                output_path: format!("output/edits/{}/{}", output_dir.file_name().unwrap().to_string_lossy(), output_name),
+                output_path: format!(
+                    "output/edits/{}/{}",
+                    output_dir.file_name().unwrap().to_string_lossy(),
+                    output_name
+                ),
                 operations: serde_json::to_value(&payload.ops).unwrap_or(serde_json::json!([])),
             };
-            let history_path = match append_edit_history(&state.config.paths.projects_dir, &project_id, entry) {
-                Ok(path) => path,
-                Err(err) => {
-                    return HttpResponse::InternalServerError().body(err.to_string());
-                }
-            };
+            let history_path =
+                match append_edit_history(&state.config.paths.projects_dir, &project_id, entry) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return HttpResponse::InternalServerError().body(err.to_string());
+                    }
+                };
             HttpResponse::Ok().json(EditResponse {
                 id: Uuid::new_v4().to_string(),
                 output_path: output_path.to_string_lossy().to_string(),
@@ -160,14 +173,22 @@ pub async fn edit_splat(
     if input.is_empty() {
         return HttpResponse::BadRequest().body("Missing input_path");
     }
-    let input_path = match resolve_project_child_file(&state.config.paths.projects_dir, &project_id, "output", input) {
+    let input_path = match resolve_project_child_file(
+        &state.config.paths.projects_dir,
+        &project_id,
+        "output",
+        input,
+    ) {
         Ok(path) => path,
         Err(resp) => return resp,
     };
-    let output_dir = match resolve_project_child(&state.config.paths.projects_dir, &project_id, "output") {
-        Ok(path) => path.join("edits").join(Utc::now().format("%Y%m%dT%H%M%SZ").to_string()),
-        Err(resp) => return resp,
-    };
+    let output_dir =
+        match resolve_project_child(&state.config.paths.projects_dir, &project_id, "output") {
+            Ok(path) => path
+                .join("edits")
+                .join(Utc::now().format("%Y%m%dT%H%M%SZ").to_string()),
+            Err(resp) => return resp,
+        };
     if let Err(err) = tokio::fs::create_dir_all(&output_dir).await {
         return HttpResponse::InternalServerError().body(err.to_string());
     }
@@ -190,15 +211,20 @@ pub async fn edit_splat(
                 created_at: Utc::now().to_rfc3339(),
                 asset_type: "splat".to_string(),
                 input_path: input.to_string(),
-                output_path: format!("output/edits/{}/{}", output_dir.file_name().unwrap().to_string_lossy(), output_name),
+                output_path: format!(
+                    "output/edits/{}/{}",
+                    output_dir.file_name().unwrap().to_string_lossy(),
+                    output_name
+                ),
                 operations: serde_json::to_value(&payload.ops).unwrap_or(serde_json::json!([])),
             };
-            let history_path = match append_edit_history(&state.config.paths.projects_dir, &project_id, entry) {
-                Ok(path) => path,
-                Err(err) => {
-                    return HttpResponse::InternalServerError().body(err.to_string());
-                }
-            };
+            let history_path =
+                match append_edit_history(&state.config.paths.projects_dir, &project_id, entry) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return HttpResponse::InternalServerError().body(err.to_string());
+                    }
+                };
             HttpResponse::Ok().json(EditResponse {
                 id: Uuid::new_v4().to_string(),
                 output_path: output_path.to_string_lossy().to_string(),
@@ -250,7 +276,12 @@ fn apply_mesh_edit_pipeline(input: &Path, output: &Path, ops: &[MeshEditOp]) -> 
     Ok(())
 }
 
-fn apply_splat_edit_pipeline(input: &Path, output: &Path, ops: &[SplatEditOp], write_spz_file: bool) -> Result<()> {
+fn apply_splat_edit_pipeline(
+    input: &Path,
+    output: &Path,
+    ops: &[SplatEditOp],
+    write_spz_file: bool,
+) -> Result<()> {
     let points = load_splat(input)?;
     let edited = apply_splat_edits(points, ops);
     save_splat(output, &edited)?;

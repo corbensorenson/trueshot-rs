@@ -292,10 +292,8 @@ impl Analyzer {
             for x in 0..w {
                 if mask[[y, x]] > 128 {
                     area += 1;
-                    if is_boundary_pixel(mask, x, y) {
-                        if (x + y) % 2 == 0 {
-                            boundary_points.push((x as i32, y as i32));
-                        }
+                    if is_boundary_pixel(mask, x, y) && (x + y) % 2 == 0 {
+                        boundary_points.push((x as i32, y as i32));
                     }
                 }
             }

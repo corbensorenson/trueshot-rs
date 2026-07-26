@@ -411,7 +411,7 @@ impl GaussianCloud {
             .transform
             .try_inverse()
             .unwrap_or(na::Matrix4::identity());
-        let rot = view_matrix.fixed_slice::<3, 3>(0, 0).into_owned();
+        let rot = view_matrix.fixed_view::<3, 3>(0, 0).into_owned();
         let rot_t = rot.transpose();
         let fx = camera.intrinsics[(0, 0)];
         let fy = camera.intrinsics[(1, 1)];
@@ -711,7 +711,7 @@ impl GaussianCloud {
 
 fn sh_dc_to_srgb(sh_coeffs: &[f32]) -> (u8, u8, u8) {
     let c0 = 0.28209479;
-    let r = sh_coeffs.get(0).copied().unwrap_or(0.0) * c0 + 0.5;
+    let r = sh_coeffs.first().copied().unwrap_or(0.0) * c0 + 0.5;
     let g = sh_coeffs.get(SH_COEFFS_PER_CHANNEL).copied().unwrap_or(0.0) * c0 + 0.5;
     let b = sh_coeffs
         .get(SH_COEFFS_PER_CHANNEL * 2)
@@ -831,23 +831,23 @@ fn eval_sh_basis(view_dir: na::Vector3<f32>) -> [f32; SH_COEFFS_PER_CHANNEL] {
     let xx2 = xx * xx;
     let yy2 = yy * yy;
 
-    let c0 = 0.2820947918f32;
-    let c1 = 0.4886025119f32;
-    let c2_0 = 1.0925484306f32;
-    let c2_1 = 0.3153915653f32;
-    let c2_2 = 0.5462742153f32;
-    let c3_0 = 0.5900435899f32;
-    let c3_1 = 2.8906114426f32;
-    let c3_2 = 0.4570457995f32;
-    let c3_3 = 0.3731763326f32;
-    let c3_4 = 1.4453057213f32;
-    let c4_0 = 2.5033429418f32;
-    let c4_1 = 1.7701307698f32;
-    let c4_2 = 0.9461746958f32;
-    let c4_3 = 0.6690465436f32;
-    let c4_4 = 0.1057855469f32;
-    let c4_6 = 0.4730873479f32;
-    let c4_8 = 0.6258357354f32;
+    let c0 = 0.282_094_8_f32;
+    let c1 = 0.488_602_52_f32;
+    let c2_0 = 1.092_548_5_f32;
+    let c2_1 = 0.315_391_57_f32;
+    let c2_2 = 0.546_274_24_f32;
+    let c3_0 = 0.590_043_6_f32;
+    let c3_1 = 2.890_611_4_f32;
+    let c3_2 = 0.457_045_8_f32;
+    let c3_3 = 0.373_176_34_f32;
+    let c3_4 = 1.445_305_7_f32;
+    let c4_0 = 2.503_342_9_f32;
+    let c4_1 = 1.770_130_8_f32;
+    let c4_2 = 0.946_174_7_f32;
+    let c4_3 = 0.669_046_5_f32;
+    let c4_4 = 0.105_785_55_f32;
+    let c4_6 = 0.473_087_34_f32;
+    let c4_8 = 0.625_835_7_f32;
 
     [
         c0,

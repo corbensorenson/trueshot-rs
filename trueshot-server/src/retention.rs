@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use sha2::{Digest, Sha256};
 
 use crate::audit::AuditRecord;
 use crate::state::AppState;
@@ -106,7 +106,7 @@ fn project_age_days(project_dir: &Path, now: DateTime<Utc>) -> Option<i64> {
     std::fs::metadata(project_dir)
         .and_then(|m| m.modified().or_else(|_| m.created()))
         .ok()
-        .map(|time| DateTime::<Utc>::from(time))
+        .map(DateTime::<Utc>::from)
         .map(|ts| (now - ts).num_days())
 }
 

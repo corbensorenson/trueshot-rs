@@ -233,10 +233,9 @@ impl ObjectSegmenter {
                 }
 
                 let dist = na::distance(&track.current.centroid, &seg.centroid);
-                if dist < self.cluster_distance * 2.0 {
-                    if best_match.map_or(true, |(_, d)| dist < d) {
-                        best_match = Some((i, dist));
-                    }
+                if dist < self.cluster_distance * 2.0 && best_match.map_or(true, |(_, d)| dist < d)
+                {
+                    best_match = Some((i, dist));
                 }
             }
 

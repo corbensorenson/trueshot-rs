@@ -1,22 +1,22 @@
 //! Guest Portal API - Event Management & Crowd-Source Capture (Actix-web)
-//! 
+//!
 //! Enables crowd-sourced video capture from guests' phones at events.
 //! Also includes SlavePhone mode for server-controlled capture.
 
 pub mod slave;
 
-use actix_web::{get, post, put, delete, web, HttpRequest, HttpResponse, Responder};
+use crate::auth::{require_admin, require_scope};
+use crate::config::AppConfig;
+use crate::fs_safety::available_space_bytes;
 use actix_web::http::StatusCode;
+use actix_web::{delete, get, post, put, web, HttpRequest, HttpResponse, Responder};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
-use chrono::{DateTime, Utc};
+use tokio::sync::{broadcast, RwLock};
 use utoipa::ToSchema;
-use crate::auth::{require_admin, require_scope};
-use crate::fs_safety::available_space_bytes;
-use crate::config::AppConfig;
 use walkdir::WalkDir;
 
 pub use slave::SlavePhoneState;
@@ -150,11 +150,7 @@ pub struct GuestPortalState {
 }
 
 impl GuestPortalState {
-    pub fn new(
-        upload_dir: impl Into<String>,
-        max_total_bytes: u64,
-        min_free_bytes: u64,
-    ) -> Self {
+    pub fn new(upload_dir: impl Into<String>, max_total_bytes: u64, min_free_bytes: u64) -> Self {
         Self {
             events: Arc::new(RwLock::new(HashMap::new())),
             guests: Arc::new(RwLock::new(HashMap::new())),
@@ -165,10 +161,11 @@ impl GuestPortalState {
             min_free_bytes,
         }
     }
-    
+
     async fn get_broadcast(&self, event_id: &str) -> broadcast::Sender<String> {
         let mut channels = self.broadcast_tx.write().await;
-        channels.entry(event_id.to_string())
+        channels
+            .entry(event_id.to_string())
             .or_insert_with(|| broadcast::channel(100).0)
             .clone()
     }
@@ -234,10 +231,10 @@ pub async fn create_event(
     if let Err(e) = tokio::fs::create_dir_all(&event_dir).await {
         tracing::warn!("Failed to create guest upload dir {:?}: {}", event_dir, e);
     }
-    
+
     let mut events = state.events.write().await;
     events.insert(event.id.clone(), event.clone());
-    
+
     HttpResponse::Created().json(event)
 }
 
@@ -264,7 +261,7 @@ pub async fn get_event(
     }
     let event_id = path.into_inner();
     let events = state.events.read().await;
-    
+
     match events.get(&event_id) {
         Some(event) => HttpResponse::Ok().json(event),
         None => HttpResponse::NotFound().body("Event not found"),
@@ -296,12 +293,18 @@ pub async fn update_event(
     }
     let event_id = path.into_inner();
     let mut events = state.events.write().await;
-    
+
     match events.get_mut(&event_id) {
         Some(event) => {
-            if let Some(name) = &payload.name { event.name = name.clone(); }
-            if let Some(desc) = &payload.description { event.description = desc.clone(); }
-            if let Some(status) = &payload.status { event.status = *status; }
+            if let Some(name) = &payload.name {
+                event.name = name.clone();
+            }
+            if let Some(desc) = &payload.description {
+                event.description = desc.clone();
+            }
+            if let Some(status) = &payload.status {
+                event.status = *status;
+            }
             HttpResponse::Ok().json(event.clone())
         }
         None => HttpResponse::NotFound().body("Event not found"),
@@ -331,7 +334,7 @@ pub async fn delete_event(
     }
     let event_id = path.into_inner();
     let mut events = state.events.write().await;
-    
+
     if events.remove(&event_id).is_some() {
         HttpResponse::NoContent().finish()
     } else {
@@ -362,7 +365,7 @@ pub async fn activate_event(
     }
     let event_id = path.into_inner();
     let mut events = state.events.write().await;
-    
+
     match events.get_mut(&event_id) {
         Some(event) => {
             event.status = EventStatus::Active;
@@ -396,7 +399,7 @@ pub async fn guest_connect(
         return resp;
     }
     let event_id = path.into_inner();
-    
+
     // Check event exists
     let events = state.events.read().await;
     let event = match events.get(&event_id) {
@@ -405,7 +408,7 @@ pub async fn guest_connect(
         None => return HttpResponse::NotFound().body("Event not found"),
     };
     drop(events);
-    
+
     let session = GuestSession {
         id: uuid::Uuid::new_v4().to_string(),
         event_id: event_id.clone(),
@@ -415,10 +418,10 @@ pub async fn guest_connect(
         is_recording: false,
         recording_start: None,
     };
-    
+
     let mut guests = state.guests.write().await;
     guests.insert(session.id.clone(), session.clone());
-    
+
     HttpResponse::Ok().json(GuestConnectResponse {
         session_id: session.id,
         server_time: Utc::now(),
@@ -449,12 +452,13 @@ pub async fn list_guests(
     }
     let event_id = path.into_inner();
     let guests = state.guests.read().await;
-    
-    let event_guests: Vec<_> = guests.values()
+
+    let event_guests: Vec<_> = guests
+        .values()
         .filter(|g| g.event_id == event_id)
         .cloned()
         .collect();
-    
+
     HttpResponse::Ok().json(event_guests)
 }
 
@@ -471,9 +475,7 @@ pub async fn list_guests(
     )
 )]
 #[get("/api/guest/events/{event_id}/sync")]
-pub async fn time_sync(
-    req: HttpRequest,
-) -> impl Responder {
+pub async fn time_sync(req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_scope(&req, "guest:connect") {
         return resp;
     }
@@ -574,12 +576,13 @@ pub async fn list_recordings(
     }
     let event_id = path.into_inner();
     let recordings = state.recordings.read().await;
-    
-    let event_recordings: Vec<_> = recordings.values()
+
+    let event_recordings: Vec<_> = recordings
+        .values()
         .filter(|r| r.event_id == event_id)
         .cloned()
         .collect();
-    
+
     HttpResponse::Ok().json(event_recordings)
 }
 
@@ -599,7 +602,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         max_total_bytes,
         min_free_bytes,
     ));
-    
+
     cfg.app_data(state)
         .service(list_events)
         .service(create_event)

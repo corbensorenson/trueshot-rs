@@ -1,6 +1,6 @@
 use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use serde::{Deserialize, Serialize};
 use hex;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -104,7 +104,10 @@ pub async fn save_project_annotations(
         return resp;
     }
     let project_id = path.into_inner();
-    let layer = payload.layer.clone().unwrap_or_else(|| "default".to_string());
+    let layer = payload
+        .layer
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let author = req
         .extensions()
         .get::<crate::auth::AuthContext>()
@@ -137,9 +140,16 @@ pub(crate) fn load_annotations_for_asset(
     layer: &str,
 ) -> Result<AnnotationLayer, HttpResponse> {
     if !asset_path.starts_with("output/") && !asset_path.starts_with("processed/") {
-        return Err(HttpResponse::BadRequest().body("asset_path must begin with output/ or processed/"));
+        return Err(
+            HttpResponse::BadRequest().body("asset_path must begin with output/ or processed/")
+        );
     }
-    let annotations_path = annotation_file_path(&state.config.paths.projects_dir, project_id, asset_path, layer)?;
+    let annotations_path = annotation_file_path(
+        &state.config.paths.projects_dir,
+        project_id,
+        asset_path,
+        layer,
+    )?;
     if !annotations_path.exists() {
         let now = unix_timestamp();
         return Ok(AnnotationLayer {
@@ -167,9 +177,16 @@ pub(crate) fn save_annotations_for_asset(
     author: Option<String>,
 ) -> Result<AnnotationLayer, HttpResponse> {
     if !asset_path.starts_with("output/") && !asset_path.starts_with("processed/") {
-        return Err(HttpResponse::BadRequest().body("asset_path must begin with output/ or processed/"));
+        return Err(
+            HttpResponse::BadRequest().body("asset_path must begin with output/ or processed/")
+        );
     }
-    let annotations_path = annotation_file_path(&state.config.paths.projects_dir, project_id, asset_path, layer)?;
+    let annotations_path = annotation_file_path(
+        &state.config.paths.projects_dir,
+        project_id,
+        asset_path,
+        layer,
+    )?;
     if let Some(parent) = annotations_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;

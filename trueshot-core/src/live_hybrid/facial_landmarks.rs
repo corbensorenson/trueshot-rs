@@ -240,7 +240,7 @@ impl LandmarkKalmanFilter {
         let k =
             self.covariance * h.transpose() * s.try_inverse().unwrap_or(na::Matrix3::identity());
 
-        self.state = self.state + k * y;
+        self.state += k * y;
         self.covariance = (na::Matrix6::identity() - k * h) * self.covariance;
     }
 

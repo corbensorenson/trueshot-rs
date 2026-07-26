@@ -1101,7 +1101,7 @@ fn save_focus_stack(output_path: &Path, output: &RgbImage) -> anyhow::Result<()>
     let base_dir = output_path
         .parent()
         .unwrap_or_else(|| Path::new("focus_stacks"));
-    std::fs::create_dir_all(&base_dir)?;
+    std::fs::create_dir_all(base_dir)?;
     let file_name = output_path
         .file_name()
         .map(|value| value.to_string_lossy())

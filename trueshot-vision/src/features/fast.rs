@@ -1,10 +1,10 @@
 //! FAST (Features from Accelerated Segment Test) Corner Detection
-//! 
+//!
 //! Native Rust implementation - no OpenCV required.
 //! Reference: Rosten & Drummond, "Machine Learning for High-Speed Corner Detection"
 
-use image::GrayImage;
 use super::keypoint::Keypoint;
+use image::GrayImage;
 
 /// FAST corner detector
 pub struct FastDetector {
@@ -18,7 +18,7 @@ pub struct FastDetector {
 
 impl FastDetector {
     /// Create a new FAST detector
-    /// 
+    ///
     /// # Arguments
     /// * `threshold` - Intensity difference threshold (typically 10-50)
     /// * `nonmax_suppression` - Apply non-maximum suppression to reduce duplicates
@@ -33,8 +33,11 @@ impl FastDetector {
     /// Detect FAST corners in an image (PARALLELIZED with Rayon)
     pub fn detect(&self, image: &GrayImage) -> Vec<Keypoint> {
         use rayon::prelude::*;
-        
+
         let (width, height) = image.dimensions();
+        if width < 7 || height < 7 {
+            return Vec::new();
+        }
         let threshold = self.threshold;
         let n_contiguous = self.n_contiguous;
 
@@ -44,7 +47,9 @@ impl FastDetector {
             .flat_map(|y| {
                 let mut row_keypoints = Vec::new();
                 for x in 3..(width - 3) {
-                    if let Some(response) = is_corner_fast(image, x, y as u32, threshold, n_contiguous) {
+                    if let Some(response) =
+                        is_corner_fast(image, x, y as u32, threshold, n_contiguous)
+                    {
                         row_keypoints.push(Keypoint::new(x as f32, y as f32, response));
                     }
                 }
@@ -53,7 +58,7 @@ impl FastDetector {
             .collect();
 
         if self.nonmax_suppression {
-            self.apply_nonmax_suppression(&candidates)
+            self.apply_nonmax_suppression(&candidates, width, height)
         } else {
             candidates
         }
@@ -69,75 +74,87 @@ impl FastDetector {
 
 /// Standalone FAST corner check (for parallel processing)
 /// Returns Some(response) if corner, None otherwise
-fn is_corner_fast(image: &GrayImage, x: u32, y: u32, threshold: u8, n_contiguous: usize) -> Option<f32> {
+fn is_corner_fast(
+    image: &GrayImage,
+    x: u32,
+    y: u32,
+    threshold: u8,
+    n_contiguous: usize,
+) -> Option<f32> {
     let center = image.get_pixel(x, y)[0] as i16;
     let t = threshold as i16;
 
     // 16-pixel Bresenham circle offsets (radius 3)
     // Ordered for optimal early rejection
     let circle: [(i32, i32); 16] = [
-        (0, -3),   // 0 - top
-        (1, -3),   // 1
-        (2, -2),   // 2
-        (3, -1),   // 3
-        (3, 0),    // 4 - right
-        (3, 1),    // 5
-        (2, 2),    // 6
-        (1, 3),    // 7
-        (0, 3),    // 8 - bottom
-        (-1, 3),   // 9
-        (-2, 2),   // 10
-        (-3, 1),   // 11
-        (-3, 0),   // 12 - left
-        (-3, -1),  // 13
-        (-2, -2),  // 14
-        (-1, -3),  // 15
+        (0, -3),  // 0 - top
+        (1, -3),  // 1
+        (2, -2),  // 2
+        (3, -1),  // 3
+        (3, 0),   // 4 - right
+        (3, 1),   // 5
+        (2, 2),   // 6
+        (1, 3),   // 7
+        (0, 3),   // 8 - bottom
+        (-1, 3),  // 9
+        (-2, 2),  // 10
+        (-3, 1),  // 11
+        (-3, 0),  // 12 - left
+        (-3, -1), // 13
+        (-2, -2), // 14
+        (-1, -3), // 15
     ];
 
-    // Quick rejection: check pixels 0, 4, 8, 12 (cardinal points)
-    // At least 3 must be all brighter or all darker than center
-    let p0 = image.get_pixel((x as i32 + circle[0].0) as u32, (y as i32 + circle[0].1) as u32)[0] as i16;
-    let p4 = image.get_pixel((x as i32 + circle[4].0) as u32, (y as i32 + circle[4].1) as u32)[0] as i16;
-    let p8 = image.get_pixel((x as i32 + circle[8].0) as u32, (y as i32 + circle[8].1) as u32)[0] as i16;
-    let p12 = image.get_pixel((x as i32 + circle[12].0) as u32, (y as i32 + circle[12].1) as u32)[0] as i16;
+    // Any N-pixel circular arc must cross at least floor(N / 4) cardinal
+    // samples. FAST-9 therefore needs two, not the FAST-12 shortcut of three.
+    let p0 = image.get_pixel(
+        (x as i32 + circle[0].0) as u32,
+        (y as i32 + circle[0].1) as u32,
+    )[0] as i16;
+    let p4 = image.get_pixel(
+        (x as i32 + circle[4].0) as u32,
+        (y as i32 + circle[4].1) as u32,
+    )[0] as i16;
+    let p8 = image.get_pixel(
+        (x as i32 + circle[8].0) as u32,
+        (y as i32 + circle[8].1) as u32,
+    )[0] as i16;
+    let p12 = image.get_pixel(
+        (x as i32 + circle[12].0) as u32,
+        (y as i32 + circle[12].1) as u32,
+    )[0] as i16;
 
     let high = center + t;
     let low = center - t;
 
     // Count cardinal points that are brighter/darker
-    let brighter_count = (p0 > high) as u8 + (p4 > high) as u8 + (p8 > high) as u8 + (p12 > high) as u8;
+    let brighter_count =
+        (p0 > high) as u8 + (p4 > high) as u8 + (p8 > high) as u8 + (p12 > high) as u8;
     let darker_count = (p0 < low) as u8 + (p4 < low) as u8 + (p8 < low) as u8 + (p12 < low) as u8;
 
-    // Quick reject: need at least 3 cardinal points brighter or darker
-    if brighter_count < 3 && darker_count < 3 {
+    let required_cardinals = (n_contiguous / 4).max(1) as u8;
+    if brighter_count < required_cardinals && darker_count < required_cardinals {
         return None;
     }
 
     // Full segment test: check all 16 pixels
     let mut intensities = [0i16; 16];
     for (i, &(dx, dy)) in circle.iter().enumerate() {
-        intensities[i] = image.get_pixel(
-            (x as i32 + dx) as u32,
-            (y as i32 + dy) as u32
-        )[0] as i16;
+        intensities[i] = image.get_pixel((x as i32 + dx) as u32, (y as i32 + dy) as u32)[0] as i16;
     }
 
     // Check for N contiguous brighter pixels
     let brighter = count_contiguous(&intensities, |p| p > high);
     if brighter >= n_contiguous {
         // Corner response = sum of absolute differences
-        let response: f32 = intensities.iter()
-            .map(|&p| (p - center).abs() as f32)
-            .sum();
+        let response: f32 = intensities.iter().map(|&p| (p - center).abs() as f32).sum();
         return Some(response);
     }
 
     // Check for N contiguous darker pixels
     let darker = count_contiguous(&intensities, |p| p < low);
     if darker >= n_contiguous {
-        let response: f32 = intensities.iter()
-            .map(|&p| (p - center).abs() as f32)
-            .sum();
+        let response: f32 = intensities.iter().map(|&p| (p - center).abs() as f32).sum();
         return Some(response);
     }
 
@@ -168,36 +185,51 @@ where
 }
 
 impl FastDetector {
-    /// Apply non-maximum suppression (PARALLELIZED)
-    fn apply_nonmax_suppression(&self, keypoints: &[Keypoint]) -> Vec<Keypoint> {
+    /// Apply non-maximum suppression in linear time with a compact response map.
+    fn apply_nonmax_suppression(
+        &self,
+        keypoints: &[Keypoint],
+        width: u32,
+        height: u32,
+    ) -> Vec<Keypoint> {
         if keypoints.is_empty() {
             return Vec::new();
         }
 
-        let mut result = Vec::new();
-        let radius = 3.0f32;
-
-        for kp in keypoints {
-            let mut is_maximum = true;
-            
-            for other in keypoints {
-                if std::ptr::eq(kp, other) {
-                    continue;
-                }
-
-                let dist = kp.distance_to(other);
-                if dist < radius && other.response > kp.response {
-                    is_maximum = false;
-                    break;
-                }
-            }
-
-            if is_maximum {
-                result.push(kp.clone());
-            }
+        let width = width as usize;
+        let height = height as usize;
+        let mut responses = vec![f32::NEG_INFINITY; width * height];
+        for keypoint in keypoints {
+            let x = keypoint.x as usize;
+            let y = keypoint.y as usize;
+            responses[y * width + x] = responses[y * width + x].max(keypoint.response);
         }
 
-        result
+        keypoints
+            .iter()
+            .filter(|keypoint| {
+                let x = keypoint.x as usize;
+                let y = keypoint.y as usize;
+                let min_x = x.saturating_sub(2);
+                let max_x = (x + 2).min(width - 1);
+                let min_y = y.saturating_sub(2);
+                let max_y = (y + 2).min(height - 1);
+
+                for other_y in min_y..=max_y {
+                    for other_x in min_x..=max_x {
+                        let dx = other_x.abs_diff(x);
+                        let dy = other_y.abs_diff(y);
+                        if dx * dx + dy * dy < 9
+                            && responses[other_y * width + other_x] > keypoint.response
+                        {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -228,5 +260,11 @@ mod tests {
 
         // Should detect corners
         assert!(!keypoints.is_empty(), "Should detect at least one corner");
+    }
+
+    #[test]
+    fn small_images_return_no_features() {
+        let detector = FastDetector::new(20, true);
+        assert!(detector.detect(&GrayImage::new(6, 6)).is_empty());
     }
 }

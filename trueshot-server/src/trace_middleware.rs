@@ -70,8 +70,8 @@ where
         let fut = self.service.call(req);
         Box::pin(async move {
             let mut res = fut.instrument(span.clone()).await?;
-            span.record("http_status", &(res.status().as_u16() as i64));
-            span.record("latency_ms", &(start.elapsed().as_millis() as i64));
+            span.record("http_status", res.status().as_u16() as i64);
+            span.record("latency_ms", start.elapsed().as_millis() as i64);
             if let Some(trace_id) = trace_id {
                 let header_name = HeaderName::from_static("x-trace-id");
                 if let Ok(value) = HeaderValue::from_str(&trace_id) {

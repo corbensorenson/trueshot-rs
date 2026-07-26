@@ -206,7 +206,7 @@ fn process_tiles_on_gpu(gpu_ctx: &Arc<GpuContext>, tiles: &[TileData]) -> Result
     for (i, tile) in tiles.iter().enumerate() {
         tiles_by_size
             .entry((tile.width, tile.height))
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(i);
     }
 
@@ -319,12 +319,8 @@ fn process_single_tile_with_shader(
             });
 
     // Pass 1: Extract green channel
-    let extract_green_pipeline = create_compute_pipeline(
-        &gpu_ctx.device,
-        &shader,
-        &bind_group_layout,
-        "extract_green",
-    );
+    let extract_green_pipeline =
+        create_compute_pipeline(&gpu_ctx.device, shader, &bind_group_layout, "extract_green");
 
     let extract_green_bind_group = gpu_ctx
         .device
@@ -346,7 +342,7 @@ fn process_single_tile_with_shader(
     // Pass 2: Compute Laplacian
     let laplacian_pipeline = create_compute_pipeline(
         &gpu_ctx.device,
-        &shader,
+        shader,
         &bind_group_layout,
         "compute_laplacian",
     );
@@ -371,7 +367,7 @@ fn process_single_tile_with_shader(
     // Pass 3: Compute variance
     let variance_pipeline = create_compute_pipeline(
         &gpu_ctx.device,
-        &shader,
+        shader,
         &bind_group_layout,
         "compute_variance",
     );

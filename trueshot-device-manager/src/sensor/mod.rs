@@ -6,7 +6,7 @@
 
 pub mod leapmotion;
 
-pub use leapmotion::{LeapMotionController, LeapMotionMode, TrackedHand, HandGesture};
+pub use leapmotion::{HandGesture, LeapMotionController, LeapMotionMode, TrackedHand};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ pub struct SensorCapabilities {
     pub has_gyroscope: bool,
     pub frame_rate: Option<u32>,
     pub resolution: Option<(u32, u32)>,
-    pub tracking_range_mm: Option<(u32, u32)>,  // (min, max)
+    pub tracking_range_mm: Option<(u32, u32)>, // (min, max)
 }
 
 /// Generic sensor trait
@@ -40,10 +40,10 @@ pub trait Sensor: Send + Sync {
     fn name(&self) -> String;
     fn sensor_type(&self) -> SensorType;
     fn capabilities(&self) -> SensorCapabilities;
-    
+
     /// Poll for latest sensor data
     fn poll(&self) -> Result<SensorData>;
-    
+
     /// Check if sensor is connected and working
     fn is_connected(&self) -> bool;
 }
@@ -77,13 +77,15 @@ pub struct SensorManager {
 
 impl SensorManager {
     pub fn new() -> Self {
-        Self { sensors: Vec::new() }
+        Self {
+            sensors: Vec::new(),
+        }
     }
-    
+
     /// Detect and add available sensors
     pub fn detect_sensors(&mut self) -> Vec<String> {
         let mut added = Vec::new();
-        
+
         // Detect Leap Motion
         if let Some(index) = LeapMotionController::detect() {
             if let Ok(leap) = LeapMotionController::new(index) {
@@ -91,18 +93,19 @@ impl SensorManager {
                 self.sensors.push(std::sync::Arc::new(leap));
             }
         }
-        
+
         added
     }
-    
+
     /// Get sensor by ID
     pub fn get_sensor(&self, id: &str) -> Option<std::sync::Arc<dyn Sensor>> {
         self.sensors.iter().find(|s| s.id() == id).cloned()
     }
-    
+
     /// Get all hand tracking sensors
     pub fn hand_trackers(&self) -> Vec<std::sync::Arc<dyn Sensor>> {
-        self.sensors.iter()
+        self.sensors
+            .iter()
             .filter(|s| s.capabilities().has_hand_tracking)
             .cloned()
             .collect()

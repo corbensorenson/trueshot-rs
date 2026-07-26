@@ -1,16 +1,16 @@
-use anyhow::{Context, Result};
+use crate::config::PrivacyConfig;
+use crate::state::AppState;
+use actix_web::web;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
+use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rand::RngCore;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
-use crate::config::PrivacyConfig;
-use crate::state::AppState;
-use actix_web::web;
 use std::time::{Duration, SystemTime};
+use walkdir::WalkDir;
 
 const MAGIC: &[u8; 4] = b"TSE1";
 const VERSION: u8 = 1;
@@ -53,8 +53,9 @@ impl ProjectKeyStore {
     pub fn load_or_create(&self, project_id: &str) -> Result<[u8; 32]> {
         let wrapped_path = self.wrapped_key_path(project_id);
         if wrapped_path.exists() {
-            let bytes = std::fs::read(&wrapped_path)
-                .with_context(|| format!("Failed to read wrapped key: {}", wrapped_path.display()))?;
+            let bytes = std::fs::read(&wrapped_path).with_context(|| {
+                format!("Failed to read wrapped key: {}", wrapped_path.display())
+            })?;
             let record: WrappedKeyRecord = serde_json::from_slice(&bytes)
                 .with_context(|| format!("Invalid wrapped key JSON: {}", wrapped_path.display()))?;
             return unwrap_project_key(&self.master_key, &record);
@@ -81,12 +82,12 @@ impl ProjectKeyStore {
     }
 
     pub fn legacy_key_path(&self, project_id: &str) -> PathBuf {
-        let safe = project_id.replace('/', "_").replace('\\', "_");
+        let safe = project_id.replace(['/', '\\'], "_");
         self.root.join(format!("{safe}.key"))
     }
 
     pub fn wrapped_key_path(&self, project_id: &str) -> PathBuf {
-        let safe = project_id.replace('/', "_").replace('\\', "_");
+        let safe = project_id.replace(['/', '\\'], "_");
         self.root.join(format!("{safe}.json"))
     }
 
@@ -169,18 +170,26 @@ fn unwrap_project_key(master: &MasterKey, record: &WrappedKeyRecord) -> Result<[
 }
 
 pub fn project_marker_path(projects_dir: &Path, project_id: &str) -> PathBuf {
-    let safe = project_id.replace('/', "_").replace('\\', "_");
+    let safe = project_id.replace(['/', '\\'], "_");
     projects_dir
         .join("_security")
         .join("encrypted")
         .join(format!("{safe}.json"))
 }
 
-pub fn mark_project_encrypted(projects_dir: &Path, project_id: &str, scopes: &[String]) -> Result<()> {
+pub fn mark_project_encrypted(
+    projects_dir: &Path,
+    project_id: &str,
+    scopes: &[String],
+) -> Result<()> {
     let marker = project_marker_path(projects_dir, project_id);
     if let Some(parent) = marker.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create encryption marker dir: {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create encryption marker dir: {}",
+                parent.display()
+            )
+        })?;
     }
     let payload = serde_json::json!({
         "project_id": project_id,
@@ -222,11 +231,16 @@ pub fn policy_for_project(
     project_id: &str,
     config: &PrivacyConfig,
 ) -> Option<EncryptionPolicy> {
-    let default_scopes = vec!["raw".to_string(), "processed".to_string(), "output".to_string()];
+    let default_scopes = vec![
+        "raw".to_string(),
+        "processed".to_string(),
+        "output".to_string(),
+    ];
     let scopes = load_project_scopes(projects_dir, project_id)
         .or_else(|| config.encrypt_scopes.clone())
         .unwrap_or(default_scopes);
-    let enabled = config.encrypt_at_rest.unwrap_or(false) || project_marker_path(projects_dir, project_id).exists();
+    let enabled = config.encrypt_at_rest.unwrap_or(false)
+        || project_marker_path(projects_dir, project_id).exists();
     if !enabled {
         return None;
     }
@@ -245,7 +259,7 @@ pub fn require_master_key(config: &PrivacyConfig, projects_dir: &Path) -> Result
 
 pub fn load_master_key(config: &PrivacyConfig, projects_dir: &Path) -> Result<Option<MasterKey>> {
     let required = encryption_required(config, projects_dir);
-    if let Some(raw) = std::env::var(MASTER_KEY_ENV).ok() {
+    if let Ok(raw) = std::env::var(MASTER_KEY_ENV) {
         let bytes = B64
             .decode(raw.as_bytes())
             .with_context(|| "Invalid base64 master key in TRUESHOT_MASTER_KEY")?;
@@ -294,7 +308,7 @@ pub fn load_master_key(config: &PrivacyConfig, projects_dir: &Path) -> Result<Op
             }
             let mut key = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut key);
-            let encoded = B64.encode(&key);
+            let encoded = B64.encode(key);
             entry
                 .set_password(&encoded)
                 .map_err(|e| anyhow::anyhow!("Failed to store master key in keyring: {e}"))?;
@@ -306,7 +320,8 @@ pub fn load_master_key(config: &PrivacyConfig, projects_dir: &Path) -> Result<Op
 pub fn spawn_encryption_task(state: web::Data<AppState>) {
     let config = state.config.privacy.clone();
     let projects_dir = state.config.paths.projects_dir.clone();
-    let should_run = config.encrypt_at_rest.unwrap_or(false) || encrypted_marker_exists(&projects_dir);
+    let should_run =
+        config.encrypt_at_rest.unwrap_or(false) || encrypted_marker_exists(&projects_dir);
     if !should_run {
         return;
     }
@@ -394,7 +409,8 @@ async fn sweep_encryption(state: &AppState) -> Result<()> {
             let key_store = key_store.clone();
             let min_age = policy.min_age_seconds;
             move || encrypt_project_scopes_with_age(&path, &name, &scopes, &key_store, min_age)
-        }).await?;
+        })
+        .await?;
         if let Err(err) = result {
             tracing::warn!("encryption sweep failed for {}: {}", name, err);
         }
@@ -406,7 +422,9 @@ async fn sweep_encryption(state: &AppState) -> Result<()> {
 fn encrypted_marker_exists(projects_dir: &Path) -> bool {
     let marker_dir = projects_dir.join("_security").join("encrypted");
     if let Ok(entries) = std::fs::read_dir(marker_dir) {
-        return entries.flatten().any(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"));
+        return entries
+            .flatten()
+            .any(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"));
     }
     false
 }
@@ -441,10 +459,7 @@ pub fn encrypt_file_in_place(
     Ok(Some(enc_path))
 }
 
-pub fn decrypt_file_in_place(
-    path: &Path,
-    key: &[u8; 32],
-) -> Result<PathBuf> {
+pub fn decrypt_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBuf> {
     if path.extension().and_then(|s| s.to_str()) != Some("enc") {
         return Ok(path.to_path_buf());
     }
@@ -532,8 +547,8 @@ fn decrypt_tree(root: &Path, key: &[u8; 32], report: &mut EncryptionReport) -> R
 }
 
 fn encrypt_file(input: &Path, output: &Path, key: &[u8; 32]) -> Result<(u64, u64)> {
-    let mut file = File::open(input)
-        .with_context(|| format!("Failed to open file: {}", input.display()))?;
+    let mut file =
+        File::open(input).with_context(|| format!("Failed to open file: {}", input.display()))?;
 
     let mut nonce_prefix = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut nonce_prefix);
@@ -561,7 +576,8 @@ fn encrypt_file(input: &Path, output: &Path, key: &[u8; 32]) -> Result<(u64, u64
         bytes_in = bytes_in.saturating_add(count as u64);
         let chunk = &buf[..count];
         let nonce = build_nonce(&nonce_prefix, chunk_index);
-        let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), chunk)
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), chunk)
             .with_context(|| format!("Encryption failed for {}", input.display()))?;
         out.write_all(&(ciphertext.len() as u32).to_le_bytes())?;
         out.write_all(&ciphertext)?;
@@ -613,7 +629,8 @@ fn decrypt_file(input: &Path, output: &Path, key: &[u8; 32]) -> Result<(u64, u64
         file.read_exact(&mut cipher_buf)?;
         bytes_in = bytes_in.saturating_add(len as u64);
         let nonce = build_nonce(&nonce_prefix, chunk_index);
-        let plaintext = cipher.decrypt(Nonce::from_slice(&nonce), cipher_buf.as_ref())
+        let plaintext = cipher
+            .decrypt(Nonce::from_slice(&nonce), cipher_buf.as_ref())
             .with_context(|| format!("Decryption failed for {}", input.display()))?;
         out.write_all(&plaintext)?;
         bytes_out = bytes_out.saturating_add(plaintext.len() as u64);

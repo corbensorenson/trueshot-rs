@@ -3,11 +3,11 @@
 //! Handles audio input device enumeration, configuration, and capture
 //! for multi-microphone spatial audio recording.
 
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use serde::{Deserialize, Serialize};
 
 /// Audio input device information
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,7 +164,7 @@ impl AudioCaptureStream {
     pub fn set_stream(&mut self, stream: cpal::Stream) {
         self.stream = Some(stream);
     }
-    
+
     /// Start recording
     pub fn start(&self) {
         self.buffer.start();
@@ -174,12 +174,12 @@ impl AudioCaptureStream {
             }
         }
     }
-    
+
     /// Stop recording
     pub fn stop(&self) {
         self.buffer.stop();
     }
-    
+
     /// Add samples (called by audio callback)
     pub fn push_samples(&self, channel: usize, samples: &[f32]) {
         self.buffer.push_samples(channel, samples);
@@ -187,19 +187,20 @@ impl AudioCaptureStream {
 
     /// Add interleaved samples for all channels
     pub fn push_interleaved(&self, interleaved: &[f32]) {
-        self.buffer.push_interleaved(interleaved, self.channels as usize);
+        self.buffer
+            .push_interleaved(interleaved, self.channels as usize);
     }
-    
+
     /// Get recorded samples
     pub fn get_samples(&self) -> Vec<Vec<f32>> {
         self.buffer.samples.lock().unwrap().clone()
     }
-    
+
     /// Clear recorded samples
     pub fn clear(&self) {
         self.buffer.clear();
     }
-    
+
     /// Get recording duration
     pub fn duration_seconds(&self) -> f32 {
         self.buffer.duration_seconds(self.sample_rate)
@@ -250,37 +251,38 @@ impl AudioManager {
             reference_device: None,
         }
     }
-    
+
     /// Enumerate available audio input devices
     pub fn enumerate_devices(&mut self) -> Vec<AudioDevice> {
         let host = cpal::default_host();
-        let default_device_name = host
-            .default_input_device()
-            .and_then(|d| d.name().ok());
+        let default_device_name = host.default_input_device().and_then(|d| d.name().ok());
 
         self.devices.clear();
         self.device_map.clear();
 
         if let Ok(devices) = host.input_devices() {
             for (idx, device) in devices.enumerate() {
-                let name = device.name().unwrap_or_else(|_| "Unknown Input".to_string());
+                let name = device
+                    .name()
+                    .unwrap_or_else(|_| "Unknown Input".to_string());
                 let id = format!("{}::{}", name, idx);
                 let default_config = device.default_input_config().ok();
-                let (channels, sample_rate, buffer_size, latency_ms) = if let Some(cfg) = default_config.as_ref() {
-                    let channels = cfg.channels() as u8;
-                    let sample_rate = cfg.sample_rate().0;
-                    let (buffer_size, latency_ms) = match cfg.buffer_size() {
-                        cpal::SupportedBufferSize::Range { min: _, max } => {
-                            let frames = *max;
-                            let latency_ms = (frames as f32 / sample_rate as f32) * 1000.0;
-                            (Some(frames), Some(latency_ms))
-                        }
-                        cpal::SupportedBufferSize::Unknown => (None, None),
+                let (channels, sample_rate, buffer_size, latency_ms) =
+                    if let Some(cfg) = default_config.as_ref() {
+                        let channels = cfg.channels() as u8;
+                        let sample_rate = cfg.sample_rate().0;
+                        let (buffer_size, latency_ms) = match cfg.buffer_size() {
+                            cpal::SupportedBufferSize::Range { min: _, max } => {
+                                let frames = *max;
+                                let latency_ms = (frames as f32 / sample_rate as f32) * 1000.0;
+                                (Some(frames), Some(latency_ms))
+                            }
+                            cpal::SupportedBufferSize::Unknown => (None, None),
+                        };
+                        (channels, sample_rate, buffer_size, latency_ms)
+                    } else {
+                        (1, self.master_sample_rate, None, None)
                     };
-                    (channels, sample_rate, buffer_size, latency_ms)
-                } else {
-                    (1, self.master_sample_rate, None, None)
-                };
 
                 let mut supported_sample_rates = Vec::new();
                 if let Ok(configs) = device.supported_input_configs() {
@@ -328,39 +330,39 @@ impl AudioManager {
 
         self.devices.clone()
     }
-    
+
     /// Get device by ID
     pub fn get_device(&self, id: &str) -> Option<&AudioDevice> {
         self.devices.iter().find(|d| d.id == id)
     }
-    
+
     /// Set master sample rate for all captures
     pub fn set_master_sample_rate(&mut self, sample_rate: u32) {
         self.master_sample_rate = sample_rate;
     }
-    
+
     /// Set reference device for synchronization
     pub fn set_reference_device(&mut self, device_id: &str) {
         self.reference_device = Some(device_id.to_string());
     }
-    
+
     /// Create a capture stream for a device
     pub fn create_stream(&mut self, device_id: &str) -> Result<&AudioCaptureStream, AudioError> {
-        let device_meta = self.devices.iter()
+        let device_meta = self
+            .devices
+            .iter()
             .find(|d| d.id == device_id)
             .ok_or(AudioError::DeviceNotFound(device_id.to_string()))?;
-        let device = self.device_map
+        let device = self
+            .device_map
             .get(device_id)
             .ok_or(AudioError::DeviceNotFound(device_id.to_string()))?;
 
         let (config, sample_format) = select_input_config(device, self.master_sample_rate)
             .map_err(|err| AudioError::StreamError(err.to_string()))?;
 
-        let mut stream = AudioCaptureStream::new(
-            device_id,
-            config.sample_rate.0,
-            device_meta.channels,
-        );
+        let mut stream =
+            AudioCaptureStream::new(device_id, config.sample_rate.0, device_meta.channels);
         let shared_buffer = stream.buffer.clone();
         let channel_count = device_meta.channels as usize;
         let err_fn = |err| tracing::error!("Audio stream error: {}", err);
@@ -406,7 +408,9 @@ impl AudioManager {
                 )
             }
             _ => {
-                return Err(AudioError::StreamError("Unsupported sample format".to_string()));
+                return Err(AudioError::StreamError(
+                    "Unsupported sample format".to_string(),
+                ));
             }
         }
         .map_err(|err| AudioError::StreamError(err.to_string()))?;
@@ -415,67 +419,66 @@ impl AudioManager {
         self.streams.insert(device_id.to_string(), stream);
         Ok(self.streams.get(device_id).unwrap())
     }
-    
+
     /// Start synchronized capture on all streams
     pub fn start_all(&self) {
         for stream in self.streams.values() {
             stream.start();
         }
     }
-    
+
     /// Stop all streams
     pub fn stop_all(&self) {
         for stream in self.streams.values() {
             stream.stop();
         }
     }
-    
+
     /// Get all captured audio
     pub fn get_all_recordings(&self) -> HashMap<String, Vec<Vec<f32>>> {
-        self.streams.iter()
+        self.streams
+            .iter()
             .map(|(id, stream)| (id.clone(), stream.get_samples()))
             .collect()
     }
-    
+
     /// Calculate synchronization offsets between devices
     pub fn calculate_sync_offsets(&self) -> HashMap<String, i32> {
         let mut offsets = HashMap::new();
-        
+
         let reference_id = match &self.reference_device {
             Some(id) => id.clone(),
             None => return offsets,
         };
-        
+
         let reference_samples = match self.streams.get(&reference_id) {
             Some(stream) => stream.get_samples(),
             None => return offsets,
         };
-        
+
         if reference_samples.is_empty() || reference_samples[0].is_empty() {
             return offsets;
         }
-        
+
         // Cross-correlate each device with reference to find offset
         for (device_id, stream) in &self.streams {
             if device_id == &reference_id {
                 offsets.insert(device_id.clone(), 0);
                 continue;
             }
-            
+
             let device_samples = stream.get_samples();
             if device_samples.is_empty() || device_samples[0].is_empty() {
                 continue;
             }
-            
+
             // Find offset using cross-correlation
-            let offset = self.cross_correlate_find_offset(
-                &reference_samples[0],
-                &device_samples[0],
-            );
-            
+            let offset =
+                self.cross_correlate_find_offset(&reference_samples[0], &device_samples[0]);
+
             offsets.insert(device_id.clone(), offset);
         }
-        
+
         offsets
     }
 
@@ -483,22 +486,25 @@ impl AudioManager {
     pub fn drift_report(&self) -> HashMap<String, (Option<i64>, Option<f64>)> {
         let mut report = HashMap::new();
         for (device_id, stream) in &self.streams {
-            report.insert(device_id.clone(), (stream.drift_samples(), stream.drift_ms()));
+            report.insert(
+                device_id.clone(),
+                (stream.drift_samples(), stream.drift_ms()),
+            );
         }
         report
     }
-    
+
     fn cross_correlate_find_offset(&self, ref_signal: &[f32], test_signal: &[f32]) -> i32 {
-        let max_lag = (0.1 * self.master_sample_rate as f32) as i32;  // Max 100ms offset
-        let n = ref_signal.len().min(test_signal.len()).min(48000);  // Use first 1 second
-        
+        let max_lag = (0.1 * self.master_sample_rate as f32) as i32; // Max 100ms offset
+        let n = ref_signal.len().min(test_signal.len()).min(48000); // Use first 1 second
+
         let mut best_lag = 0i32;
         let mut best_corr = f32::NEG_INFINITY;
-        
+
         for lag in -max_lag..=max_lag {
             let mut corr = 0.0f32;
             let mut count = 0;
-            
+
             for i in 0..n {
                 let j = i as i32 + lag;
                 if j >= 0 && (j as usize) < n {
@@ -506,7 +512,7 @@ impl AudioManager {
                     count += 1;
                 }
             }
-            
+
             if count > 0 {
                 corr /= count as f32;
                 if corr > best_corr {
@@ -515,7 +521,7 @@ impl AudioManager {
                 }
             }
         }
-        
+
         best_lag
     }
 }
@@ -591,21 +597,21 @@ impl std::error::Error for AudioError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_audio_manager() {
         let mut manager = AudioManager::new();
         let devices = manager.enumerate_devices();
         assert!(!devices.is_empty() || manager.device_map.is_empty());
     }
-    
+
     #[test]
     fn test_capture_stream() {
         let stream = AudioCaptureStream::new("test", 48000, 2);
         stream.start();
         stream.push_interleaved(&[0.1, 0.4, 0.2, 0.5, 0.3, 0.6]);
         stream.stop();
-        
+
         let samples = stream.get_samples();
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0].len(), 3);

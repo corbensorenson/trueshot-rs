@@ -94,14 +94,14 @@ pub fn validate_image_dimensions(width: u32, height: u32) -> ValidationResult {
     const MIN_DIM: u32 = 16;
     const MAX_DIM: u32 = 65536;
 
-    if width < MIN_DIM || width > MAX_DIM {
+    if !(MIN_DIM..=MAX_DIM).contains(&width) {
         return Err(TrueShotError::InvalidState(format!(
             "Image width {} out of range [{}, {}]",
             width, MIN_DIM, MAX_DIM
         )));
     }
 
-    if height < MIN_DIM || height > MAX_DIM {
+    if !(MIN_DIM..=MAX_DIM).contains(&height) {
         return Err(TrueShotError::InvalidState(format!(
             "Image height {} out of range [{}, {}]",
             height, MIN_DIM, MAX_DIM

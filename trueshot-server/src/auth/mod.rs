@@ -1,11 +1,13 @@
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
-use actix_web::{body::EitherBody, Error, HttpMessage, HttpRequest, HttpResponse};
 use actix_web::http::header::RETRY_AFTER;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use jsonwebtoken::{decode, encode, errors::ErrorKind, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use rand::RngCore;
+use actix_web::{body::EitherBody, Error, HttpMessage, HttpRequest, HttpResponse};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use jsonwebtoken::{
+    decode, encode, errors::ErrorKind, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -19,14 +21,8 @@ use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 
 use crate::auth_store::{
-    AuthStore,
-    PublicShareRecord,
-    ShareAnalyticsSummary,
-    StoredApiToken,
-    StoredRefreshSession,
-    StoredShareLink,
-    StoredSharePublic,
-    StoredUser,
+    AuthStore, PublicShareRecord, ShareAnalyticsSummary, StoredApiToken, StoredRefreshSession,
+    StoredShareLink, StoredSharePublic, StoredUser,
 };
 use crate::rate_limit::RateLimiter;
 use utoipa::ToSchema;
@@ -112,11 +108,19 @@ impl AuthManager {
         })
     }
 
-    pub fn issue_admin_token(&self, subject: &str, scopes: Vec<String>) -> Result<String, AuthError> {
+    pub fn issue_admin_token(
+        &self,
+        subject: &str,
+        scopes: Vec<String>,
+    ) -> Result<String, AuthError> {
         self.issue_token(subject, Role::Admin, scopes, self.admin_ttl)
     }
 
-    pub fn issue_guest_token(&self, subject: &str, scopes: Vec<String>) -> Result<String, AuthError> {
+    pub fn issue_guest_token(
+        &self,
+        subject: &str,
+        scopes: Vec<String>,
+    ) -> Result<String, AuthError> {
         self.issue_token(subject, Role::Guest, scopes, self.guest_ttl)
     }
 
@@ -208,7 +212,11 @@ impl AuthManager {
         Ok(user)
     }
 
-    pub async fn verify_password_login(&self, email: &str, password: &str) -> Result<StoredUser, AuthError> {
+    pub async fn verify_password_login(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<StoredUser, AuthError> {
         let user = self
             .store
             .get_user_by_email(email)
@@ -286,7 +294,10 @@ impl AuthManager {
         }
         let _ = self
             .store
-            .touch_api_token(&token.id, system_time_to_secs(SystemTime::now()).map_err(AuthError::Storage)?)
+            .touch_api_token(
+                &token.id,
+                system_time_to_secs(SystemTime::now()).map_err(AuthError::Storage)?,
+            )
             .await;
         Ok(AuthContext {
             sub: token.user_id,
@@ -349,7 +360,10 @@ impl AuthManager {
         Ok(Some(link))
     }
 
-    pub async fn consume_share_link(&self, token: &str) -> Result<Option<StoredShareLink>, AuthError> {
+    pub async fn consume_share_link(
+        &self,
+        token: &str,
+    ) -> Result<Option<StoredShareLink>, AuthError> {
         let hash = hash_share_token(token);
         let now = system_time_to_secs(SystemTime::now()).map_err(AuthError::Storage)?;
         self.store
@@ -371,12 +385,24 @@ impl AuthManager {
     ) -> Result<(), AuthError> {
         let hash = hash_share_token(token);
         self.store
-            .record_share_access(&hash, event, accessed_at, ip, user_agent, referrer, embed, download)
+            .record_share_access(
+                &hash,
+                event,
+                accessed_at,
+                ip,
+                user_agent,
+                referrer,
+                embed,
+                download,
+            )
             .await
             .map_err(|e| AuthError::Storage(e.to_string()))
     }
 
-    pub async fn get_share_analytics(&self, token: &str) -> Result<ShareAnalyticsSummary, AuthError> {
+    pub async fn get_share_analytics(
+        &self,
+        token: &str,
+    ) -> Result<ShareAnalyticsSummary, AuthError> {
         let hash = hash_share_token(token);
         self.store
             .share_analytics(&hash)
@@ -473,7 +499,10 @@ impl AuthManager {
         Ok(entry)
     }
 
-    pub async fn get_share_public(&self, token: &str) -> Result<Option<StoredSharePublic>, AuthError> {
+    pub async fn get_share_public(
+        &self,
+        token: &str,
+    ) -> Result<Option<StoredSharePublic>, AuthError> {
         let hash = hash_share_token(token);
         self.store
             .get_share_public(&hash)
@@ -495,7 +524,10 @@ impl AuthManager {
             .map_err(|e| AuthError::Storage(e.to_string()))
     }
 
-    pub async fn get_share_public_by_code(&self, code: &str) -> Result<Option<StoredSharePublic>, AuthError> {
+    pub async fn get_share_public_by_code(
+        &self,
+        code: &str,
+    ) -> Result<Option<StoredSharePublic>, AuthError> {
         let normalized = normalize_short_code(code);
         self.store
             .get_share_public_by_code(&normalized)
@@ -589,7 +621,10 @@ impl AuthManager {
     }
 
     pub async fn revoke_all_for_subject(&self, subject: &str) {
-        let _ = self.store.delete_refresh_sessions_for_subject(subject).await;
+        let _ = self
+            .store
+            .delete_refresh_sessions_for_subject(subject)
+            .await;
     }
 
     pub async fn issue_pairing_code(
@@ -848,13 +883,16 @@ where
                         Ok(res.map_into_left_body())
                     });
                 }
-                let res = req.into_response(HttpResponse::Forbidden().body("API key disabled after bootstrap"));
+                let res = req.into_response(
+                    HttpResponse::Forbidden().body("API key disabled after bootstrap"),
+                );
                 return Box::pin(async move { Ok(res.map_into_right_body()) });
             }
         }
 
         if let Some(api_token) = extract_api_token(req.request()) {
-            let ctx = block_in_place(|| Handle::current().block_on(auth.verify_api_token(&api_token)));
+            let ctx =
+                block_in_place(|| Handle::current().block_on(auth.verify_api_token(&api_token)));
             match ctx {
                 Ok(ctx) => {
                     req.extensions_mut().insert(ctx);
@@ -865,7 +903,8 @@ where
                     });
                 }
                 Err(_) => {
-                    let res = req.into_response(HttpResponse::Unauthorized().body("Invalid API token"));
+                    let res =
+                        req.into_response(HttpResponse::Unauthorized().body("Invalid API token"));
                     return Box::pin(async move { Ok(res.map_into_right_body()) });
                 }
             }
@@ -880,22 +919,28 @@ where
             None => {
                 let err = AuthError::Missing;
                 tracing::warn!("{}", err);
-                let res = req.into_response(HttpResponse::Unauthorized().body("Missing auth token"));
+                let res =
+                    req.into_response(HttpResponse::Unauthorized().body("Missing auth token"));
                 return Box::pin(async move { Ok(res.map_into_right_body()) });
             }
         };
 
-        if bearer.is_none() && cookie_token.is_some() && csrf_required && !is_safe_method(&method) {
-            if !csrf_valid(req.request()) {
-                let res = req.into_response(HttpResponse::Forbidden().body("CSRF token missing or invalid"));
-                return Box::pin(async move { Ok(res.map_into_right_body()) });
-            }
+        if bearer.is_none()
+            && cookie_token.is_some()
+            && csrf_required
+            && !is_safe_method(&method)
+            && !csrf_valid(req.request())
+        {
+            let res =
+                req.into_response(HttpResponse::Forbidden().body("CSRF token missing or invalid"));
+            return Box::pin(async move { Ok(res.map_into_right_body()) });
         }
 
         let ctx = match auth.verify_token(&token) {
             Ok(ctx) => ctx,
             Err(_) => {
-                let res = req.into_response(HttpResponse::Unauthorized().body("Invalid auth token"));
+                let res =
+                    req.into_response(HttpResponse::Unauthorized().body("Invalid auth token"));
                 return Box::pin(async move { Ok(res.map_into_right_body()) });
             }
         };
@@ -1220,15 +1265,13 @@ impl AuthVerifier {
 fn verify_with_secret(token: &str, issuer: &str, secret: &[u8]) -> Result<AuthContext, AuthError> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_issuer(&[issuer]);
-    let data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret),
-        &validation,
-    )
-    .map_err(|err| match err.kind() {
-        ErrorKind::ExpiredSignature => AuthError::Expired,
-        _ => AuthError::Invalid,
-    })?;
+    let data =
+        decode::<Claims>(token, &DecodingKey::from_secret(secret), &validation).map_err(|err| {
+            match err.kind() {
+                ErrorKind::ExpiredSignature => AuthError::Expired,
+                _ => AuthError::Invalid,
+            }
+        })?;
     Ok(AuthContext {
         sub: data.claims.sub,
         role: data.claims.role,

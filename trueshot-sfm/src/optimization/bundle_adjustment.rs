@@ -3,8 +3,8 @@
 //! Production-quality bundle adjustment using the Levenberg-Marquardt algorithm.
 //! Optimizes camera poses and 3D points simultaneously.
 
-use crate::{Point3D, CameraPose, CameraIntrinsics, ImageData, CameraMotion};
 use crate::distortion::distort_normalized;
+use crate::{CameraIntrinsics, CameraMotion, CameraPose, ImageData, Point3D};
 use nalgebra as na;
 use rayon::prelude::*;
 
@@ -87,10 +87,18 @@ pub struct PosePrior {
 
 impl PosePrior {
     fn rotation_weight(&self) -> f64 {
-        if self.rotation_sigma <= 0.0 { 1.0 } else { 1.0 / self.rotation_sigma }
+        if self.rotation_sigma <= 0.0 {
+            1.0
+        } else {
+            1.0 / self.rotation_sigma
+        }
     }
     fn translation_weight(&self) -> f64 {
-        if self.translation_sigma <= 0.0 { 1.0 } else { 1.0 / self.translation_sigma }
+        if self.translation_sigma <= 0.0 {
+            1.0
+        } else {
+            1.0 / self.translation_sigma
+        }
     }
 }
 
@@ -107,7 +115,7 @@ pub fn bundle_adjust_lm(
     let num_points = points.len();
     let num_cameras = poses.len();
     let has_priors = config.use_pose_priors && pose_priors.iter().any(|p| p.is_some());
-    
+
     if num_points == 0 || num_cameras == 0 || (observations.is_empty() && !has_priors) {
         return BundleAdjustmentResult {
             initial_cost: 0.0,
@@ -117,17 +125,17 @@ pub fn bundle_adjust_lm(
             rmse: 0.0,
         };
     }
-    
+
     // Parameter vector: [camera_params..., point_params...]
     // Camera: 6 params (3 rotation axis-angle, 3 translation)
     // Point: 3 params (x, y, z)
     let num_camera_params = num_cameras * 6;
     let num_point_params = num_points * 3;
     let total_params = num_camera_params + num_point_params;
-    
+
     // Pack parameters
     let mut params = pack_parameters(poses, points);
-    
+
     // Compute initial cost
     let initial_delta = scheduled_huber_delta(config, 0);
     let initial_cost = compute_cost(
@@ -143,15 +151,19 @@ pub fn bundle_adjust_lm(
     );
     let mut current_cost = initial_cost;
     let mut lambda = config.initial_lambda;
-    
+
     let mut result = BundleAdjustmentResult {
         initial_cost,
         final_cost: initial_cost,
         iterations: 0,
         converged: false,
-        rmse: if observations.is_empty() { 0.0 } else { (initial_cost / observations.len() as f64).sqrt() },
+        rmse: if observations.is_empty() {
+            0.0
+        } else {
+            (initial_cost / observations.len() as f64).sqrt()
+        },
     };
-    
+
     for iter in 0..config.max_iterations {
         let huber_delta = scheduled_huber_delta(config, iter);
         // Compute Jacobian and residuals
@@ -166,25 +178,25 @@ pub fn bundle_adjust_lm(
             config,
             huber_delta,
         );
-        
+
         // Compute JtJ and Jtr (normal equations)
         let jacobian_t = jacobian.transpose();
         let normal_eq = &jacobian_t * &jacobian;
         let gradient = &jacobian_t * &residuals;
-        
+
         // Check gradient convergence
         let grad_norm = gradient.norm();
         if grad_norm < config.gradient_tolerance {
             result.converged = true;
             break;
         }
-        
+
         // Levenberg-Marquardt update: (JtJ + lambda * diag(JtJ)) * delta = -Jtr
         let mut damped_normal = normal_eq.clone();
         for i in 0..total_params {
             damped_normal[(i, i)] += lambda * normal_eq[(i, i)].max(1e-6);
         }
-        
+
         // Solve for delta
         let decomp = na::Cholesky::new(damped_normal.clone());
         let delta = match decomp {
@@ -195,20 +207,20 @@ pub fn bundle_adjust_lm(
                 continue;
             }
         };
-        
+
         // Check parameter convergence
         let param_change = delta.norm() / (params.norm() + 1e-10);
         if param_change < config.parameter_tolerance {
             result.converged = true;
             break;
         }
-        
+
         // Trial update
         let new_params = &params + &delta;
-        
+
         // Unpack to temporary structures
         let (trial_poses, trial_points) = unpack_parameters(&new_params, num_cameras, num_points);
-        
+
         // Compute new cost
         let new_cost = compute_cost_direct(
             &trial_poses,
@@ -220,16 +232,16 @@ pub fn bundle_adjust_lm(
             config,
             huber_delta,
         );
-        
+
         // Accept or reject
         if new_cost < current_cost {
             // Accept
             params = new_params;
-            
+
             let cost_change = (current_cost - new_cost) / current_cost;
             current_cost = new_cost;
             lambda *= config.lambda_decrease;
-            
+
             if cost_change < config.function_tolerance {
                 result.converged = true;
                 break;
@@ -238,38 +250,46 @@ pub fn bundle_adjust_lm(
             // Reject
             lambda *= config.lambda_increase;
         }
-        
+
         result.iterations = iter + 1;
     }
-    
+
     // Unpack final parameters
     let (final_poses, final_points) = unpack_parameters(&params, num_cameras, num_points);
     *poses = final_poses;
-    *points = final_points.into_iter().enumerate().map(|(i, pos)| {
-        let mut p = points[i].clone();
-        p.position = pos;
-        p
-    }).collect();
-    
+    *points = final_points
+        .into_iter()
+        .enumerate()
+        .map(|(i, pos)| {
+            let mut p = points[i].clone();
+            p.position = pos;
+            p
+        })
+        .collect();
+
     result.final_cost = current_cost;
     result.rmse = if observations.is_empty() {
         0.0
     } else {
         reprojection_rmse(points, poses, intrinsics, observations, camera_motions)
     };
-    
+
     tracing::info!(
         "Bundle adjustment: {} iterations, cost {:.4} -> {:.4}, RMSE: {:.4}px, converged: {}",
-        result.iterations, result.initial_cost, result.final_cost, result.rmse, result.converged
+        result.iterations,
+        result.initial_cost,
+        result.final_cost,
+        result.rmse,
+        result.converged
     );
-    
+
     result
 }
 
 fn pack_parameters(poses: &[CameraPose], points: &[Point3D]) -> na::DVector<f64> {
     let num_params = poses.len() * 6 + points.len() * 3;
     let mut params = na::DVector::zeros(num_params);
-    
+
     // Pack cameras
     for (i, pose) in poses.iter().enumerate() {
         let axis_angle = pose.rotation.scaled_axis();
@@ -280,7 +300,7 @@ fn pack_parameters(poses: &[CameraPose], points: &[Point3D]) -> na::DVector<f64>
         params[i * 6 + 4] = pose.translation.y;
         params[i * 6 + 5] = pose.translation.z;
     }
-    
+
     // Pack points
     let offset = poses.len() * 6;
     for (i, point) in points.iter().enumerate() {
@@ -288,30 +308,29 @@ fn pack_parameters(poses: &[CameraPose], points: &[Point3D]) -> na::DVector<f64>
         params[offset + i * 3 + 1] = point.position.y;
         params[offset + i * 3 + 2] = point.position.z;
     }
-    
+
     params
 }
 
-fn unpack_parameters(params: &na::DVector<f64>, num_cameras: usize, num_points: usize) -> (Vec<CameraPose>, Vec<na::Point3<f64>>) {
+fn unpack_parameters(
+    params: &na::DVector<f64>,
+    num_cameras: usize,
+    num_points: usize,
+) -> (Vec<CameraPose>, Vec<na::Point3<f64>>) {
     let mut poses = Vec::with_capacity(num_cameras);
     let mut points = Vec::with_capacity(num_points);
-    
+
     // Unpack cameras
     for i in 0..num_cameras {
-        let axis_angle = na::Vector3::new(
-            params[i * 6],
-            params[i * 6 + 1],
-            params[i * 6 + 2],
-        );
+        let axis_angle = na::Vector3::new(params[i * 6], params[i * 6 + 1], params[i * 6 + 2]);
         let rotation = na::UnitQuaternion::from_scaled_axis(axis_angle);
-        let translation = na::Vector3::new(
-            params[i * 6 + 3],
-            params[i * 6 + 4],
-            params[i * 6 + 5],
-        );
-        poses.push(CameraPose { rotation, translation });
+        let translation = na::Vector3::new(params[i * 6 + 3], params[i * 6 + 4], params[i * 6 + 5]);
+        poses.push(CameraPose {
+            rotation,
+            translation,
+        });
     }
-    
+
     // Unpack points
     let offset = num_cameras * 6;
     for i in 0..num_points {
@@ -321,7 +340,7 @@ fn unpack_parameters(params: &na::DVector<f64>, num_cameras: usize, num_points: 
             params[offset + i * 3 + 2],
         ));
     }
-    
+
     (poses, points)
 }
 
@@ -359,32 +378,35 @@ fn compute_cost_direct(
     config: &BundleAdjustmentConfig,
     huber_delta: f64,
 ) -> f64 {
-    let obs_cost: f64 = observations.par_iter().map(|obs| {
-        if obs.camera_idx >= poses.len() || obs.point_idx >= points.len() {
-            return 0.0;
-        }
-        
-        let pose = &poses[obs.camera_idx];
-        let point = &points[obs.point_idx];
-        let k = &intrinsics[obs.camera_idx.min(intrinsics.len() - 1)];
-        let motion = camera_motions.get(obs.camera_idx).and_then(|m| m.as_ref());
-        let pose_eff = pose_with_motion(pose, motion, obs.time_offset);
-        
-        // Project point
-        if let Some((px, py)) = project_point(point, &pose_eff, k) {
-            let dx = px - obs.x;
-            let dy = py - obs.y;
-            let sq_error = dx * dx + dy * dy;
-            
-            if config.use_huber_loss {
-                huber_loss(sq_error.sqrt(), huber_delta)
-            } else {
-                sq_error
+    let obs_cost: f64 = observations
+        .par_iter()
+        .map(|obs| {
+            if obs.camera_idx >= poses.len() || obs.point_idx >= points.len() {
+                return 0.0;
             }
-        } else {
-            100.0 // Large cost for points behind camera
-        }
-    }).sum();
+
+            let pose = &poses[obs.camera_idx];
+            let point = &points[obs.point_idx];
+            let k = &intrinsics[obs.camera_idx.min(intrinsics.len() - 1)];
+            let motion = camera_motions.get(obs.camera_idx).and_then(|m| m.as_ref());
+            let pose_eff = pose_with_motion(pose, motion, obs.time_offset);
+
+            // Project point
+            if let Some((px, py)) = project_point(point, &pose_eff, k) {
+                let dx = px - obs.x;
+                let dy = py - obs.y;
+                let sq_error = dx * dx + dy * dy;
+
+                if config.use_huber_loss {
+                    huber_loss(sq_error.sqrt(), huber_delta)
+                } else {
+                    sq_error
+                }
+            } else {
+                100.0 // Large cost for points behind camera
+            }
+        })
+        .sum();
 
     let mut prior_cost = 0.0;
     if config.use_pose_priors && !pose_priors.is_empty() {
@@ -409,25 +431,33 @@ fn compute_cost_direct(
     obs_cost + prior_cost
 }
 
-fn project_point(point: &na::Point3<f64>, pose: &CameraPose, k: &CameraIntrinsics) -> Option<(f64, f64)> {
+fn project_point(
+    point: &na::Point3<f64>,
+    pose: &CameraPose,
+    k: &CameraIntrinsics,
+) -> Option<(f64, f64)> {
     // Transform to camera frame
     let p_cam = pose.rotation.inverse() * (point - na::Point3::from(pose.translation));
-    
+
     if p_cam.z <= 0.0 {
         return None;
     }
-    
+
     // Project with distortion
     let xn = p_cam.x / p_cam.z;
     let yn = p_cam.y / p_cam.z;
     let (xd, yd) = distort_normalized(k.distortion_model, &k.distortion, xn, yn);
     let x = k.fx * xd + k.cx;
     let y = k.fy * yd + k.cy;
-    
+
     Some((x, y))
 }
 
-pub(crate) fn pose_with_motion(pose: &CameraPose, motion: Option<&CameraMotion>, time_offset: f64) -> CameraPose {
+pub(crate) fn pose_with_motion(
+    pose: &CameraPose,
+    motion: Option<&CameraMotion>,
+    time_offset: f64,
+) -> CameraPose {
     if motion.is_none() || time_offset.abs() <= 1e-9 {
         return pose.clone();
     }
@@ -449,14 +479,19 @@ fn reprojection_rmse(
     let mut total = 0.0;
     let mut count = 0usize;
     for obs in observations {
-        if obs.point_idx >= points.len() || obs.camera_idx >= poses.len() || obs.camera_idx >= intrinsics.len() {
+        if obs.point_idx >= points.len()
+            || obs.camera_idx >= poses.len()
+            || obs.camera_idx >= intrinsics.len()
+        {
             continue;
         }
         let point = &points[obs.point_idx];
         let pose = &poses[obs.camera_idx];
         let motion = camera_motions.get(obs.camera_idx).and_then(|m| m.as_ref());
         let pose_eff = pose_with_motion(pose, motion, obs.time_offset);
-        if let Some((px, py)) = project_point(&point.position, &pose_eff, &intrinsics[obs.camera_idx]) {
+        if let Some((px, py)) =
+            project_point(&point.position, &pose_eff, &intrinsics[obs.camera_idx])
+        {
             let dx = px - obs.x;
             let dy = py - obs.y;
             total += dx * dx + dy * dy;
@@ -492,11 +527,7 @@ fn scheduled_huber_delta(config: &BundleAdjustmentConfig, iter: usize) -> f64 {
 }
 
 fn skew(v: &na::Vector3<f64>) -> na::Matrix3<f64> {
-    na::Matrix3::new(
-        0.0, -v.z, v.y,
-        v.z, 0.0, -v.x,
-        -v.y, v.x, 0.0,
-    )
+    na::Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
 }
 
 fn right_jacobian_inv(w: &na::Vector3<f64>) -> na::Matrix3<f64> {
@@ -536,24 +567,24 @@ fn compute_jacobian_residuals(
     }
     let num_prior = prior_indices.len();
     let total_residuals = num_obs * 2 + num_prior * 6;
-    
+
     // 2 residuals per observation (x, y)
     let mut jacobian = na::DMatrix::<f64>::zeros(total_residuals, total_params);
     let mut residuals = na::DVector::<f64>::zeros(total_residuals);
-    
+
     let (poses, points) = unpack_parameters(params, num_cameras, num_points);
-    
+
     for (obs_idx, obs) in observations.iter().enumerate() {
         if obs.camera_idx >= num_cameras || obs.point_idx >= num_points {
             continue;
         }
-        
+
         let k = &intrinsics[obs.camera_idx.min(intrinsics.len() - 1)];
         let point = &points[obs.point_idx];
         let pose = &poses[obs.camera_idx];
         let motion = camera_motions.get(obs.camera_idx).and_then(|m| m.as_ref());
         let pose_eff = pose_with_motion(pose, motion, obs.time_offset);
-        
+
         // Current projection
         if let Some((px, py)) = project_point(point, &pose_eff, k) {
             let r_x = px - obs.x;
@@ -586,8 +617,12 @@ fn compute_jacobian_residuals(
                 let inv_z2 = inv_z * inv_z;
 
                 let j_proj = na::Matrix::<f64, na::U2, na::U3, _>::new(
-                    k.fx * inv_z, 0.0, -k.fx * x * inv_z2,
-                    0.0, k.fy * inv_z, -k.fy * y * inv_z2,
+                    k.fx * inv_z,
+                    0.0,
+                    -k.fx * x * inv_z2,
+                    0.0,
+                    k.fy * inv_z,
+                    -k.fy * y * inv_z2,
                 );
 
                 let j_point = j_proj * r_cw.matrix();
@@ -657,13 +692,16 @@ fn compute_jacobian_residuals(
             jacobian[(row + 5, cam_offset + 5)] = tw;
         }
     }
-    
+
     (jacobian, residuals)
 }
 
 /// Build observations using keypoints from images.
 /// Uses point track (camera_idx, keypoint_idx) to fetch 2D coordinates.
-pub fn build_observations_with_images(points: &[Point3D], images: &[ImageData]) -> Vec<Observation> {
+pub fn build_observations_with_images(
+    points: &[Point3D],
+    images: &[ImageData],
+) -> Vec<Observation> {
     let mut observations = Vec::new();
 
     for (point_idx, point) in points.iter().enumerate() {
@@ -679,7 +717,14 @@ pub fn build_observations_with_images(points: &[Point3D], images: &[ImageData]) 
             let time_offset = image
                 .rolling_shutter
                 .as_ref()
-                .map(|rs| rs.time_offset_seconds(kp.x as f64, kp.y as f64, image.intrinsics.width, image.intrinsics.height))
+                .map(|rs| {
+                    rs.time_offset_seconds(
+                        kp.x as f64,
+                        kp.y as f64,
+                        image.intrinsics.width,
+                        image.intrinsics.height,
+                    )
+                })
                 .unwrap_or(0.0);
             observations.push(Observation {
                 point_idx,

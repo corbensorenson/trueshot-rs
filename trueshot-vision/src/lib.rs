@@ -3,38 +3,38 @@
 use wasm_bindgen::prelude::*;
 
 // OpenCV-dependent modules (require "opencv" feature)
-#[cfg(feature = "opencv")]
-pub mod tracker;
+pub mod autocrop;
 #[cfg(feature = "opencv")]
 pub mod background;
 #[cfg(feature = "opencv")]
 pub mod background_sub;
-pub mod inpainting;
-pub mod change_detection;
-pub mod polarization;
-pub mod spectral;
-pub mod metrics;
-pub mod markers;
-pub mod autocrop;
-pub mod simd;
-pub mod proc_gen;
-pub mod iqa;
 pub mod barcode;
-pub mod preview;
-pub mod volume;
-pub mod fiducial;
-pub mod gauge;
+pub mod change_detection;
 #[cfg(feature = "opencv")]
 pub mod cv;
-#[cfg(feature = "opencv")]
-pub mod sfm;
+pub mod fiducial;
+pub mod gauge;
+pub mod inpainting;
+pub mod iqa;
+pub mod markers;
+pub mod metrics;
+pub mod polarization;
 #[cfg(feature = "opencv")]
 pub mod pose;
+pub mod preview;
+pub mod proc_gen;
+#[cfg(feature = "opencv")]
+pub mod sfm;
+pub mod simd;
+pub mod spectral;
+#[cfg(feature = "opencv")]
+pub mod tracker;
+pub mod volume;
 
 // Native implementations (no OpenCV required) - ALWAYS AVAILABLE
 pub mod features;
-pub mod matching;
 pub mod geometry;
+pub mod matching;
 
 // Stubs for when OpenCV is not available
 #[cfg(not(feature = "opencv"))]
@@ -48,7 +48,9 @@ pub mod cv {
     }
     pub struct FeatureMatcher;
     impl FeatureMatcher {
-        pub fn new() -> anyhow::Result<Self> { Ok(Self) }
+        pub fn new() -> anyhow::Result<Self> {
+            Ok(Self)
+        }
     }
 }
 

@@ -7,13 +7,13 @@
 //! - Azure Blob Storage
 //! - Local/network paths
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::io::Write;
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use sysinfo::Disks;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -136,7 +136,7 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             auto_sync: true,
-            sync_interval_secs: 300,  // 5 minutes
+            sync_interval_secs: 300, // 5 minutes
             direction: SyncDirection::Bidirectional,
             include_patterns: vec!["*".to_string()],
             exclude_patterns: vec![
@@ -198,63 +198,67 @@ impl StorageManager {
             config_path,
         }
     }
-    
+
     /// Load storage configurations from disk
     pub fn load(&mut self) -> Result<(), StorageError> {
         if !self.config_path.exists() {
             return Ok(());
         }
-        
+
         let content = std::fs::read_to_string(&self.config_path)
             .map_err(|e| StorageError::IoError(e.to_string()))?;
-        
-        let configs: Vec<StorageConfig> = serde_json::from_str(&content)
-            .map_err(|e| StorageError::ConfigError(e.to_string()))?;
-        
+
+        let configs: Vec<StorageConfig> =
+            serde_json::from_str(&content).map_err(|e| StorageError::ConfigError(e.to_string()))?;
+
         for config in configs {
-            self.storages.insert(config.id.clone(), ConnectedStorage {
-                config,
-                status: StorageStatus::Disconnected,
-                stats: None,
-                last_error: None,
-            });
+            self.storages.insert(
+                config.id.clone(),
+                ConnectedStorage {
+                    config,
+                    status: StorageStatus::Disconnected,
+                    stats: None,
+                    last_error: None,
+                },
+            );
         }
-        
+
         Ok(())
     }
-    
+
     /// Save storage configurations to disk
     pub fn save(&self) -> Result<(), StorageError> {
-        let configs: Vec<&StorageConfig> = self.storages.values()
-            .map(|s| &s.config)
-            .collect();
-        
+        let configs: Vec<&StorageConfig> = self.storages.values().map(|s| &s.config).collect();
+
         let content = serde_json::to_string_pretty(&configs)
             .map_err(|e| StorageError::ConfigError(e.to_string()))?;
-        
+
         std::fs::write(&self.config_path, content)
             .map_err(|e| StorageError::IoError(e.to_string()))?;
-        
+
         Ok(())
     }
-    
+
     /// Add a new storage
     pub fn add_storage(&mut self, config: StorageConfig) -> Result<(), StorageError> {
         if self.storages.contains_key(&config.id) {
             return Err(StorageError::AlreadyExists(config.id));
         }
-        
-        self.storages.insert(config.id.clone(), ConnectedStorage {
-            config,
-            status: StorageStatus::Initializing,
-            stats: None,
-            last_error: None,
-        });
-        
+
+        self.storages.insert(
+            config.id.clone(),
+            ConnectedStorage {
+                config,
+                status: StorageStatus::Initializing,
+                stats: None,
+                last_error: None,
+            },
+        );
+
         self.save()?;
         Ok(())
     }
-    
+
     /// Remove a storage
     pub fn remove_storage(&mut self, id: &str) -> Result<(), StorageError> {
         if self.storages.remove(id).is_none() {
@@ -263,22 +267,24 @@ impl StorageManager {
         self.save()?;
         Ok(())
     }
-    
+
     /// Get all storages
     pub fn list_storages(&self) -> Vec<&ConnectedStorage> {
         self.storages.values().collect()
     }
-    
+
     /// Get storage by ID
     pub fn get_storage(&self, id: &str) -> Option<&ConnectedStorage> {
         self.storages.get(id)
     }
-    
+
     /// Connect to storage
     pub fn connect(&mut self, id: &str) -> Result<(), StorageError> {
-        let storage = self.storages.get_mut(id)
+        let storage = self
+            .storages
+            .get_mut(id)
             .ok_or_else(|| StorageError::NotFound(id.to_string()))?;
-        
+
         // Attempt connection based on type
         match &storage.config.storage_type {
             StorageType::Local => {
@@ -311,61 +317,59 @@ impl StorageManager {
                     }
                 }
             }
-            StorageType::S3 => {
-                match validate_object_store(&storage.config) {
-                    Ok(()) => {
-                        storage.status = StorageStatus::Connected;
-                        storage.last_error = None;
-                    }
-                    Err(err) => {
-                        storage.status = StorageStatus::Error;
-                        storage.last_error = Some(err.to_string());
-                    }
+            StorageType::S3 => match validate_object_store(&storage.config) {
+                Ok(()) => {
+                    storage.status = StorageStatus::Connected;
+                    storage.last_error = None;
                 }
-            }
-            StorageType::Gcs => {
-                match validate_object_store(&storage.config) {
-                    Ok(()) => {
-                        storage.status = StorageStatus::Connected;
-                        storage.last_error = None;
-                    }
-                    Err(err) => {
-                        storage.status = StorageStatus::Error;
-                        storage.last_error = Some(err.to_string());
-                    }
+                Err(err) => {
+                    storage.status = StorageStatus::Error;
+                    storage.last_error = Some(err.to_string());
                 }
-            }
-            StorageType::Azure => {
-                match validate_object_store(&storage.config) {
-                    Ok(()) => {
-                        storage.status = StorageStatus::Connected;
-                        storage.last_error = None;
-                    }
-                    Err(err) => {
-                        storage.status = StorageStatus::Error;
-                        storage.last_error = Some(err.to_string());
-                    }
+            },
+            StorageType::Gcs => match validate_object_store(&storage.config) {
+                Ok(()) => {
+                    storage.status = StorageStatus::Connected;
+                    storage.last_error = None;
                 }
-            }
+                Err(err) => {
+                    storage.status = StorageStatus::Error;
+                    storage.last_error = Some(err.to_string());
+                }
+            },
+            StorageType::Azure => match validate_object_store(&storage.config) {
+                Ok(()) => {
+                    storage.status = StorageStatus::Connected;
+                    storage.last_error = None;
+                }
+                Err(err) => {
+                    storage.status = StorageStatus::Error;
+                    storage.last_error = Some(err.to_string());
+                }
+            },
             // OAuth-based cloud drives - handled by API layer
-            StorageType::GoogleDrive | StorageType::Dropbox | 
-            StorageType::OneDrive | StorageType::ICloudDrive => {
+            StorageType::GoogleDrive
+            | StorageType::Dropbox
+            | StorageType::OneDrive
+            | StorageType::ICloudDrive => {
                 storage.status = StorageStatus::Connected;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Disconnect from storage
     pub fn disconnect(&mut self, id: &str) -> Result<(), StorageError> {
-        let storage = self.storages.get_mut(id)
+        let storage = self
+            .storages
+            .get_mut(id)
             .ok_or_else(|| StorageError::NotFound(id.to_string()))?;
-        
+
         storage.status = StorageStatus::Disconnected;
         Ok(())
     }
-    
+
     /// Get stats for local path (static method to avoid borrow issues)
     fn compute_local_stats(path: &PathBuf) -> StorageStats {
         let mut disks = Disks::new_with_refreshed_list();
@@ -390,7 +394,7 @@ impl StorageManager {
             pending_sync_count: 0,
         }
     }
-    
+
     /// Upload file to storage
     pub async fn upload_file(
         &self,
@@ -398,25 +402,30 @@ impl StorageManager {
         local_path: &PathBuf,
         remote_path: &str,
     ) -> Result<(), StorageError> {
-        let storage = self.storages.get(storage_id)
+        let storage = self
+            .storages
+            .get(storage_id)
             .ok_or_else(|| StorageError::NotFound(storage_id.to_string()))?;
-        
+
         if storage.status != StorageStatus::Connected {
             return Err(StorageError::NotConnected(storage_id.to_string()));
         }
-        
+
         // Implementation would use appropriate SDK
         match &storage.config.storage_type {
             StorageType::S3 => {
                 // Use aws-sdk-s3
-                self.upload_to_s3(&storage.config, local_path, remote_path).await
+                self.upload_to_s3(&storage.config, local_path, remote_path)
+                    .await
             }
             StorageType::Gcs => {
                 // Use google-cloud-storage
-                self.upload_to_gcs(&storage.config, local_path, remote_path).await
+                self.upload_to_gcs(&storage.config, local_path, remote_path)
+                    .await
             }
             StorageType::Azure => {
-                self.upload_to_object_store(&storage.config, local_path, remote_path).await
+                self.upload_to_object_store(&storage.config, local_path, remote_path)
+                    .await
             }
             StorageType::Nas | StorageType::Local => {
                 // Use filesystem copy
@@ -425,23 +434,25 @@ impl StorageManager {
             _ => Err(StorageError::UnsupportedOperation),
         }
     }
-    
+
     async fn upload_to_s3(
         &self,
         config: &StorageConfig,
         local_path: &PathBuf,
         remote_path: &str,
     ) -> Result<(), StorageError> {
-        self.upload_to_object_store(config, local_path, remote_path).await
+        self.upload_to_object_store(config, local_path, remote_path)
+            .await
     }
-    
+
     async fn upload_to_gcs(
         &self,
         config: &StorageConfig,
         local_path: &PathBuf,
         remote_path: &str,
     ) -> Result<(), StorageError> {
-        self.upload_to_object_store(config, local_path, remote_path).await
+        self.upload_to_object_store(config, local_path, remote_path)
+            .await
     }
 
     async fn upload_to_object_store(
@@ -452,15 +463,14 @@ impl StorageManager {
     ) -> Result<(), StorageError> {
         let bucket = bucket_from_config(config)?;
         let key = join_remote_path(&config.base_path, remote_path);
-        let data = std::fs::read(local_path)
-            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        let data = std::fs::read(local_path).map_err(|e| StorageError::IoError(e.to_string()))?;
         bucket
             .put_object(key, &data)
             .await
             .map_err(|e| StorageError::ConnectionError(e.to_string()))?;
         Ok(())
     }
-    
+
     fn upload_to_filesystem(
         &self,
         config: &StorageConfig,
@@ -474,20 +484,18 @@ impl StorageManager {
             }
             _ => return Err(StorageError::UnsupportedOperation),
         };
-        
+
         let dest = base.join(&config.base_path).join(remote_path);
-        
+
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| StorageError::IoError(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| StorageError::IoError(e.to_string()))?;
         }
-        
-        std::fs::copy(local_path, dest)
-            .map_err(|e| StorageError::IoError(e.to_string()))?;
-        
+
+        std::fs::copy(local_path, dest).map_err(|e| StorageError::IoError(e.to_string()))?;
+
         Ok(())
     }
-    
+
     /// Download file from storage
     pub async fn download_file(
         &self,
@@ -495,13 +503,15 @@ impl StorageManager {
         remote_path: &str,
         local_path: &PathBuf,
     ) -> Result<(), StorageError> {
-        let storage = self.storages.get(storage_id)
+        let storage = self
+            .storages
+            .get(storage_id)
             .ok_or_else(|| StorageError::NotFound(storage_id.to_string()))?;
-        
+
         if storage.status != StorageStatus::Connected {
             return Err(StorageError::NotConnected(storage_id.to_string()));
         }
-        
+
         match &storage.config.storage_type {
             StorageType::S3 | StorageType::Gcs | StorageType::Azure => {
                 let bucket = bucket_from_config(&storage.config)?;
@@ -533,20 +543,22 @@ impl StorageManager {
             _ => Err(StorageError::UnsupportedOperation),
         }
     }
-    
+
     /// List files in remote path
     pub async fn list_files(
         &self,
         storage_id: &str,
         _path: &str,
     ) -> Result<Vec<RemoteFile>, StorageError> {
-        let storage = self.storages.get(storage_id)
+        let storage = self
+            .storages
+            .get(storage_id)
             .ok_or_else(|| StorageError::NotFound(storage_id.to_string()))?;
-        
+
         if storage.status != StorageStatus::Connected {
             return Err(StorageError::NotConnected(storage_id.to_string()));
         }
-        
+
         // Placeholder
         Ok(Vec::new())
     }
@@ -590,30 +602,29 @@ fn filesystem_root_from_endpoint(endpoint: &StorageEndpoint) -> Result<PathBuf, 
         StorageEndpoint::NetworkPath { host, share, .. } => {
             Ok(PathBuf::from(format!("//{}/{}", host, share)))
         }
-        StorageEndpoint::CloudBucket { .. } => {
-            Err(StorageError::UnsupportedOperation)
-        }
+        StorageEndpoint::CloudBucket { .. } => Err(StorageError::UnsupportedOperation),
     }
 }
 
 fn validate_filesystem_path(path: &PathBuf) -> Result<StorageStats, StorageError> {
     if !path.exists() {
-        std::fs::create_dir_all(path)
-            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        std::fs::create_dir_all(path).map_err(|e| StorageError::IoError(e.to_string()))?;
     }
     let marker = path.join(format!(".trueshot_sync_{}.txt", Uuid::new_v4()));
     let payload = format!("trueshot-sync-{}", Uuid::new_v4());
     {
-        let mut file = std::fs::File::create(&marker)
-            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        let mut file =
+            std::fs::File::create(&marker).map_err(|e| StorageError::IoError(e.to_string()))?;
         file.write_all(payload.as_bytes())
             .map_err(|e| StorageError::IoError(e.to_string()))?;
     }
-    let read_back = std::fs::read_to_string(&marker)
-        .map_err(|e| StorageError::IoError(e.to_string()))?;
+    let read_back =
+        std::fs::read_to_string(&marker).map_err(|e| StorageError::IoError(e.to_string()))?;
     let _ = std::fs::remove_file(&marker);
     if read_back != payload {
-        return Err(StorageError::ConnectionError("Filesystem validation mismatch".to_string()));
+        return Err(StorageError::ConnectionError(
+            "Filesystem validation mismatch".to_string(),
+        ));
     }
     Ok(StorageManager::compute_local_stats(path))
 }
@@ -632,9 +643,11 @@ fn join_remote_path(base_path: &str, suffix: &str) -> String {
 
 fn bucket_from_config(config: &StorageConfig) -> Result<Bucket, StorageError> {
     let (endpoint, region, bucket) = match &config.endpoint {
-        StorageEndpoint::CloudBucket { endpoint, region, bucket } => {
-            (endpoint.clone(), region.clone(), bucket.clone())
-        }
+        StorageEndpoint::CloudBucket {
+            endpoint,
+            region,
+            bucket,
+        } => (endpoint.clone(), region.clone(), bucket.clone()),
         _ => return Err(StorageError::UnsupportedOperation),
     };
     let creds = config
@@ -664,15 +677,17 @@ fn validate_object_store(config: &StorageConfig) -> Result<(), StorageError> {
         &format!("sync_checks/{}.txt", Uuid::new_v4()),
     );
     let payload = format!("trueshot-sync-{}", Uuid::new_v4());
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| StorageError::ConnectionError(e.to_string()))?;
+    let rt =
+        tokio::runtime::Runtime::new().map_err(|e| StorageError::ConnectionError(e.to_string()))?;
     rt.block_on(bucket.put_object(&marker_key, payload.as_bytes()))
         .map_err(|e| StorageError::ConnectionError(e.to_string()))?;
     let data = rt
         .block_on(bucket.get_object(&marker_key))
         .map_err(|e| StorageError::ConnectionError(e.to_string()))?;
     if data.as_slice() != payload.as_bytes() {
-        return Err(StorageError::ConnectionError("Object store validation mismatch".to_string()));
+        return Err(StorageError::ConnectionError(
+            "Object store validation mismatch".to_string(),
+        ));
     }
     Ok(())
 }
@@ -744,7 +759,7 @@ impl From<&ConnectedStorage> for StorageInfo {
             StorageEndpoint::NetworkPath { host, share, .. } => format!("//{}/{}", host, share),
             StorageEndpoint::CloudBucket { bucket, .. } => bucket.clone(),
         };
-        
+
         StorageInfo {
             id: storage.config.id.clone(),
             name: storage.config.name.clone(),
@@ -753,7 +768,9 @@ impl From<&ConnectedStorage> for StorageInfo {
             endpoint,
             used_bytes: storage.stats.as_ref().map(|s| s.used_bytes),
             total_bytes: storage.stats.as_ref().map(|s| s.total_bytes),
-            last_sync: storage.stats.as_ref()
+            last_sync: storage
+                .stats
+                .as_ref()
                 .and_then(|s| s.last_sync)
                 .map(|t| t.to_rfc3339()),
         }
@@ -763,7 +780,7 @@ impl From<&ConnectedStorage> for StorageInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_storage_config_serialize() {
         let config = StorageConfig {
@@ -784,18 +801,18 @@ mod tests {
             is_primary: false,
             sync_config: SyncConfig::default(),
         };
-        
+
         let json = serde_json::to_string_pretty(&config).unwrap();
         assert!(json.contains("s3.amazonaws.com"));
         // Secret key should be skipped
         assert!(!json.contains("secret"));
     }
-    
+
     #[test]
     fn test_storage_manager() {
         let temp_path = std::env::temp_dir().join("trueshot_storage_test.json");
         let mut manager = StorageManager::new(temp_path.clone());
-        
+
         let config = StorageConfig {
             id: "local-test".to_string(),
             name: "Test Local".to_string(),
@@ -806,14 +823,14 @@ mod tests {
             is_primary: true,
             sync_config: SyncConfig::default(),
         };
-        
+
         manager.add_storage(config).unwrap();
         assert_eq!(manager.list_storages().len(), 1);
-        
+
         manager.connect("local-test").unwrap();
         let storage = manager.get_storage("local-test").unwrap();
         assert_eq!(storage.status, StorageStatus::Connected);
-        
+
         // Cleanup
         let _ = std::fs::remove_file(temp_path);
     }

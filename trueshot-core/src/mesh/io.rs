@@ -122,7 +122,7 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                 for idx in &indices[0..3] {
                     let comps: Vec<&str> = idx.split('/').collect();
                     let v_idx: i32 = comps
-                        .get(0)
+                        .first()
                         .and_then(|v| v.parse::<i32>().ok())
                         .unwrap_or(0);
                     let vt_idx: Option<i32> = comps.get(1).and_then(|v| {

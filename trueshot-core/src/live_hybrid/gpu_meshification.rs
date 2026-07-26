@@ -806,7 +806,7 @@ fn generate_gpu_tri_table() -> [i32; 4096] {
 
 // Lazy static for the GPU-formatted table
 static GPU_MC_TABLE: std::sync::LazyLock<[i32; 4096]> =
-    std::sync::LazyLock::new(|| generate_gpu_tri_table());
+    std::sync::LazyLock::new(generate_gpu_tri_table);
 
 /// Get the GPU marching cubes triangle table
 pub fn get_gpu_tri_table() -> &'static [i32; 4096] {

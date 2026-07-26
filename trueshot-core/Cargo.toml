@@ -101,10 +101,15 @@ optional = true
 
 [dev-dependencies]
 tempfile = "3.10"
+criterion = "0.5"
 
-[lints.clippy]
-too_many_arguments = "allow"
-type_complexity = "allow"
+[[bench]]
+name = "alignment_benchmark"
+harness = false
 
-[lints.rust]
-non_snake_case = "allow"
+[[bench]]
+name = "fusion_benchmark"
+harness = false
+
+[lints]
+workspace = true

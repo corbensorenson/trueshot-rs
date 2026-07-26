@@ -25,3 +25,5 @@ harness = false
 [[bench]]
 name = "unified_bench"
 harness = false
+[lints]
+workspace = true

@@ -368,7 +368,7 @@ impl IKSolver {
         let forward = target_vec.normalize();
         let pole = chain
             .bone_lengths
-            .get(0)
+            .first()
             .map(|_| target.pole_vector.unwrap_or(na::Vector3::y()))
             .unwrap_or(na::Vector3::y());
 

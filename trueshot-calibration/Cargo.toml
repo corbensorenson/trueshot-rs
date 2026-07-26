@@ -12,3 +12,5 @@ opencv = { version = "0.88", optional = true, default-features = false, features
 
 [features]
 opencv = ["dep:opencv"]
+[lints]
+workspace = true

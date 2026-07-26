@@ -156,7 +156,7 @@ impl LiveScanData {
         let mut frames = Vec::with_capacity(self.frames.len());
 
         for (i, frame) in self.frames.iter().enumerate() {
-            let mat = na::Matrix4::from_fn(|r, c| frame.transform_matrix[r][c] as f64);
+            let mat = na::Matrix4::from_fn(|r, c| frame.transform_matrix[r][c]);
 
             let pose_mat = match self.transform_convention {
                 TransformConvention::CameraToWorld => mat,

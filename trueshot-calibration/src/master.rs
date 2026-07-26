@@ -23,7 +23,7 @@ impl MasterCalibration {
             color_profile: None,
         }
     }
-    
+
     // Step 1: Lens Distrotion (Checkerboard close up)
     pub fn run_lens_step(
         &mut self,
@@ -37,7 +37,7 @@ impl MasterCalibration {
         self.step = self.step.max(1);
         Ok(intrinsics)
     }
-    
+
     // Step 2: Extrinsics (Checkerboard at distance)
     pub fn run_extrinsics_step(
         &mut self,
@@ -56,7 +56,7 @@ impl MasterCalibration {
         self.step = self.step.max(2);
         Ok(extrinsics)
     }
-    
+
     // Step 3: Color (Color Card)
     pub fn run_color_step(&mut self, image_paths: &[PathBuf]) -> Result<ColorCalibration> {
         if image_paths.is_empty() {
@@ -89,7 +89,10 @@ impl MasterCalibration {
             if mean[2] > 0.0 { target / mean[2] } else { 1.0 },
         ];
 
-        let profile = ColorCalibration { gains, mean_rgb: mean };
+        let profile = ColorCalibration {
+            gains,
+            mean_rgb: mean,
+        };
         self.color_profile = Some(profile.clone());
         self.step = self.step.max(3);
         Ok(profile)

@@ -383,7 +383,10 @@ impl AuthStore {
         Ok(())
     }
 
-    pub async fn get_refresh_session(&self, refresh_hash: &str) -> Result<Option<StoredRefreshSession>> {
+    pub async fn get_refresh_session(
+        &self,
+        refresh_hash: &str,
+    ) -> Result<Option<StoredRefreshSession>> {
         let row = sqlx::query(
             r#"
             SELECT subject, role, scopes_json, expires_at, issued_at, last_seen, csrf_token
@@ -461,7 +464,11 @@ impl AuthStore {
         Ok(result.rows_affected() == 1)
     }
 
-    pub async fn consume_pairing_code(&self, code: &str, now: i64) -> Result<Option<StoredPairingCode>> {
+    pub async fn consume_pairing_code(
+        &self,
+        code: &str,
+        now: i64,
+    ) -> Result<Option<StoredPairingCode>> {
         let row = sqlx::query(
             r#"
             SELECT scopes_json, label, created_at, expires_at
@@ -482,13 +489,11 @@ impl AuthStore {
             return Ok(None);
         }
 
-        let deleted = sqlx::query(
-            "DELETE FROM pairing_codes WHERE code = ? AND expires_at > ?;",
-        )
-        .bind(code)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+        let deleted = sqlx::query("DELETE FROM pairing_codes WHERE code = ? AND expires_at > ?;")
+            .bind(code)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
         if deleted.rows_affected() != 1 {
             return Ok(None);
         }
@@ -543,9 +548,10 @@ impl AuthStore {
     }
 
     pub async fn any_admin_exists(&self) -> Result<bool> {
-        let row = sqlx::query("SELECT COUNT(1) as cnt FROM users WHERE role = 'Admin' AND active = 1;")
-            .fetch_one(&self.pool)
-            .await?;
+        let row =
+            sqlx::query("SELECT COUNT(1) as cnt FROM users WHERE role = 'Admin' AND active = 1;")
+                .fetch_one(&self.pool)
+                .await?;
         let count: i64 = row.try_get("cnt")?;
         Ok(count > 0)
     }
@@ -752,7 +758,11 @@ impl AuthStore {
         Ok(row.map(row_to_share_link))
     }
 
-    pub async fn consume_share_link(&self, token_hash: &str, now: i64) -> Result<Option<StoredShareLink>> {
+    pub async fn consume_share_link(
+        &self,
+        token_hash: &str,
+        now: i64,
+    ) -> Result<Option<StoredShareLink>> {
         let res = sqlx::query(
             r#"
             UPDATE share_links
@@ -957,7 +967,10 @@ impl AuthStore {
         }))
     }
 
-    pub async fn get_share_public_by_code(&self, short_code: &str) -> Result<Option<StoredSharePublic>> {
+    pub async fn get_share_public_by_code(
+        &self,
+        short_code: &str,
+    ) -> Result<Option<StoredSharePublic>> {
         let row = sqlx::query(
             r#"
             SELECT token_hash, public_token, short_code, title, description, tags_json, cover_path, created_at, updated_at, is_public

@@ -1,12 +1,12 @@
 //! Native Geometry Module - TrueShot's Own Implementation
-//! 
+//!
 //! Provides geometric algorithms for camera pose estimation
 //! without OpenCV dependency.
 
-pub mod ransac;
+pub mod bundle_adjustment;
 pub mod essential;
 pub mod magsac;
-pub mod bundle_adjustment;
+pub mod ransac;
 
 use nalgebra as na;
 
@@ -29,7 +29,7 @@ pub fn estimate_fundamental_8point(
 
     // Build coefficient matrix A (n x 9)
     let mut a = na::DMatrix::<f64>::zeros(n, 9);
-    
+
     for i in 0..n {
         let (x1, y1) = norm_pts1[i];
         let (x2, y2) = norm_pts2[i];
@@ -48,15 +48,13 @@ pub fn estimate_fundamental_8point(
     // Solve using SVD
     let svd = na::SVD::new(a, true, true);
     let v = svd.v_t?;
-    
+
     // F is last row of V^T (corresponding to smallest singular value)
     let f_vec = v.row(8);
-    
+
     // Reshape to 3x3
     let mut f = na::Matrix3::new(
-        f_vec[0], f_vec[1], f_vec[2],
-        f_vec[3], f_vec[4], f_vec[5],
-        f_vec[6], f_vec[7], f_vec[8],
+        f_vec[0], f_vec[1], f_vec[2], f_vec[3], f_vec[4], f_vec[5], f_vec[6], f_vec[7], f_vec[8],
     );
 
     // Enforce rank-2 constraint
@@ -78,30 +76,40 @@ pub fn estimate_fundamental_8point(
 /// Normalize points to have centroid at origin and avg distance sqrt(2)
 fn normalize_points(points: &[(f64, f64)]) -> (Vec<(f64, f64)>, na::Matrix3<f64>) {
     let n = points.len() as f64;
-    
+
     // Compute centroid
-    let (cx, cy) = points.iter()
+    let (cx, cy) = points
+        .iter()
         .fold((0.0, 0.0), |(sx, sy), (x, y)| (sx + x, sy + y));
     let cx = cx / n;
     let cy = cy / n;
 
     // Compute mean distance from centroid
-    let mean_dist: f64 = points.iter()
+    let mean_dist: f64 = points
+        .iter()
         .map(|(x, y)| ((x - cx).powi(2) + (y - cy).powi(2)).sqrt())
-        .sum::<f64>() / n;
+        .sum::<f64>()
+        / n;
 
     // Scale factor
     let scale = (2.0_f64).sqrt() / mean_dist.max(1e-10);
 
     // Normalization transform
     let t = na::Matrix3::new(
-        scale, 0.0, -scale * cx,
-        0.0, scale, -scale * cy,
-        0.0, 0.0, 1.0,
+        scale,
+        0.0,
+        -scale * cx,
+        0.0,
+        scale,
+        -scale * cy,
+        0.0,
+        0.0,
+        1.0,
     );
 
     // Normalize points
-    let normalized: Vec<(f64, f64)> = points.iter()
+    let normalized: Vec<(f64, f64)> = points
+        .iter()
         .map(|(x, y)| (scale * (x - cx), scale * (y - cy)))
         .collect();
 
@@ -109,36 +117,27 @@ fn normalize_points(points: &[(f64, f64)]) -> (Vec<(f64, f64)>, na::Matrix3<f64>
 }
 
 /// Compute essential matrix from fundamental matrix and camera intrinsics
-pub fn fundamental_to_essential(
-    f: &na::Matrix3<f64>,
-    k: &na::Matrix3<f64>,
-) -> na::Matrix3<f64> {
+pub fn fundamental_to_essential(f: &na::Matrix3<f64>, k: &na::Matrix3<f64>) -> na::Matrix3<f64> {
     k.transpose() * f * k
 }
 
 /// Decompose essential matrix into rotation and translation
 /// Returns up to 4 possible solutions
-pub fn decompose_essential(
-    e: &na::Matrix3<f64>,
-) -> Vec<(na::Matrix3<f64>, na::Vector3<f64>)> {
+pub fn decompose_essential(e: &na::Matrix3<f64>) -> Vec<(na::Matrix3<f64>, na::Vector3<f64>)> {
     let svd = na::SVD::new(*e, true, true);
-    
+
     let u = match svd.u {
         Some(u) => u,
         None => return Vec::new(),
     };
-    
+
     let v_t = match svd.v_t {
         Some(v) => v,
         None => return Vec::new(),
     };
 
     // W matrix for rotation
-    let w = na::Matrix3::new(
-        0.0, -1.0, 0.0,
-        1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0,
-    );
+    let w = na::Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
 
     // Two possible rotations
     let r1 = u * w * v_t;
@@ -152,12 +151,7 @@ pub fn decompose_essential(
     let t = u.column(2).into_owned();
 
     // Four possible solutions
-    vec![
-        (r1, t),
-        (r1, -t),
-        (r2, t),
-        (r2, -t),
-    ]
+    vec![(r1, t), (r1, -t), (r2, t), (r2, -t)]
 }
 
 /// Select the correct pose from 4 candidates using cheirality check
@@ -203,15 +197,20 @@ fn is_point_in_front(
     let x1 = k_inv * na::Vector3::new(pt1.0, pt1.1, 1.0);
     let x2 = k_inv * na::Vector3::new(pt2.0, pt2.1, 1.0);
 
-    let p1 = na::Matrix3x4::new(
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-    );
+    let p1 = na::Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
     let p2 = na::Matrix3x4::new(
-        r[(0, 0)], r[(0, 1)], r[(0, 2)], t.x,
-        r[(1, 0)], r[(1, 1)], r[(1, 2)], t.y,
-        r[(2, 0)], r[(2, 1)], r[(2, 2)], t.z,
+        r[(0, 0)],
+        r[(0, 1)],
+        r[(0, 2)],
+        t.x,
+        r[(1, 0)],
+        r[(1, 1)],
+        r[(1, 2)],
+        t.y,
+        r[(2, 0)],
+        r[(2, 1)],
+        r[(2, 2)],
+        t.z,
     );
 
     let mut a = na::Matrix4::zeros();
@@ -250,13 +249,14 @@ mod tests {
         ];
 
         let (normalized, _t) = normalize_points(&points);
-        
+
         // Centroid should be near origin
-        let (cx, cy) = normalized.iter()
+        let (cx, cy) = normalized
+            .iter()
             .fold((0.0, 0.0), |(sx, sy), (x, y)| (sx + x, sy + y));
         let cx = cx / 4.0;
         let cy = cy / 4.0;
-        
+
         assert!(cx.abs() < 1e-10);
         assert!(cy.abs() < 1e-10);
     }
@@ -266,17 +266,13 @@ mod tests {
         // Create a simple essential matrix
         let r = na::Matrix3::identity();
         let t = na::Vector3::new(1.0, 0.0, 0.0);
-        
+
         // E = [t]x * R
-        let t_cross = na::Matrix3::new(
-            0.0, -t.z, t.y,
-            t.z, 0.0, -t.x,
-            -t.y, t.x, 0.0,
-        );
+        let t_cross = na::Matrix3::new(0.0, -t.z, t.y, t.z, 0.0, -t.x, -t.y, t.x, 0.0);
         let e = t_cross * r;
 
         let solutions = decompose_essential(&e);
-        
+
         // Should get 4 solutions
         assert_eq!(solutions.len(), 4);
     }

@@ -17,3 +17,5 @@ linux = ["tokio-uring"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-uring = "0.4"
+[lints]
+workspace = true

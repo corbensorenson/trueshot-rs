@@ -25,10 +25,12 @@ pub fn inpaint_simple(image: &mut ImageBuffer<Rgb<u8>, Vec<u8>>) {
     // BFS flood fill
     while let Some((x, y)) = queue.pop_front() {
         let p = *image.get_pixel(x, y);
-        
+
         let neighbors = [
-            (x.wrapping_sub(1), y), (x + 1, y),
-            (x, y.wrapping_sub(1)), (x, y + 1)
+            (x.wrapping_sub(1), y),
+            (x + 1, y),
+            (x, y.wrapping_sub(1)),
+            (x, y + 1),
         ];
 
         for &(nx, ny) in &neighbors {

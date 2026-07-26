@@ -1,17 +1,17 @@
-use trueshot_device_manager::{Turntable, CameraManager};
-use trueshot_core::events::EventBus;
-use trueshot_core::scheduler::Scheduler;
-use trueshot_core::inventory::Inventory;
 use crate::audit::AuditLog;
-use crate::config::AppConfig;
 use crate::auth::AuthManager;
+use crate::config::AppConfig;
 use crate::guest::SlavePhoneState;
-use crate::scan_wizard::ScanWizardState;
-use crate::queue::JobQueue;
 use crate::intervalometer::IntervalometerState;
+use crate::queue::JobQueue;
+use crate::scan_wizard::ScanWizardState;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
-use std::path::PathBuf;
+use trueshot_core::events::EventBus;
+use trueshot_core::inventory::Inventory;
+use trueshot_core::scheduler::Scheduler;
+use trueshot_device_manager::{CameraManager, Turntable};
 
 pub struct SystemStats {
     pub cpu_usage: f32,

@@ -1,20 +1,22 @@
-use actix_web::{post, get, delete, web, HttpMessage, HttpRequest, HttpResponse, Responder};
+use actix_web::{delete, get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use anyhow::{Context, Result};
+use chrono::Utc;
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use chrono::Utc;
 use utoipa::{IntoParams, ToSchema};
-use redis::AsyncCommands;
 
-use crate::auth::require_admin;
 use crate::audit::AuditEvent;
-use crate::state::{AppState, CalibrationSession};
-use trueshot_device_manager::{CameraConfig, CalibrationData, ColorCalibrationData};
+use crate::auth::require_admin;
 use crate::config::AppConfig;
-use trueshot_core::color_chart::ColorChartDetector;
-use trueshot_core::inventory::{CameraCalibration as InventoryCalibration, CameraColorCalibration as InventoryColorCalibration};
-use ndarray::Array3;
+use crate::state::{AppState, CalibrationSession};
 use image::ImageReader;
+use ndarray::Array3;
+use trueshot_core::color_chart::ColorChartDetector;
+use trueshot_core::inventory::{
+    CameraCalibration as InventoryCalibration, CameraColorCalibration as InventoryColorCalibration,
+};
+use trueshot_device_manager::{CalibrationData, CameraConfig, ColorCalibrationData};
 
 #[derive(Deserialize, IntoParams)]
 struct CaptureParams {
@@ -103,19 +105,20 @@ async fn capture_calibration_frame(
         }
     };
 
-    let capture_path = match tokio::task::spawn_blocking(move || camera.capture(&CameraConfig::default())).await {
-        Ok(Ok(path)) => path,
-        Ok(Err(err)) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Capture failed: {}", err)
-            }));
-        }
-        Err(err) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Capture task failed: {}", err)
-            }));
-        }
-    };
+    let capture_path =
+        match tokio::task::spawn_blocking(move || camera.capture(&CameraConfig::default())).await {
+            Ok(Ok(path)) => path,
+            Ok(Err(err)) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Capture failed: {}", err)
+                }));
+            }
+            Err(err) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Capture task failed: {}", err)
+                }));
+            }
+        };
 
     let mut session = state.calibration_session.lock().await;
     reset_session_if_needed(&mut session, &camera_id);
@@ -128,7 +131,11 @@ async fn capture_calibration_frame(
         }));
     }
 
-    let target_path = calib_dir.join(format!("calib_{}_{}.jpg", sanitize_id(&camera_id), frame_id));
+    let target_path = calib_dir.join(format!(
+        "calib_{}_{}.jpg",
+        sanitize_id(&camera_id),
+        frame_id
+    ));
     if let Err(err) = move_capture_file(&capture_path, &target_path) {
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": format!("Failed to store calibration frame: {}", err)
@@ -183,13 +190,19 @@ async fn compute_calibration(
 
     let (paths, camera_id) = {
         let session = state.calibration_session.lock().await;
-        let camera_id = params.camera_id.clone().or_else(|| session.camera_id.clone());
+        let camera_id = params
+            .camera_id
+            .clone()
+            .or_else(|| session.camera_id.clone());
         if session.captured_frames.len() < 5 {
             return HttpResponse::BadRequest().json(CalibrationResult {
                 success: false,
                 rms_error: None,
                 camera_id,
-                message: format!("Need at least 5 frames, have {}", session.captured_frames.len()),
+                message: format!(
+                    "Need at least 5 frames, have {}",
+                    session.captured_frames.len()
+                ),
                 calibration_path: None,
             });
         }
@@ -239,7 +252,14 @@ async fn compute_calibration(
         }
     };
 
-    let calibration_path = match write_calibration_file(&state.config.paths.projects_dir, &camera_id, &calibration, rows, cols, square_size) {
+    let calibration_path = match write_calibration_file(
+        &state.config.paths.projects_dir,
+        &camera_id,
+        &calibration,
+        rows,
+        cols,
+        square_size,
+    ) {
         Ok(path) => Some(path.to_string_lossy().to_string()),
         Err(err) => {
             return HttpResponse::InternalServerError().json(CalibrationResult {
@@ -262,22 +282,24 @@ async fn compute_calibration(
     };
 
     if let Ok(mut manager) = state.camera_manager.try_lock() {
-        let _ = manager.registry.update_calibration(&camera_id, calibration_data);
+        let _ = manager
+            .registry
+            .update_calibration(&camera_id, calibration_data);
     } else {
         let mut manager = state.camera_manager.lock().await;
-        let _ = manager.registry.update_calibration(&camera_id, calibration_data);
+        let _ = manager
+            .registry
+            .update_calibration(&camera_id, calibration_data);
     }
 
-    let _ = state
-        .inventory
-        .upsert_camera_calibration(
-            &camera_id,
-            calibration.camera_matrix.clone(),
-            calibration.dist_coeffs.clone(),
-            calibration.rms_error,
-            calibration.width,
-            calibration.height,
-        );
+    let _ = state.inventory.upsert_camera_calibration(
+        &camera_id,
+        calibration.camera_matrix.clone(),
+        calibration.dist_coeffs.clone(),
+        calibration.rms_error,
+        calibration.width,
+        calibration.height,
+    );
     let inventory_calibration = InventoryCalibration {
         camera_id: camera_id.clone(),
         camera_matrix: calibration.camera_matrix.clone(),
@@ -307,7 +329,10 @@ async fn compute_calibration(
         success: true,
         rms_error: Some(calibration.rms_error),
         camera_id: Some(camera_id),
-        message: format!("Calibration complete. RMS error: {:.4}px", calibration.rms_error),
+        message: format!(
+            "Calibration complete. RMS error: {:.4}px",
+            calibration.rms_error
+        ),
         calibration_path,
     })
 }
@@ -335,7 +360,10 @@ async fn compute_color_calibration(
 
     let (frame_path, camera_id) = {
         let session = state.calibration_session.lock().await;
-        let camera_id = params.camera_id.clone().or_else(|| session.camera_id.clone());
+        let camera_id = params
+            .camera_id
+            .clone()
+            .or_else(|| session.camera_id.clone());
         if session.captured_frames.is_empty() {
             return HttpResponse::BadRequest().json(ColorCalibrationResult {
                 success: false,
@@ -429,9 +457,11 @@ async fn compute_color_calibration(
             .update_color_calibration(&camera_id, color_calibration.clone());
     }
 
-    let _ = state
-        .inventory
-        .upsert_camera_color_calibration(&camera_id, color_calibration.ccm, color_calibration.delta_e);
+    let _ = state.inventory.upsert_camera_color_calibration(
+        &camera_id,
+        color_calibration.ccm,
+        color_calibration.delta_e,
+    );
     let inventory_color = InventoryColorCalibration {
         camera_id: camera_id.clone(),
         ccm: color_calibration.ccm,
@@ -482,7 +512,10 @@ async fn compute_color_calibration(
     })
 }
 
-async fn clear_calibration_session_impl(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+async fn clear_calibration_session_impl(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -519,7 +552,10 @@ async fn clear_calibration_session(req: HttpRequest, state: web::Data<AppState>)
     )
 )]
 #[delete("/api/calibration/session")]
-async fn clear_calibration_session_delete(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
+async fn clear_calibration_session_delete(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> impl Responder {
     clear_calibration_session_impl(req, state).await
 }
 
@@ -699,10 +735,16 @@ fn calibration_warnings(
                 ));
             }
         } else {
-            warnings.push(format!("Camera {} calibration timestamp invalid", camera_id));
+            warnings.push(format!(
+                "Camera {} calibration timestamp invalid",
+                camera_id
+            ));
         }
     } else {
-        warnings.push(format!("Camera {} calibration timestamp missing", camera_id));
+        warnings.push(format!(
+            "Camera {} calibration timestamp missing",
+            camera_id
+        ));
     }
 
     let (delta_e, color_ts) = if let Some(cal) = profile_color {
@@ -734,10 +776,16 @@ fn calibration_warnings(
                 ));
             }
         } else {
-            warnings.push(format!("Camera {} color calibration timestamp invalid", camera_id));
+            warnings.push(format!(
+                "Camera {} color calibration timestamp invalid",
+                camera_id
+            ));
         }
     } else {
-        warnings.push(format!("Camera {} color calibration timestamp missing", camera_id));
+        warnings.push(format!(
+            "Camera {} color calibration timestamp missing",
+            camera_id
+        ));
     }
 
     warnings
@@ -771,7 +819,10 @@ async fn cache_color_calibration(state: &AppState, calibration: &InventoryColorC
     }
 }
 
-async fn fetch_cached_calibration(state: &AppState, camera_id: &str) -> Option<InventoryCalibration> {
+async fn fetch_cached_calibration(
+    state: &AppState,
+    camera_id: &str,
+) -> Option<InventoryCalibration> {
     let Some(client) = state.redis_client.as_ref() else {
         return None;
     };
@@ -822,10 +873,7 @@ async fn select_camera(
         anyhow::bail!("Camera index {} out of range", index);
     }
 
-    let cam = manager
-        .cameras
-        .get(0)
-        .context("No cameras available")?;
+    let cam = manager.cameras.first().context("No cameras available")?;
     let id = cam.id();
     Ok((cam.clone(), id))
 }
@@ -846,7 +894,13 @@ fn calibration_dir(projects_dir: &Path, camera_id: &str) -> PathBuf {
 fn sanitize_id(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -932,7 +986,10 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state.audit.append_with_redaction(event, &state.config.privacy) {
+    if let Err(err) = state
+        .audit
+        .append_with_redaction(event, &state.config.privacy)
+    {
         tracing::warn!("audit log failed for {}: {}", req.path(), err);
     }
 }

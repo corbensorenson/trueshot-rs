@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use uuid::Uuid;
 use trueshot_core::scheduler::{JobInfo, JobStatus, SchedulerObserver};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueJobRecord {
@@ -47,8 +47,9 @@ pub struct JobQueue {
 impl JobQueue {
     pub async fn new(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create job db directory {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create job db directory {}", parent.display())
+            })?;
         }
         let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))?
             .create_if_missing(true);
@@ -256,9 +257,10 @@ impl JobQueue {
         )
         .execute(&self.pool)
         .await?;
-        let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM job_queue_migrations")
-            .fetch_one(&self.pool)
-            .await?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(version) FROM job_queue_migrations")
+                .fetch_one(&self.pool)
+                .await?;
         if current.unwrap_or(0) < 1 {
             sqlx::query(
                 r#"CREATE TABLE IF NOT EXISTS jobs (
@@ -338,7 +340,14 @@ impl SchedulerObserver for QueueObserver {
         let progress = job.progress;
         tokio::spawn(async move {
             let _ = queue
-                .sync_job_info(job.id, status, progress, started_at, finished_at, last_error)
+                .sync_job_info(
+                    job.id,
+                    status,
+                    progress,
+                    started_at,
+                    finished_at,
+                    last_error,
+                )
                 .await;
             if should_notify {
                 if let Ok(Some((record, payload))) = queue.get_job_detail(job.id).await {
@@ -355,7 +364,11 @@ impl SchedulerObserver for QueueObserver {
                                         .send()
                                         .await;
                                     if let Err(err) = res {
-                                        tracing::warn!("Webhook delivery failed for {}: {}", record.id, err);
+                                        tracing::warn!(
+                                            "Webhook delivery failed for {}: {}",
+                                            record.id,
+                                            err
+                                        );
                                     }
                                 }
                             }

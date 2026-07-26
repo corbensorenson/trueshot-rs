@@ -1,16 +1,16 @@
+use crate::config::PrivacyConfig;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::time::Duration;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+use trueshot_core::security::provenance::{verify_signature, ProvenanceSigner};
 use uuid::Uuid;
-use trueshot_core::security::provenance::{ProvenanceSigner, verify_signature};
-use crate::config::PrivacyConfig;
 
 #[derive(Debug, Clone)]
 pub struct AuditAnchorConfig {
@@ -182,7 +182,9 @@ impl AuditLog {
     }
 
     pub fn verify_anchor(&self) -> Result<AuditAnchorVerification> {
-        let anchor_path = self.anchor.as_ref()
+        let anchor_path = self
+            .anchor
+            .as_ref()
             .map(|a| a.anchor_path.clone())
             .unwrap_or_else(|| self.path.with_extension("anchor.log"));
 
@@ -205,7 +207,11 @@ impl AuditLog {
         for (idx, record) in audit_records.iter().enumerate() {
             audit_index.insert(
                 record.hash.clone(),
-                (idx, record.prev_hash.clone(), record.event.timestamp.to_rfc3339()),
+                (
+                    idx,
+                    record.prev_hash.clone(),
+                    record.event.timestamp.to_rfc3339(),
+                ),
             );
         }
 
@@ -246,7 +252,8 @@ impl AuditLog {
                 &anchor.payload.signer_public_key,
                 &anchor.payload.signature_payload,
                 &anchor.payload.signature,
-            ).unwrap_or(false);
+            )
+            .unwrap_or(false);
             if !signature_ok {
                 invalid_signatures += 1;
                 issues.push(format!(
@@ -480,7 +487,13 @@ impl AuditAnchor {
             }
         }
 
-        self.write_anchor_log(&payload, &status, error.as_deref(), http_status, receipt.as_deref())?;
+        self.write_anchor_log(
+            &payload,
+            &status,
+            error.as_deref(),
+            http_status,
+            receipt.as_deref(),
+        )?;
 
         if status == "anchor_failed" {
             anyhow::bail!(
@@ -502,7 +515,10 @@ impl AuditAnchor {
     ) -> Result<()> {
         if let Some(parent) = self.anchor_path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create audit anchor directory: {}", parent.display())
+                format!(
+                    "Failed to create audit anchor directory: {}",
+                    parent.display()
+                )
             })?;
         }
         let record = AuditAnchorRecord {
@@ -518,7 +534,12 @@ impl AuditAnchor {
             .create(true)
             .append(true)
             .open(&self.anchor_path)
-            .with_context(|| format!("Failed to open audit anchor log: {}", self.anchor_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to open audit anchor log: {}",
+                    self.anchor_path.display()
+                )
+            })?;
         writeln!(file, "{}", serde_json::to_string(&record)?)?;
         Ok(())
     }

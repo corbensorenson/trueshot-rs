@@ -1,4 +1,4 @@
-//! Core data structures for the pixelcollapse2 pipeline.
+//! Core data structures for the TrueShot pipeline.
 
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};

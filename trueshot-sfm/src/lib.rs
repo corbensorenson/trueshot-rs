@@ -23,21 +23,21 @@
 //!
 //! let mut pipeline = SfmPipeline::new(SfmConfig::default());
 //! pipeline.add_images(&["img1.jpg", "img2.jpg", "img3.jpg"])?;
-//! 
+//!
 //! let reconstruction = pipeline.run()?;
 //! reconstruction.export_ply("output.ply")?;
 //! ```
 
+pub mod dense;
+pub mod distortion;
 pub mod features;
 pub mod geometry;
-pub mod optimization;
-pub mod dense;
 pub mod mesh;
-pub mod distortion;
+pub mod optimization;
 
-use std::path::{Path, PathBuf};
 use nalgebra as na;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 // ============================================================================
 // Core Types
@@ -68,43 +68,31 @@ pub struct CameraIntrinsics {
 
 impl CameraIntrinsics {
     pub fn to_matrix(&self) -> na::Matrix3<f64> {
-        na::Matrix3::new(
-            self.fx, 0.0, self.cx,
-            0.0, self.fy, self.cy,
-            0.0, 0.0, 1.0,
-        )
+        na::Matrix3::new(self.fx, 0.0, self.cx, 0.0, self.fy, self.cy, 0.0, 0.0, 1.0)
     }
 }
 
 /// Distortion model for camera intrinsics
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DistortionModel {
+    #[default]
     None,
     BrownConrady,
     Fisheye,
 }
 
-impl Default for DistortionModel {
-    fn default() -> Self {
-        DistortionModel::None
-    }
-}
-
 /// Rolling shutter readout direction.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RollingShutterDirection {
+    #[default]
     TopToBottom,
     BottomToTop,
     LeftToRight,
     RightToLeft,
-}
-
-impl Default for RollingShutterDirection {
-    fn default() -> Self {
-        RollingShutterDirection::TopToBottom
-    }
 }
 
 /// Rolling shutter model with line readout time in milliseconds.
@@ -124,15 +112,25 @@ impl RollingShutterModel {
         }
         let norm = match self.direction {
             RollingShutterDirection::TopToBottom | RollingShutterDirection::BottomToTop => {
-                if height > 1 { y / (height as f64 - 1.0) } else { 0.0 }
+                if height > 1 {
+                    y / (height as f64 - 1.0)
+                } else {
+                    0.0
+                }
             }
             RollingShutterDirection::LeftToRight | RollingShutterDirection::RightToLeft => {
-                if width > 1 { x / (width as f64 - 1.0) } else { 0.0 }
+                if width > 1 {
+                    x / (width as f64 - 1.0)
+                } else {
+                    0.0
+                }
             }
         };
         let centered = norm - 0.5;
         let signed = match self.direction {
-            RollingShutterDirection::BottomToTop | RollingShutterDirection::RightToLeft => -centered,
+            RollingShutterDirection::BottomToTop | RollingShutterDirection::RightToLeft => {
+                -centered
+            }
             _ => centered,
         };
         signed * readout
@@ -167,7 +165,7 @@ impl CameraPose {
             translation: na::Vector3::zeros(),
         }
     }
-    
+
     pub fn to_matrix(&self) -> na::Matrix4<f64> {
         let r = self.rotation.to_rotation_matrix();
         let mut m = na::Matrix4::identity();
@@ -200,7 +198,7 @@ pub struct ImageData {
     pub path: PathBuf,
     pub intrinsics: CameraIntrinsics,
     pub pose: Option<CameraPose>,
-    pub prior_pose: Option<CameraPose>,  // Prior from livescan
+    pub prior_pose: Option<CameraPose>, // Prior from livescan
     pub keypoints: Vec<features::Keypoint>,
     pub descriptors: Vec<features::Descriptor>,
     pub rolling_shutter: Option<RollingShutterModel>,
@@ -220,7 +218,7 @@ impl ImageData {
     ) -> anyhow::Result<Self> {
         let img = image::open(path)?;
         let (keypoints, descriptors) = features::detect_sift(&img, max_features);
-        
+
         Ok(Self {
             id: 0,
             path: path.to_path_buf(),
@@ -271,10 +269,10 @@ impl SparseReconstruction {
     /// Export to PLY format
     pub fn export_ply(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
         use std::io::Write;
-        
+
         let path = path.as_ref();
         let mut file = std::fs::File::create(path)?;
-        
+
         // PLY header
         writeln!(file, "ply")?;
         writeln!(file, "format ascii 1.0")?;
@@ -286,14 +284,16 @@ impl SparseReconstruction {
         writeln!(file, "property uchar green")?;
         writeln!(file, "property uchar blue")?;
         writeln!(file, "end_header")?;
-        
+
         // Points
         for p in &self.points {
-            writeln!(file, "{} {} {} {} {} {}",
-                p.position.x, p.position.y, p.position.z,
-                p.color[0], p.color[1], p.color[2])?;
+            writeln!(
+                file,
+                "{} {} {} {} {} {}",
+                p.position.x, p.position.y, p.position.z, p.color[0], p.color[1], p.color[2]
+            )?;
         }
-        
+
         Ok(())
     }
 }
@@ -401,25 +401,25 @@ impl SfmPipeline {
             reconstruction: None,
         }
     }
-    
+
     /// Add images to the pipeline
     pub fn add_images<P: AsRef<Path>>(&mut self, paths: &[P]) -> anyhow::Result<()> {
         for (id, path) in paths.iter().enumerate() {
             let path = path.as_ref();
             let img = image::open(path)?;
-            
+
             // Extract features
             let (keypoints, descriptors) = match self.config.feature_type {
                 FeatureType::Orb => features::detect_orb(&img, self.config.max_features),
                 FeatureType::Sift => features::detect_sift(&img, self.config.max_features),
                 FeatureType::Akaze => features::detect_orb(&img, self.config.max_features), // Fallback
             };
-            
+
             // Estimate intrinsics from image size
             let w = img.width();
             let h = img.height();
             let focal = (w.max(h) as f64) * 1.2; // Heuristic
-            
+
             let intrinsics = CameraIntrinsics {
                 fx: focal,
                 fy: focal,
@@ -430,7 +430,7 @@ impl SfmPipeline {
                 distortion: vec![],
                 distortion_model: DistortionModel::None,
             };
-            
+
             self.images.push(ImageData {
                 id,
                 path: path.to_path_buf(),
@@ -442,10 +442,14 @@ impl SfmPipeline {
                 rolling_shutter: None,
                 camera_motion: None,
             });
-            
-            tracing::info!("Added image {} with {} features", path.display(), self.images.last().unwrap().keypoints.len());
+
+            tracing::info!(
+                "Added image {} with {} features",
+                path.display(),
+                self.images.last().unwrap().keypoints.len()
+            );
         }
-        
+
         Ok(())
     }
 
@@ -458,13 +462,13 @@ impl SfmPipeline {
     ) -> anyhow::Result<()> {
         let path = path.as_ref();
         let img = image::open(path)?;
-        
+
         let (keypoints, descriptors) = match self.config.feature_type {
             FeatureType::Orb => features::detect_orb(&img, self.config.max_features),
             FeatureType::Sift => features::detect_sift(&img, self.config.max_features),
             FeatureType::Akaze => features::detect_orb(&img, self.config.max_features),
         };
-        
+
         let id = self.images.len();
         self.images.push(ImageData {
             id,
@@ -477,8 +481,12 @@ impl SfmPipeline {
             rolling_shutter: None,
             camera_motion: None,
         });
-        
-        tracing::info!("Added image {} with {} features", path.display(), self.images.last().unwrap().keypoints.len());
+
+        tracing::info!(
+            "Added image {} with {} features",
+            path.display(),
+            self.images.last().unwrap().keypoints.len()
+        );
         Ok(())
     }
 
@@ -513,34 +521,42 @@ impl SfmPipeline {
             camera_motion,
         });
 
-        tracing::info!("Added image {} with {} features", path.display(), self.images.last().unwrap().keypoints.len());
+        tracing::info!(
+            "Added image {} with {} features",
+            path.display(),
+            self.images.last().unwrap().keypoints.len()
+        );
         Ok(())
     }
-    
+
     /// Add a single pre-processed image
     pub fn add_image(&mut self, mut image: ImageData) -> anyhow::Result<()> {
         image.id = self.images.len();
         self.images.push(image);
         Ok(())
     }
-    
+
     /// Run the full SfM pipeline
     pub fn run(&mut self) -> anyhow::Result<SparseReconstruction> {
         tracing::info!("🚀 Starting SfM pipeline with {} images", self.images.len());
-        
+
         if self.images.len() < 2 {
             anyhow::bail!("Need at least 2 images for reconstruction");
         }
-        
+
         // 1. Match features between all image pairs
         tracing::info!("🔗 Matching features...");
-        let matches = geometry::match_all_pairs(&self.images, self.config.match_ratio, self.config.min_matches);
+        let matches = geometry::match_all_pairs(
+            &self.images,
+            self.config.match_ratio,
+            self.config.min_matches,
+        );
         tracing::info!("Found {} valid image pairs", matches.len());
-        
+
         // 2. Geometric verification and essential matrix estimation
         tracing::info!("📐 Estimating geometry...");
         let mut poses = geometry::estimate_poses(&self.images, &matches)?;
-        
+
         // 3. Triangulate points
         tracing::info!("📍 Triangulating points...");
         let mut points = geometry::triangulate_points(&self.images, &matches, &poses)?;
@@ -560,28 +576,46 @@ impl SfmPipeline {
 
         // 4. Bundle adjustment
         tracing::info!("⚙️  Running bundle adjustment...");
-        optimization::bundle_adjust(&mut points, &mut poses, &self.images, self.config.ba_iterations)?;
-        
+        optimization::bundle_adjust(
+            &mut points,
+            &mut poses,
+            &self.images,
+            self.config.ba_iterations,
+        )?;
+
         // 5. Build result
         let reconstruction = SparseReconstruction {
             points,
             cameras: self.images.iter().map(|i| i.intrinsics.clone()).collect(),
             poses,
-            image_names: self.images.iter().map(|i| i.path.to_string_lossy().to_string()).collect(),
+            image_names: self
+                .images
+                .iter()
+                .map(|i| i.path.to_string_lossy().to_string())
+                .collect(),
         };
-        
-        tracing::info!("✅ Reconstruction complete: {} points, {} cameras",
-            reconstruction.points.len(), reconstruction.poses.len());
-        
+
+        tracing::info!(
+            "✅ Reconstruction complete: {} points, {} cameras",
+            reconstruction.points.len(),
+            reconstruction.poses.len()
+        );
+
         self.reconstruction = Some(reconstruction.clone());
         Ok(reconstruction)
     }
 
     /// Run the SfM pipeline using provided camera pose priors (camera-to-world).
     /// Priors must be supplied for all images in the same order as added.
-    pub fn run_with_priors(&mut self, priors: &[CameraPose]) -> anyhow::Result<SparseReconstruction> {
-        tracing::info!("🚀 Starting SfM pipeline with {} images and pose priors", self.images.len());
-        
+    pub fn run_with_priors(
+        &mut self,
+        priors: &[CameraPose],
+    ) -> anyhow::Result<SparseReconstruction> {
+        tracing::info!(
+            "🚀 Starting SfM pipeline with {} images and pose priors",
+            self.images.len()
+        );
+
         if self.images.len() < 2 {
             anyhow::bail!("Need at least 2 images for reconstruction");
         }
@@ -592,18 +626,22 @@ impl SfmPipeline {
                 self.images.len()
             );
         }
-        
+
         // 1. Match features between all image pairs
         tracing::info!("🔗 Matching features...");
-        let matches = geometry::match_all_pairs(&self.images, self.config.match_ratio, self.config.min_matches);
+        let matches = geometry::match_all_pairs(
+            &self.images,
+            self.config.match_ratio,
+            self.config.min_matches,
+        );
         tracing::info!("Found {} valid image pairs", matches.len());
-        
+
         // 2. Use priors as initial poses
         let mut poses = priors.to_vec();
         for (image, prior) in self.images.iter_mut().zip(priors.iter()) {
             image.prior_pose = Some(prior.clone());
         }
-        
+
         // 3. Triangulate points
         tracing::info!("📍 Triangulating points...");
         let mut points = geometry::triangulate_points(&self.images, &matches, &poses)?;
@@ -623,22 +661,34 @@ impl SfmPipeline {
 
         // 4. Bundle adjustment
         tracing::info!("⚙️  Running bundle adjustment...");
-        optimization::bundle_adjust(&mut points, &mut poses, &self.images, self.config.ba_iterations)?;
-        
+        optimization::bundle_adjust(
+            &mut points,
+            &mut poses,
+            &self.images,
+            self.config.ba_iterations,
+        )?;
+
         let reconstruction = SparseReconstruction {
             points,
             cameras: self.images.iter().map(|i| i.intrinsics.clone()).collect(),
             poses,
-            image_names: self.images.iter().map(|i| i.path.to_string_lossy().to_string()).collect(),
+            image_names: self
+                .images
+                .iter()
+                .map(|i| i.path.to_string_lossy().to_string())
+                .collect(),
         };
-        
-        tracing::info!("✅ Reconstruction complete: {} points, {} cameras",
-            reconstruction.points.len(), reconstruction.poses.len());
-        
+
+        tracing::info!(
+            "✅ Reconstruction complete: {} points, {} cameras",
+            reconstruction.points.len(),
+            reconstruction.poses.len()
+        );
+
         self.reconstruction = Some(reconstruction.clone());
         Ok(reconstruction)
     }
-    
+
     /// Get the reconstruction result
     pub fn get_reconstruction(&self) -> Option<&SparseReconstruction> {
         self.reconstruction.as_ref()
@@ -646,7 +696,10 @@ impl SfmPipeline {
 
     pub fn reprojection_stats(&self) -> Option<ReprojectionStats> {
         let reconstruction = self.reconstruction.as_ref()?;
-        if reconstruction.points.is_empty() || reconstruction.poses.is_empty() || self.images.is_empty() {
+        if reconstruction.points.is_empty()
+            || reconstruction.poses.is_empty()
+            || self.images.is_empty()
+        {
             return None;
         }
 
@@ -782,7 +835,7 @@ fn median_usize(values: &mut Vec<usize>) -> Option<f64> {
 }
 
 // Re-export for convenience
-pub use features::{Keypoint, Descriptor};
+pub use features::{Descriptor, Keypoint};
 pub use geometry::FeatureMatch;
 
 // Add num_cpus for default thread count

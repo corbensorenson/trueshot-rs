@@ -236,11 +236,17 @@ impl DeformationMLP {
         let output = self.weights.last().unwrap().forward(&x);
 
         // Parse output into deformation components
+        let raw_rotation = na::Quaternion::new(output[6], output[3], output[4], output[5]);
+        let rotation_delta = if raw_rotation.norm_squared() > 1e-12 {
+            na::UnitQuaternion::new_normalize(raw_rotation)
+        } else {
+            // Zero input should initialize to identity, not an invalid quaternion.
+            na::UnitQuaternion::identity()
+        };
+
         DeformationOutput {
             position_delta: na::Vector3::new(output[0], output[1], output[2]),
-            rotation_delta: na::UnitQuaternion::from_quaternion(na::Quaternion::new(
-                output[6], output[3], output[4], output[5],
-            )),
+            rotation_delta,
             scale_delta: na::Vector3::new(output[7], output[8], output[9]),
         }
     }

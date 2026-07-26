@@ -5,22 +5,22 @@
 //! - NAS/S3 configuration
 //! - Storage browsing and sync
 
-use actix_web::{get, post, delete, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{delete, get, post, web, HttpRequest, HttpResponse, Responder};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64_URL, Engine as _};
+use chrono::{DateTime, Utc};
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use chrono::{DateTime, Utc};
-use rand::RngCore;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64_URL, Engine as _};
-use flate2::{Compression, write::GzEncoder, read::GzDecoder};
-use sha2::{Digest, Sha256};
 use tar::{Archive, Builder};
+use tokio::sync::RwLock;
 use trueshot_core::cloud_client::{CloudStorage, S3Client};
-use trueshot_core::security::{TokenStore, StoredToken};
+use trueshot_core::security::{StoredToken, TokenStore};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -69,7 +69,7 @@ impl CloudProvider {
             Self::Nas => "Network Storage",
         }
     }
-    
+
     pub fn requires_oauth(&self) -> bool {
         matches!(self, Self::GoogleDrive | Self::Dropbox | Self::OneDrive)
     }
@@ -224,8 +224,8 @@ impl StorageState {
         let frontend_base_url = frontend_base_url(config);
         let oauth_configs = Self::default_oauth_configs(&oauth_redirect_base);
         Self::log_oauth_config_status(&oauth_configs);
-        let connections = load_connections(&connections_path, &token_store, &oauth_configs)
-            .unwrap_or_default();
+        let connections =
+            load_connections(&connections_path, &token_store, &oauth_configs).unwrap_or_default();
         let backups = load_backups(&backups_path).unwrap_or_default();
 
         Ok(Self {
@@ -240,42 +240,64 @@ impl StorageState {
             frontend_base_url,
         })
     }
-    
+
     fn default_oauth_configs(oauth_redirect_base: &str) -> HashMap<CloudProvider, OAuthConfig> {
         let mut configs = HashMap::new();
-        
+
         // These would be loaded from environment/config in production
         // Using placeholders - users need to provide their own OAuth credentials
-        
-        configs.insert(CloudProvider::GoogleDrive, OAuthConfig {
-            client_id: std::env::var("GOOGLE_CLIENT_ID").unwrap_or_default(),
-            client_secret: std::env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default(),
-            redirect_uri: format!("{}/api/storage/oauth/google_drive/callback", oauth_redirect_base),
-            scopes: vec![
-                "https://www.googleapis.com/auth/drive.file".to_string(),
-                "https://www.googleapis.com/auth/drive.metadata.readonly".to_string(),
-            ],
-        });
-        
-        configs.insert(CloudProvider::Dropbox, OAuthConfig {
-            client_id: std::env::var("DROPBOX_CLIENT_ID").unwrap_or_default(),
-            client_secret: std::env::var("DROPBOX_CLIENT_SECRET").unwrap_or_default(),
-            redirect_uri: format!("{}/api/storage/oauth/dropbox/callback", oauth_redirect_base),
-            scopes: vec!["files.content.read".to_string(), "files.content.write".to_string()],
-        });
-        
-        configs.insert(CloudProvider::OneDrive, OAuthConfig {
-            client_id: std::env::var("ONEDRIVE_CLIENT_ID").unwrap_or_default(),
-            client_secret: std::env::var("ONEDRIVE_CLIENT_SECRET").unwrap_or_default(),
-            redirect_uri: format!("{}/api/storage/oauth/onedrive/callback", oauth_redirect_base),
-            scopes: vec!["Files.ReadWrite".to_string(), "offline_access".to_string()],
-        });
-        
+
+        configs.insert(
+            CloudProvider::GoogleDrive,
+            OAuthConfig {
+                client_id: std::env::var("GOOGLE_CLIENT_ID").unwrap_or_default(),
+                client_secret: std::env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+                redirect_uri: format!(
+                    "{}/api/storage/oauth/google_drive/callback",
+                    oauth_redirect_base
+                ),
+                scopes: vec![
+                    "https://www.googleapis.com/auth/drive.file".to_string(),
+                    "https://www.googleapis.com/auth/drive.metadata.readonly".to_string(),
+                ],
+            },
+        );
+
+        configs.insert(
+            CloudProvider::Dropbox,
+            OAuthConfig {
+                client_id: std::env::var("DROPBOX_CLIENT_ID").unwrap_or_default(),
+                client_secret: std::env::var("DROPBOX_CLIENT_SECRET").unwrap_or_default(),
+                redirect_uri: format!("{}/api/storage/oauth/dropbox/callback", oauth_redirect_base),
+                scopes: vec![
+                    "files.content.read".to_string(),
+                    "files.content.write".to_string(),
+                ],
+            },
+        );
+
+        configs.insert(
+            CloudProvider::OneDrive,
+            OAuthConfig {
+                client_id: std::env::var("ONEDRIVE_CLIENT_ID").unwrap_or_default(),
+                client_secret: std::env::var("ONEDRIVE_CLIENT_SECRET").unwrap_or_default(),
+                redirect_uri: format!(
+                    "{}/api/storage/oauth/onedrive/callback",
+                    oauth_redirect_base
+                ),
+                scopes: vec!["Files.ReadWrite".to_string(), "offline_access".to_string()],
+            },
+        );
+
         configs
     }
 
     fn log_oauth_config_status(configs: &HashMap<CloudProvider, OAuthConfig>) {
-        for provider in [CloudProvider::GoogleDrive, CloudProvider::Dropbox, CloudProvider::OneDrive] {
+        for provider in [
+            CloudProvider::GoogleDrive,
+            CloudProvider::Dropbox,
+            CloudProvider::OneDrive,
+        ] {
             match configs.get(&provider) {
                 Some(config) => {
                     let availability = oauth_config_availability(provider, config);
@@ -312,10 +334,7 @@ impl StorageState {
     )
 )]
 #[get("/api/storage/providers")]
-pub async fn list_providers(
-    req: HttpRequest,
-    state: web::Data<StorageState>,
-) -> impl Responder {
+pub async fn list_providers(req: HttpRequest, state: web::Data<StorageState>) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -418,12 +437,13 @@ pub async fn list_providers(
             } else {
                 entry["available"] = serde_json::Value::Bool(false);
                 entry["oauth_configured"] = serde_json::Value::Bool(false);
-                entry["unavailable_reason"] = serde_json::Value::String("OAuth config missing".to_string());
+                entry["unavailable_reason"] =
+                    serde_json::Value::String("OAuth config missing".to_string());
             }
         }
         providers.push(entry);
     }
-    
+
     HttpResponse::Ok().json(providers)
 }
 
@@ -443,10 +463,7 @@ pub async fn list_storage(req: HttpRequest, state: web::Data<StorageState>) -> i
         return resp;
     }
     {
-        let providers = match state.token_store.list_providers() {
-            Ok(p) => p,
-            Err(_) => Vec::new(),
-        };
+        let providers = state.token_store.list_providers().unwrap_or_default();
         let mut connections = state.connections.write().await;
         for provider_key in providers {
             if let Some(provider) = provider_from_connection_id(&provider_key) {
@@ -454,22 +471,25 @@ pub async fn list_storage(req: HttpRequest, state: web::Data<StorageState>) -> i
                     continue;
                 }
                 if let Ok(token) = state.token_store.load_token(&provider_key) {
-                    connections.insert(provider_key.clone(), StorageConnection {
-                        id: provider_key.clone(),
-                        provider,
-                        name: provider.display_name().to_string(),
-                        email: token.email.clone(),
-                        status: StorageConnectionStatus::Connected,
-                        connected_at: token.created_at,
-                        last_sync: None,
-                        used_bytes: None,
-                        total_bytes: None,
-                        base_path: "/TrueShot".to_string(),
-                        endpoint: None,
-                        bucket: None,
-                        region: None,
-                        tokens: None,
-                    });
+                    connections.insert(
+                        provider_key.clone(),
+                        StorageConnection {
+                            id: provider_key.clone(),
+                            provider,
+                            name: provider.display_name().to_string(),
+                            email: token.email.clone(),
+                            status: StorageConnectionStatus::Connected,
+                            connected_at: token.created_at,
+                            last_sync: None,
+                            used_bytes: None,
+                            total_bytes: None,
+                            base_path: "/TrueShot".to_string(),
+                            endpoint: None,
+                            bucket: None,
+                            region: None,
+                            tokens: None,
+                        },
+                    );
                 }
             }
         }
@@ -512,7 +532,7 @@ pub async fn get_storage(
     }
     let id = path.into_inner();
     let connections = state.connections.read().await;
-    
+
     match connections.get(&id) {
         Some(conn) => HttpResponse::Ok().json(conn),
         None => HttpResponse::NotFound().body("Storage connection not found"),
@@ -540,24 +560,26 @@ pub async fn get_oauth_url(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let provider_str = path.into_inner();
-    
+
     let provider = match provider_str.as_str() {
         "google_drive" => CloudProvider::GoogleDrive,
         "dropbox" => CloudProvider::Dropbox,
         "onedrive" => CloudProvider::OneDrive,
         _ => return HttpResponse::BadRequest().body("Unknown provider"),
     };
-    
+
     let configs = state.oauth_configs.read().await;
     let config = match configs.get(&provider) {
         Some(c) => c,
         None => return HttpResponse::InternalServerError().body("OAuth not configured"),
     };
-    
+
     let availability = oauth_config_availability(provider, config);
     if !availability.available {
         return HttpResponse::BadRequest().json(serde_json::json!({
@@ -570,7 +592,7 @@ pub async fn get_oauth_url(
             "missing_fields": availability.missing_fields,
         }));
     }
-    
+
     // Generate state token for CSRF protection
     let state_token = new_state_token();
     {
@@ -578,9 +600,15 @@ pub async fn get_oauth_url(
         // Clean up expired states
         let cutoff = Utc::now() - chrono::Duration::minutes(OAUTH_STATE_TTL_MINUTES);
         states.retain(|_, v| v.created_at > cutoff);
-        states.insert(state_token.clone(), OAuthState { provider, created_at: Utc::now() });
+        states.insert(
+            state_token.clone(),
+            OAuthState {
+                provider,
+                created_at: Utc::now(),
+            },
+        );
     }
-    
+
     let auth_url = match provider {
         CloudProvider::GoogleDrive => {
             format!(
@@ -626,7 +654,7 @@ pub async fn get_oauth_url(
         }
         _ => return HttpResponse::BadRequest().body("Provider does not use OAuth"),
     };
-    
+
     HttpResponse::Ok().json(serde_json::json!({
         "url": auth_url,
         "state": state_token
@@ -658,15 +686,17 @@ pub async fn oauth_callback(
     path: web::Path<String>,
     query: web::Query<OAuthCallback>,
 ) -> impl Responder {
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let provider_str = path.into_inner();
-    
+
     if let Some(error) = &query.error {
         return HttpResponse::BadRequest().body(format!("OAuth error: {}", error));
     }
-    
+
     let code = match &query.code {
         Some(c) => c,
         None => return HttpResponse::BadRequest().body("Missing authorization code"),
@@ -675,14 +705,14 @@ pub async fn oauth_callback(
         Some(s) => s,
         None => return HttpResponse::BadRequest().body("Missing state"),
     };
-    
+
     let provider = match provider_str.as_str() {
         "google_drive" => CloudProvider::GoogleDrive,
         "dropbox" => CloudProvider::Dropbox,
         "onedrive" => CloudProvider::OneDrive,
         _ => return HttpResponse::BadRequest().body("Unknown provider"),
     };
-    
+
     {
         let mut states = state.oauth_states.write().await;
         let entry = states.remove(state_token);
@@ -734,16 +764,22 @@ pub async fn oauth_callback(
         region: None,
         tokens: Some(tokens),
     };
-    
+
     let mut connections = state.connections.write().await;
     connections.insert(connection_id.clone(), connection);
     if let Err(err) = persist_connections(&state.connections_path, &connections) {
         return err;
     }
-    
+
     // Redirect back to frontend with success
     HttpResponse::Found()
-        .append_header(("Location", format!("{}/?storage_connected={}", state.frontend_base_url, connection_id)))
+        .append_header((
+            "Location",
+            format!(
+                "{}/?storage_connected={}",
+                state.frontend_base_url, connection_id
+            ),
+        ))
         .finish()
 }
 
@@ -781,7 +817,9 @@ pub async fn add_storage(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let provider = match body.provider.as_str() {
@@ -793,19 +831,29 @@ pub async fn add_storage(
         _ => return HttpResponse::BadRequest().body("Use OAuth for this provider"),
     };
 
-    if matches!(provider, CloudProvider::S3 | CloudProvider::Gcs | CloudProvider::Azure)
-        && body.bucket.as_ref().map(|b| b.trim().is_empty()).unwrap_or(true)
+    if matches!(
+        provider,
+        CloudProvider::S3 | CloudProvider::Gcs | CloudProvider::Azure
+    ) && body
+        .bucket
+        .as_ref()
+        .map(|b| b.trim().is_empty())
+        .unwrap_or(true)
     {
         return HttpResponse::BadRequest().body("Bucket is required for this provider");
     }
     if provider == CloudProvider::Nas
-        && body.endpoint.as_ref().map(|e| e.trim().is_empty()).unwrap_or(true)
+        && body
+            .endpoint
+            .as_ref()
+            .map(|e| e.trim().is_empty())
+            .unwrap_or(true)
     {
         return HttpResponse::BadRequest().body("Endpoint is required for NAS");
     }
-    
+
     let connection_id = format!("{}:{}", body.provider, normalize_storage_id(&body.name));
-    
+
     let connection = StorageConnection {
         id: connection_id.clone(),
         provider,
@@ -834,16 +882,17 @@ pub async fn add_storage(
             updated_at: Utc::now(),
         };
         if let Err(e) = state.token_store.save_token(&stored) {
-            return HttpResponse::InternalServerError().body(format!("Failed to persist credentials: {e}"));
+            return HttpResponse::InternalServerError()
+                .body(format!("Failed to persist credentials: {e}"));
         }
     }
-    
+
     let mut connections = state.connections.write().await;
     connections.insert(connection_id.clone(), connection.clone());
     if let Err(err) = persist_connections(&state.connections_path, &connections) {
         return err;
     }
-    
+
     HttpResponse::Ok().json(connection)
 }
 
@@ -869,20 +918,24 @@ pub async fn remove_storage(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let id = path.into_inner();
     let mut connections = state.connections.write().await;
-    
+
     match connections.remove(&id) {
         Some(conn) => {
             let _ = state.token_store.delete_token(&id);
             if let Err(err) = persist_connections(&state.connections_path, &connections) {
                 return err;
             }
-            HttpResponse::Ok().json(serde_json::json!({"status": "removed", "provider": conn.provider.display_name()}))
-        },
+            HttpResponse::Ok().json(
+                serde_json::json!({"status": "removed", "provider": conn.provider.display_name()}),
+            )
+        }
         None => HttpResponse::NotFound().body("Storage connection not found"),
     }
 }
@@ -909,7 +962,9 @@ pub async fn sync_storage(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let id = path.into_inner();
@@ -922,10 +977,11 @@ pub async fn sync_storage(
     };
 
     let token_store = state.token_store.clone();
-    let validation = tokio::task::spawn_blocking(move || validate_storage_connection(&connection, &token_store))
-        .await
-        .map_err(|err| err.to_string())
-        .and_then(|inner| inner);
+    let validation =
+        tokio::task::spawn_blocking(move || validate_storage_connection(&connection, &token_store))
+            .await
+            .map_err(|err| err.to_string())
+            .and_then(|inner| inner);
 
     let now = Utc::now();
     let mut connections = state.connections.write().await;
@@ -986,7 +1042,9 @@ pub async fn list_backup_jobs(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let jobs = state.backups.read().await;
@@ -1015,7 +1073,9 @@ pub async fn get_backup_job(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let id = path.into_inner();
@@ -1047,7 +1107,9 @@ pub async fn start_backup(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let project_dir = app_state.config.paths.projects_dir.join(&json.project_id);
@@ -1070,10 +1132,16 @@ pub async fn start_backup(
 
     let mut remote_path = json.remote_path.clone();
     if let (Some(conn), true) = (storage_connection.as_ref(), remote_path.is_none()) {
-        remote_path = Some(default_backup_remote_path(&conn.base_path, &json.project_id, &job_id));
+        remote_path = Some(default_backup_remote_path(
+            &conn.base_path,
+            &json.project_id,
+            &job_id,
+        ));
     }
     let backup_root = backup_root_dir(&app_state.config.paths.projects_dir);
-    let archive_path = backup_root.join(&json.project_id).join(format!("{}.tar.gz", job_id));
+    let archive_path = backup_root
+        .join(&json.project_id)
+        .join(format!("{}.tar.gz", job_id));
     let job = BackupJob {
         id: job_id.clone(),
         job_type: BackupJobType::Backup,
@@ -1096,7 +1164,8 @@ pub async fn start_backup(
         let mut jobs = state.backups.write().await;
         jobs.insert(job_id.clone(), job.clone());
         if let Err(err) = persist_backups(&state.backups_path, &jobs) {
-            return HttpResponse::InternalServerError().body(format!("Failed to persist backup job: {err}"));
+            return HttpResponse::InternalServerError()
+                .body(format!("Failed to persist backup job: {err}"));
         }
     }
 
@@ -1115,14 +1184,17 @@ pub async fn start_backup(
 
         let result = tokio::task::spawn_blocking(move || {
             let (size_bytes, sha256) = create_backup_archive(&project_dir, &archive_path)?;
-            if let (Some(conn), Some(remote_path)) = (connection_for_upload.as_ref(), remote_path_for_upload.as_ref()) {
+            if let (Some(conn), Some(remote_path)) = (
+                connection_for_upload.as_ref(),
+                remote_path_for_upload.as_ref(),
+            ) {
                 upload_backup_archive(conn, &token_store, &archive_path, remote_path)?;
             }
             Ok((size_bytes, sha256))
         })
-            .await
-            .map_err(|err| err.to_string())
-            .and_then(|inner| inner);
+        .await
+        .map_err(|err| err.to_string())
+        .and_then(|inner| inner);
 
         match result {
             Ok((size_bytes, sha256)) => {
@@ -1170,7 +1242,9 @@ pub async fn restore_backup(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup") {
+    if let Err(resp) =
+        require_license_feature(&app_state, Feature::CloudSyncBackup, "cloud_sync_backup")
+    {
         return resp;
     }
     let job_id = json.job_id.clone();
@@ -1189,7 +1263,9 @@ pub async fn restore_backup(
         None => return HttpResponse::BadRequest().body("Backup archive missing"),
     };
     if !archive_path.exists() {
-        if let (Some(storage_id), Some(remote_path)) = (&source_job.storage_id, &source_job.remote_path) {
+        if let (Some(storage_id), Some(remote_path)) =
+            (&source_job.storage_id, &source_job.remote_path)
+        {
             let connections = state.connections.read().await;
             let connection = match connections.get(storage_id) {
                 Some(conn) => conn.clone(),
@@ -1200,7 +1276,12 @@ pub async fn restore_backup(
             let archive_path_clone = archive_path.clone();
             let remote_path_clone = remote_path.clone();
             let download_result = tokio::task::spawn_blocking(move || {
-                download_backup_archive(&connection, &token_store, &remote_path_clone, &archive_path_clone)
+                download_backup_archive(
+                    &connection,
+                    &token_store,
+                    &remote_path_clone,
+                    &archive_path_clone,
+                )
             })
             .await
             .map_err(|err| err.to_string())
@@ -1216,7 +1297,9 @@ pub async fn restore_backup(
         match compute_sha256(&archive_path) {
             Ok(actual) if actual == *expected => {}
             Ok(_) => return HttpResponse::BadRequest().body("Backup integrity check failed"),
-            Err(err) => return HttpResponse::BadRequest().body(format!("Backup hash check failed: {err}")),
+            Err(err) => {
+                return HttpResponse::BadRequest().body(format!("Backup hash check failed: {err}"))
+            }
         }
     }
 
@@ -1252,7 +1335,8 @@ pub async fn restore_backup(
         let mut jobs = state.backups.write().await;
         jobs.insert(restore_job_id.clone(), restore_job.clone());
         if let Err(err) = persist_backups(&state.backups_path, &jobs) {
-            return HttpResponse::InternalServerError().body(format!("Failed to persist restore job: {err}"));
+            return HttpResponse::InternalServerError()
+                .body(format!("Failed to persist restore job: {err}"));
         }
     }
 
@@ -1306,9 +1390,11 @@ pub async fn restore_backup(
 
 /// Configure storage routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    let state = web::Data::new(StorageState::new(&AppConfig::load().expect("Failed to load config"))
-        .expect("Failed to initialize storage token store"));
-    
+    let state = web::Data::new(
+        StorageState::new(&AppConfig::load().expect("Failed to load config"))
+            .expect("Failed to initialize storage token store"),
+    );
+
     cfg.app_data(state)
         .service(list_providers)
         .service(list_storage)
@@ -1513,8 +1599,8 @@ fn validate_nas_connection(connection: &StorageConnection) -> Result<(), String>
         file.write_all(payload.as_bytes())
             .map_err(|e| format!("NAS write failed: {e}"))?;
     }
-    let read_back = std::fs::read_to_string(&marker_path)
-        .map_err(|e| format!("NAS read failed: {e}"))?;
+    let read_back =
+        std::fs::read_to_string(&marker_path).map_err(|e| format!("NAS read failed: {e}"))?;
     let _ = std::fs::remove_file(&marker_path);
     if read_back != payload {
         return Err("NAS validation mismatch".to_string());
@@ -1546,8 +1632,8 @@ fn validate_s3_connection(
     client
         .download_file(&marker_key, &local_download)
         .map_err(|e| format!("S3 download failed: {e}"))?;
-    let read_back = std::fs::read_to_string(&local_download)
-        .map_err(|e| format!("Temp read failed: {e}"))?;
+    let read_back =
+        std::fs::read_to_string(&local_download).map_err(|e| format!("Temp read failed: {e}"))?;
     let _ = std::fs::remove_file(&local_path);
     let _ = std::fs::remove_file(&local_download);
     if read_back != payload {
@@ -1566,10 +1652,10 @@ fn upload_backup_archive(
         CloudProvider::Nas => {
             let target = nas_target_path(connection, remote_path)?;
             if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("NAS create dir failed: {e}"))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("NAS create dir failed: {e}"))?;
             }
-            std::fs::copy(archive_path, &target)
-                .map_err(|e| format!("NAS copy failed: {e}"))?;
+            std::fs::copy(archive_path, &target).map_err(|e| format!("NAS copy failed: {e}"))?;
             Ok(())
         }
         CloudProvider::S3 | CloudProvider::Gcs | CloudProvider::Azure => {
@@ -1601,8 +1687,7 @@ fn download_backup_archive(
             if let Some(parent) = archive_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("Archive dir error: {e}"))?;
             }
-            std::fs::copy(&source, archive_path)
-                .map_err(|e| format!("NAS copy failed: {e}"))?;
+            std::fs::copy(&source, archive_path).map_err(|e| format!("NAS copy failed: {e}"))?;
             Ok(())
         }
         CloudProvider::S3 | CloudProvider::Gcs | CloudProvider::Azure => {
@@ -1668,15 +1753,19 @@ fn persist_connections(
             region: conn.region.clone(),
         })
         .collect();
-    let json = serde_json::to_string_pretty(&stored)
-        .map_err(|e| HttpResponse::InternalServerError().body(format!("Failed to serialize storage connections: {e}")))?;
+    let json = serde_json::to_string_pretty(&stored).map_err(|e| {
+        HttpResponse::InternalServerError()
+            .body(format!("Failed to serialize storage connections: {e}"))
+    })?;
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return Err(HttpResponse::InternalServerError().body(format!("Failed to create storage dir: {e}")));
+            return Err(HttpResponse::InternalServerError()
+                .body(format!("Failed to create storage dir: {e}")));
         }
     }
     if let Err(e) = std::fs::write(path, json) {
-        return Err(HttpResponse::InternalServerError().body(format!("Failed to persist storage connections: {e}")));
+        return Err(HttpResponse::InternalServerError()
+            .body(format!("Failed to persist storage connections: {e}")));
     }
     Ok(())
 }
@@ -1717,12 +1806,15 @@ fn load_connections(
     let mut connections = HashMap::new();
     for entry in stored {
         let tokens = if entry.provider.requires_oauth() {
-            token_store.load_token(&entry.id).ok().map(|stored| OAuthTokens {
-                access_token: stored.access_token,
-                refresh_token: stored.refresh_token,
-                expires_at: stored.expires_at,
-                token_type: "Bearer".to_string(),
-            })
+            token_store
+                .load_token(&entry.id)
+                .ok()
+                .map(|stored| OAuthTokens {
+                    access_token: stored.access_token,
+                    refresh_token: stored.refresh_token,
+                    expires_at: stored.expires_at,
+                    token_type: "Bearer".to_string(),
+                })
         } else {
             None
         };
@@ -1754,9 +1846,7 @@ fn load_connections(
     Ok(connections)
 }
 
-fn load_connections_from_tokens(
-    token_store: &TokenStore,
-) -> HashMap<String, StorageConnection> {
+fn load_connections_from_tokens(token_store: &TokenStore) -> HashMap<String, StorageConnection> {
     let mut connections = HashMap::new();
     if let Ok(providers) = token_store.list_providers() {
         for provider_id in providers {
@@ -1765,12 +1855,15 @@ fn load_connections_from_tokens(
                 None => CloudProvider::Nas,
             };
             let tokens = if provider.requires_oauth() {
-                token_store.load_token(&provider_id).ok().map(|stored| OAuthTokens {
-                    access_token: stored.access_token,
-                    refresh_token: stored.refresh_token,
-                    expires_at: stored.expires_at,
-                    token_type: "Bearer".to_string(),
-                })
+                token_store
+                    .load_token(&provider_id)
+                    .ok()
+                    .map(|stored| OAuthTokens {
+                        access_token: stored.access_token,
+                        refresh_token: stored.refresh_token,
+                        expires_at: stored.expires_at,
+                        token_type: "Bearer".to_string(),
+                    })
             } else {
                 None
             };
@@ -1807,7 +1900,6 @@ fn load_connections_from_tokens(
     }
     connections
 }
-
 
 fn normalize_storage_id(name: &str) -> String {
     let mut out = String::new();
@@ -1885,9 +1977,9 @@ async fn exchange_oauth_code(
     code: &str,
 ) -> Result<(OAuthTokens, Option<String>), HttpResponse> {
     let configs = state.oauth_configs.read().await;
-    let config = configs.get(&provider).ok_or_else(|| {
-        HttpResponse::InternalServerError().body("OAuth config missing")
-    })?;
+    let config = configs
+        .get(&provider)
+        .ok_or_else(|| HttpResponse::InternalServerError().body("OAuth config missing"))?;
 
     if config.client_id.is_empty() || config.client_secret.is_empty() {
         return Err(HttpResponse::InternalServerError().body("OAuth credentials not configured"));
@@ -1907,9 +1999,13 @@ async fn exchange_oauth_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token exchange failed: {e}")))?
+                .map_err(|e| {
+                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
+                })?
                 .error_for_status()
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token exchange failed: {e}")))?
+                .map_err(|e| {
+                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
+                })?
                 .json::<GoogleTokenResponse>()
                 .await
                 .map_err(|e| HttpResponse::BadGateway().body(format!("Token parse failed: {e}")))?;
@@ -1926,7 +2022,11 @@ async fn exchange_oauth_code(
                 .json::<serde_json::Value>()
                 .await
                 .ok()
-                .and_then(|v| v.get("email").and_then(|e| e.as_str()).map(|s| s.to_string()));
+                .and_then(|v| {
+                    v.get("email")
+                        .and_then(|e| e.as_str())
+                        .map(|s| s.to_string())
+                });
 
             Ok((
                 OAuthTokens {
@@ -1953,9 +2053,13 @@ async fn exchange_oauth_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token exchange failed: {e}")))?
+                .map_err(|e| {
+                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
+                })?
                 .error_for_status()
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token exchange failed: {e}")))?
+                .map_err(|e| {
+                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
+                })?
                 .json::<DropboxTokenResponse>()
                 .await
                 .map_err(|e| HttpResponse::BadGateway().body(format!("Token parse failed: {e}")))?;
@@ -1973,7 +2077,11 @@ async fn exchange_oauth_code(
                 .json::<serde_json::Value>()
                 .await
                 .ok()
-                .and_then(|v| v.get("email").and_then(|e| e.as_str()).map(|s| s.to_string()));
+                .and_then(|v| {
+                    v.get("email")
+                        .and_then(|e| e.as_str())
+                        .map(|s| s.to_string())
+                });
 
             Ok((
                 OAuthTokens {
@@ -2000,9 +2108,13 @@ async fn exchange_oauth_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token exchange failed: {e}")))?
+                .map_err(|e| {
+                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
+                })?
                 .error_for_status()
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token exchange failed: {e}")))?
+                .map_err(|e| {
+                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
+                })?
                 .json::<OneDriveTokenResponse>()
                 .await
                 .map_err(|e| HttpResponse::BadGateway().body(format!("Token parse failed: {e}")))?;
@@ -2020,9 +2132,14 @@ async fn exchange_oauth_code(
                 .await
                 .ok();
 
-            let email = profile.as_ref()
+            let email = profile
+                .as_ref()
                 .and_then(|v| v.get("mail").and_then(|e| e.as_str()))
-                .or_else(|| profile.as_ref().and_then(|v| v.get("userPrincipalName").and_then(|e| e.as_str())))
+                .or_else(|| {
+                    profile
+                        .as_ref()
+                        .and_then(|v| v.get("userPrincipalName").and_then(|e| e.as_str()))
+                })
                 .map(|s| s.to_string());
 
             Ok((

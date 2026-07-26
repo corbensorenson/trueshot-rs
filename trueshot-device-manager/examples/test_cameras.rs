@@ -1,9 +1,9 @@
 //! Camera and Sensor Detection Test
-//! 
+//!
 //! Run with: cargo run --example test_cameras -p trueshot-device-manager
 
 use trueshot_device_manager::camera::{CameraManager, KinectCamera};
-use trueshot_device_manager::sensor::{SensorManager, LeapMotionController, LeapMotionMode};
+use trueshot_device_manager::sensor::{LeapMotionController, LeapMotionMode, SensorManager};
 
 #[tokio::main]
 async fn main() {
@@ -11,9 +11,9 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
-    
+
     println!("=== TrueShot Device Detection Test ===\n");
-    
+
     // Test Kinect detection
     println!("1. Testing Kinect detection...");
     match KinectCamera::detect() {
@@ -27,7 +27,7 @@ async fn main() {
             println!("   ❌ No Kinect detected");
         }
     }
-    
+
     // Test Leap Motion detection
     println!("\n2. Testing Leap Motion detection...");
     match LeapMotionController::detect() {
@@ -41,11 +41,11 @@ async fn main() {
             println!("   ❌ No Leap Motion detected");
         }
     }
-    
+
     // Test camera reconciliation
     println!("\n3. Testing CameraManager reconciliation...");
     let mut cam_manager = CameraManager::new();
-    
+
     match cam_manager.reconcile_cameras(false).await {
         Ok(report) => {
             println!("   Cameras added: {:?}", report.added);
@@ -54,21 +54,21 @@ async fn main() {
             println!("   ❌ Error: {}", e);
         }
     }
-    
+
     // Test sensor detection
     println!("\n4. Testing SensorManager...");
     let mut sensor_manager = SensorManager::new();
     let sensors_added = sensor_manager.detect_sensors();
     println!("   Sensors added: {:?}", sensors_added);
-    
+
     // List all devices
     println!("\n5. All detected devices:");
-    
+
     println!("\n   CAMERAS:");
     for (i, cam) in cam_manager.cameras.iter().enumerate() {
         let id = cam.id();
         let profile = cam_manager.registry.get_profile(&id);
-        
+
         println!("   [{}] {}", i, id);
         if let Some(p) = profile {
             println!("       Name: {}", p.name);
@@ -81,7 +81,7 @@ async fn main() {
             }
         }
     }
-    
+
     println!("\n   SENSORS:");
     for (i, sensor) in sensor_manager.sensors.iter().enumerate() {
         let caps = sensor.capabilities();
@@ -94,6 +94,6 @@ async fn main() {
             println!("       Range: {}mm - {}mm", range.0, range.1);
         }
     }
-    
+
     println!("\n=== Test Complete ===");
 }

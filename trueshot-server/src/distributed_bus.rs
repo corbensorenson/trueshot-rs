@@ -23,7 +23,7 @@ pub async fn start_redis_bridge(bus: Arc<EventBus>, redis_url: String) -> Result
     let origin = Uuid::new_v4().to_string();
     let recent = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
 
-    let mut pubsub_conn = client
+    let pubsub_conn = client
         .get_async_connection()
         .await
         .context("redis pubsub connection failed")?;

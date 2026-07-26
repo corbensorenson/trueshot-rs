@@ -6,11 +6,11 @@ use image::{ImageBuffer, Rgb};
 use nalgebra as na;
 use opencv::{
     calib3d,
-    core::{self, Mat, Point2d, Point2f, Point3f, Vector, Scalar},
+    core::{self, Mat, Point2d, Point2f, Point3f, Scalar, Vector},
     prelude::*,
 };
 
-use crate::cv::{Feature, CameraIntrinsics, DistortionModel};
+use crate::cv::{CameraIntrinsics, DistortionModel, Feature};
 
 /// Object pose in 3D space
 #[derive(Debug, Clone)]
@@ -128,7 +128,8 @@ pub fn estimate_pose_pnp(
         tvec_data[2] as f32,
     );
 
-    let confidence = reprojection_confidence(points_3d, points_2d, &rotation, &translation, intrinsics);
+    let confidence =
+        reprojection_confidence(points_3d, points_2d, &rotation, &translation, intrinsics);
 
     Ok(ObjectPose {
         rotation,
@@ -206,7 +207,10 @@ pub fn estimate_camera_motion(
 ) -> Result<(na::UnitQuaternion<f32>, na::Vector3<f32>)> {
     log::debug!("🔍 estimate_camera_motion: {} matches", matches.len());
     if matches.len() < 5 {
-        anyhow::bail!("Need at least 5 matches for essential matrix (got {})", matches.len());
+        anyhow::bail!(
+            "Need at least 5 matches for essential matrix (got {})",
+            matches.len()
+        );
     }
 
     // Convert to OpenCV format
@@ -218,8 +222,14 @@ pub fn estimate_camera_motion(
         let (x2, y2) = features2[idx2].point;
         let (x1n, y1n, _) = corrected_normalized_point(x1 as f64, y1 as f64, intrinsics);
         let (x2n, y2n, _) = corrected_normalized_point(x2 as f64, y2 as f64, intrinsics);
-        points1.push(Point2f::new((intrinsics.fx * x1n + intrinsics.cx) as f32, (intrinsics.fy * y1n + intrinsics.cy) as f32));
-        points2.push(Point2f::new((intrinsics.fx * x2n + intrinsics.cx) as f32, (intrinsics.fy * y2n + intrinsics.cy) as f32));
+        points1.push(Point2f::new(
+            (intrinsics.fx * x1n + intrinsics.cx) as f32,
+            (intrinsics.fy * y1n + intrinsics.cy) as f32,
+        ));
+        points2.push(Point2f::new(
+            (intrinsics.fx * x2n + intrinsics.cx) as f32,
+            (intrinsics.fy * y2n + intrinsics.cy) as f32,
+        ));
     }
 
     // Camera matrix
@@ -258,7 +268,11 @@ pub fn estimate_camera_motion(
         &mut triangulated_points,
     )?;
 
-    log::debug!("🔍 Essential matrix: {} inliers from {} matches", inliers, matches.len());
+    log::debug!(
+        "🔍 Essential matrix: {} inliers from {} matches",
+        inliers,
+        matches.len()
+    );
     if inliers < 5 {
         anyhow::bail!("Not enough inliers: {} < 5", inliers);
     }
@@ -266,19 +280,21 @@ pub fn estimate_camera_motion(
     // Convert rotation matrix to quaternion
     let R_data: Vec<f64> = R.data_typed()?.to_vec();
     let rotation_matrix = na::Matrix3::new(
-        R_data[0] as f32, R_data[1] as f32, R_data[2] as f32,
-        R_data[3] as f32, R_data[4] as f32, R_data[5] as f32,
-        R_data[6] as f32, R_data[7] as f32, R_data[8] as f32,
+        R_data[0] as f32,
+        R_data[1] as f32,
+        R_data[2] as f32,
+        R_data[3] as f32,
+        R_data[4] as f32,
+        R_data[5] as f32,
+        R_data[6] as f32,
+        R_data[7] as f32,
+        R_data[8] as f32,
     );
     let rotation = na::UnitQuaternion::from_matrix(&rotation_matrix);
 
     // Translation vector
     let t_data: Vec<f64> = t.data_typed()?.to_vec();
-    let translation = na::Vector3::new(
-        t_data[0] as f32,
-        t_data[1] as f32,
-        t_data[2] as f32,
-    );
+    let translation = na::Vector3::new(t_data[0] as f32, t_data[1] as f32, t_data[2] as f32);
 
     let (roll, pitch, yaw) = rotation.euler_angles();
     log::info!("✅ Camera motion: {} inliers, rotation=(r:{:.2}, p:{:.2}, y:{:.2}), translation=({:.3}, {:.3}, {:.3})",
@@ -371,7 +387,11 @@ pub fn triangulate_points(
         }
     }
 
-    log::debug!("📐 Triangulated {} 3D points from {} matches", points_3d.len(), matches.len());
+    log::debug!(
+        "📐 Triangulated {} 3D points from {} matches",
+        points_3d.len(),
+        matches.len()
+    );
 
     Ok(points_3d)
 }

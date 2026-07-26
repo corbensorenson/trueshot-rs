@@ -5,20 +5,20 @@ use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgb};
 use nalgebra as na;
 use opencv::{
-    core::{self, Mat, Point2f, Vector, DMatch, KeyPoint, NORM_HAMMING, no_array},
-    features2d::{self, ORB, ORB_ScoreType, BFMatcher, Feature2DTrait},
-    imgproc::{self, COLOR_RGB2GRAY},
     calib3d,
+    core::{self, no_array, DMatch, KeyPoint, Mat, Point2f, Vector, NORM_HAMMING},
+    features2d::{self, BFMatcher, Feature2DTrait, ORB_ScoreType, ORB},
+    imgproc::{self, COLOR_RGB2GRAY},
     prelude::*,
 };
 
 /// Camera intrinsic parameters
 #[derive(Debug, Clone)]
 pub struct CameraIntrinsics {
-    pub fx: f64,  // Focal length x
-    pub fy: f64,  // Focal length y
-    pub cx: f64,  // Principal point x
-    pub cy: f64,  // Principal point y
+    pub fx: f64, // Focal length x
+    pub fy: f64, // Focal length y
+    pub cx: f64, // Principal point x
+    pub cy: f64, // Principal point y
     pub width: u32,
     pub height: u32,
     pub distortion: Vec<f64>,
@@ -68,15 +68,25 @@ impl RollingShutterModel {
         }
         let norm = match self.direction {
             RollingShutterDirection::TopToBottom | RollingShutterDirection::BottomToTop => {
-                if height > 1 { y / (height as f64 - 1.0) } else { 0.0 }
+                if height > 1 {
+                    y / (height as f64 - 1.0)
+                } else {
+                    0.0
+                }
             }
             RollingShutterDirection::LeftToRight | RollingShutterDirection::RightToLeft => {
-                if width > 1 { x / (width as f64 - 1.0) } else { 0.0 }
+                if width > 1 {
+                    x / (width as f64 - 1.0)
+                } else {
+                    0.0
+                }
             }
         };
         let centered = norm - 0.5;
         let signed = match self.direction {
-            RollingShutterDirection::BottomToTop | RollingShutterDirection::RightToLeft => -centered,
+            RollingShutterDirection::BottomToTop | RollingShutterDirection::RightToLeft => {
+                -centered
+            }
             _ => centered,
         };
         signed * readout
@@ -97,7 +107,7 @@ impl CameraIntrinsics {
         let fy = fx; // Assume square pixels
         let cx = width as f64 / 2.0;
         let cy = height as f64 / 2.0;
-        
+
         Self {
             fx,
             fy,
@@ -114,25 +124,14 @@ impl CameraIntrinsics {
 
     /// Convert to OpenCV camera matrix
     pub fn to_camera_matrix(&self) -> Result<Mat> {
-        let data = [
-            self.fx, 0.0, self.cx,
-            0.0, self.fy, self.cy,
-            0.0, 0.0, 1.0
-        ];
-        Mat::from_slice_2d(&[
-            &data[0..3],
-            &data[3..6],
-            &data[6..9],
-        ]).context("Failed to create camera matrix")
+        let data = [self.fx, 0.0, self.cx, 0.0, self.fy, self.cy, 0.0, 0.0, 1.0];
+        Mat::from_slice_2d(&[&data[0..3], &data[3..6], &data[6..9]])
+            .context("Failed to create camera matrix")
     }
-    
+
     /// Convert to nalgebra camera matrix
     pub fn to_nalgebra_matrix(&self) -> na::Matrix3<f64> {
-        na::Matrix3::new(
-            self.fx, 0.0, self.cx,
-            0.0, self.fy, self.cy,
-            0.0, 0.0, 1.0
-        )
+        na::Matrix3::new(self.fx, 0.0, self.cx, 0.0, self.fy, self.cy, 0.0, 0.0, 1.0)
     }
 
     pub fn to_opencv_dist_coeffs(&self) -> Result<Mat> {
@@ -147,7 +146,8 @@ impl CameraIntrinsics {
                 let k4 = self.distortion.get(5).copied().unwrap_or(0.0);
                 let k5 = self.distortion.get(6).copied().unwrap_or(0.0);
                 let k6 = self.distortion.get(7).copied().unwrap_or(0.0);
-                Mat::from_slice(&[k1, k2, p1, p2, k3, k4, k5, k6]).context("Failed to create distortion coeffs")
+                Mat::from_slice(&[k1, k2, p1, p2, k3, k4, k5, k6])
+                    .context("Failed to create distortion coeffs")
             }
             DistortionModel::Fisheye => Ok(Mat::default()),
         }
@@ -192,7 +192,11 @@ fn distort_brown_conrady(coeffs: &[f64], x: f64, y: f64) -> (f64, f64) {
 
     let radial_num = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
     let radial_den = 1.0 + k4 * r2 + k5 * r4 + k6 * r6;
-    let radial = if radial_den.abs() > 1e-12 { radial_num / radial_den } else { radial_num };
+    let radial = if radial_den.abs() > 1e-12 {
+        radial_num / radial_den
+    } else {
+        radial_num
+    };
 
     let x_tan = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
     let y_tan = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
@@ -253,15 +257,15 @@ impl FeatureMatcher {
     pub fn new() -> Result<Self> {
         // Create ORB detector (patent-free, fast)
         let detector = ORB::create(
-            1000,  // Max features
-            1.2,   // Scale factor
-            8,     // Pyramid levels
-            31,    // Edge threshold
-            0,     // First level
-            2,     // WTA_K
+            1000, // Max features
+            1.2,  // Scale factor
+            8,    // Pyramid levels
+            31,   // Edge threshold
+            0,    // First level
+            2,    // WTA_K
             ORB_ScoreType::HARRIS_SCORE,
-            31,    // Patch size
-            20,    // Fast threshold
+            31, // Patch size
+            20, // Fast threshold
         )?;
 
         Ok(Self { detector })
@@ -269,19 +273,32 @@ impl FeatureMatcher {
 
     /// Detect features in an image
     /// If roi is provided (x, y, width, height), only detect features in that region
-    pub fn detect_features(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<Vec<Feature>> {
+    pub fn detect_features(
+        &mut self,
+        image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    ) -> Result<Vec<Feature>> {
         self.detect_features_with_roi(image, None)
     }
 
     /// Detect features in an image with optional ROI (Region of Interest)
     /// roi: (x, y, width, height) - only detect features in this region for performance
-    pub fn detect_features_with_roi(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>, roi: Option<(i32, i32, i32, i32)>) -> Result<Vec<Feature>> {
+    pub fn detect_features_with_roi(
+        &mut self,
+        image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+        roi: Option<(i32, i32, i32, i32)>,
+    ) -> Result<Vec<Feature>> {
         // Convert image to OpenCV Mat
         let mat = self.image_to_mat(image)?;
 
         // Convert to grayscale
         let mut gray = Mat::default();
-        imgproc::cvt_color(&mat, &mut gray, COLOR_RGB2GRAY, 0, core::AlgorithmHint::ALGO_HINT_DEFAULT)?;
+        imgproc::cvt_color(
+            &mat,
+            &mut gray,
+            COLOR_RGB2GRAY,
+            0,
+            core::AlgorithmHint::ALGO_HINT_DEFAULT,
+        )?;
 
         // If ROI is provided, crop the image to that region
         let (gray_roi, roi_offset) = if let Some((x, y, w, h)) = roi {
@@ -340,47 +357,58 @@ impl FeatureMatcher {
             });
         }
 
-        log::debug!("Detected {} features{}", features.len(),
-            if roi.is_some() { " (in ROI)" } else { "" });
+        log::debug!(
+            "Detected {} features{}",
+            features.len(),
+            if roi.is_some() { " (in ROI)" } else { "" }
+        );
         Ok(features)
     }
 
     /// Match features between two images
-    pub fn match_features(&self, features1: &[Feature], features2: &[Feature]) -> Result<Vec<(usize, usize)>> {
+    pub fn match_features(
+        &self,
+        features1: &[Feature],
+        features2: &[Feature],
+    ) -> Result<Vec<(usize, usize)>> {
         if features1.is_empty() || features2.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Create descriptor matrices
         let desc1 = self.features_to_mat(features1)?;
         let desc2 = self.features_to_mat(features2)?;
-        
+
         // Use BFMatcher with Hamming distance (for ORB)
         let matcher = BFMatcher::create(NORM_HAMMING, true)?;
-        
+
         let mut matches = Vector::<DMatch>::new();
         matcher.train_match(&desc1, &desc2, &mut matches, &no_array())?;
-        
+
         // Filter matches by distance
         let mut good_matches = Vec::new();
         let mut distances: Vec<f32> = matches.iter().map(|m| m.distance).collect();
         distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         if distances.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Use median distance for filtering
         let median_dist = distances[distances.len() / 2];
         let threshold = median_dist * 1.5;
-        
+
         for m in matches.iter() {
             if m.distance < threshold {
                 good_matches.push((m.query_idx as usize, m.train_idx as usize));
             }
         }
-        
-        log::debug!("Matched {} features (from {} total matches)", good_matches.len(), matches.len());
+
+        log::debug!(
+            "Matched {} features (from {} total matches)",
+            good_matches.len(),
+            matches.len()
+        );
         Ok(good_matches)
     }
 
@@ -397,7 +425,8 @@ impl FeatureMatcher {
                 opencv::core::CV_8UC3,
                 data.as_ptr() as *mut std::ffi::c_void,
                 opencv::core::Mat_AUTO_STEP,
-            ).context("Failed to create Mat from image")?
+            )
+            .context("Failed to create Mat from image")?
         };
 
         // Clone to get an owned Mat
@@ -418,11 +447,8 @@ impl FeatureMatcher {
         }
 
         let mat = unsafe {
-            Mat::new_rows_cols_with_data(
-                features.len() as i32,
-                desc_len as i32,
-                &data[..],
-            ).context("Failed to create descriptor matrix")?
+            Mat::new_rows_cols_with_data(features.len() as i32, desc_len as i32, &data[..])
+                .context("Failed to create descriptor matrix")?
         };
 
         mat.try_clone().context("Failed to clone descriptor matrix")
@@ -439,18 +465,18 @@ pub fn estimate_pose(
     if matches.len() < 8 {
         return Ok(CameraPose::identity());
     }
-    
+
     // Extract matched points
     let mut points1 = Vector::<Point2f>::new();
     let mut points2 = Vector::<Point2f>::new();
-    
+
     for &(idx1, idx2) in matches {
         let p1 = features1[idx1].point;
         let p2 = features2[idx2].point;
         points1.push(Point2f::new(p1.0, p1.1));
         points2.push(Point2f::new(p2.0, p2.1));
     }
-    
+
     // Compute essential matrix
     let camera_matrix = intrinsics.to_camera_matrix()?;
     let mut mask = Mat::default();
@@ -465,7 +491,7 @@ pub fn estimate_pose(
         1000, // max iterations
         &mut mask,
     )?;
-    
+
     // Recover pose from essential matrix
     let mut r = Mat::default();
     let mut t = Mat::default();
@@ -481,19 +507,22 @@ pub fn estimate_pose(
         core::Point2d::new(intrinsics.cx, intrinsics.cy),
         &mut _mask2,
     )?;
-    
+
     // Convert to nalgebra
     let mut rotation = na::Matrix3::identity();
     let mut translation = na::Vector3::zeros();
-    
+
     for i in 0..3 {
         for j in 0..3 {
             rotation[(i, j)] = *r.at_2d::<f64>(i as i32, j as i32)?;
         }
         translation[i] = *t.at_2d::<f64>(i as i32, 0)?;
     }
-    
-    Ok(CameraPose { rotation, translation })
+
+    Ok(CameraPose {
+        rotation,
+        translation,
+    })
 }
 
 #[cfg(test)]

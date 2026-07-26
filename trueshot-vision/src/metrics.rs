@@ -21,7 +21,9 @@ pub fn compute_histogram(img: &DynamicImage) -> ([u32; 256], [u32; 256], [u32; 2
 pub fn compute_sharpness(img: &DynamicImage) -> f32 {
     let gray = img.to_luma8();
     let (width, height) = gray.dimensions();
-    if width < 3 || height < 3 { return 0.0; }
+    if width < 3 || height < 3 {
+        return 0.0;
+    }
 
     let mut laplacian_sum = 0.0;
     let mut laplacian_sq_sum = 0.0;
@@ -31,25 +33,24 @@ pub fn compute_sharpness(img: &DynamicImage) -> f32 {
     //  0  1  0
     //  1 -4  1
     //  0  1  0
-    
-    for y in 1..height-1 {
-        for x in 1..width-1 {
+
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
             let center = gray.get_pixel(x, y)[0] as i32;
-            let top = gray.get_pixel(x, y-1)[0] as i32;
-            let bottom = gray.get_pixel(x, y+1)[0] as i32;
-            let left = gray.get_pixel(x-1, y)[0] as i32;
-            let right = gray.get_pixel(x+1, y)[0] as i32;
+            let top = gray.get_pixel(x, y - 1)[0] as i32;
+            let bottom = gray.get_pixel(x, y + 1)[0] as i32;
+            let left = gray.get_pixel(x - 1, y)[0] as i32;
+            let right = gray.get_pixel(x + 1, y)[0] as i32;
 
             let val = top + bottom + left + right - (4 * center);
             let val_f = val as f32;
-            
+
             laplacian_sum += val_f;
             laplacian_sq_sum += val_f * val_f;
         }
     }
 
     let mean = laplacian_sum / count;
-    
-    
+
     (laplacian_sq_sum / count) - (mean * mean)
 }

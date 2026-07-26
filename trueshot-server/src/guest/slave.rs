@@ -3,17 +3,17 @@
 //! Server-controlled phone cameras for 3DGS scanning and synchronized capture.
 //! Phones connect via WebSocket and wait for capture commands.
 
+use crate::auth::{require_admin, require_scope};
+use crate::fs_safety::available_space_bytes;
 use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
 use actix_ws::Message;
+use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{RwLock, broadcast, mpsc};
-use chrono::{DateTime, Utc};
-use futures::StreamExt;
-use crate::auth::{require_admin, require_scope};
-use crate::fs_safety::available_space_bytes;
+use tokio::sync::{broadcast, mpsc, RwLock};
 use utoipa::ToSchema;
 
 // ============================================================================
@@ -55,7 +55,7 @@ pub struct CaptureCommand {
     pub capture_id: String,
     pub flash: bool,
     pub countdown_ms: u32,
-    pub quality: u8,  // 1-100
+    pub quality: u8, // 1-100
     pub resolution: Option<(u32, u32)>,
 }
 
@@ -97,7 +97,7 @@ pub enum WsMessage {
         success: bool,
         error: Option<String>,
     },
-    
+
     // Server → Phone
     Capture {
         capture_id: String,
@@ -139,7 +139,7 @@ pub struct SlavePhoneState {
     pub max_upload_rate_bytes_per_minute: u64,
     pub max_total_bytes: u64,
     pub min_free_bytes: u64,
-    pub upload_buckets: Arc<RwLock<HashMap<String, UploadBucket>>>,
+    upload_buckets: Arc<RwLock<HashMap<String, UploadBucket>>>,
 }
 
 impl SlavePhoneState {
@@ -164,7 +164,7 @@ impl SlavePhoneState {
             upload_buckets: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Send command to specific phone
     pub async fn send_to_phone(&self, phone_id: &str, msg: WsMessage) -> Result<(), String> {
         let channels = self.command_tx.read().await;
@@ -174,16 +174,17 @@ impl SlavePhoneState {
             Err("Phone not connected".to_string())
         }
     }
-    
+
     /// Broadcast command to all phones
     pub fn broadcast(&self, msg: WsMessage) -> Result<usize, String> {
         self.broadcast_tx.send(msg).map_err(|e| e.to_string())
     }
-    
+
     /// Get all ready phones
     pub async fn ready_phones(&self) -> Vec<PhoneSession> {
         let phones = self.phones.read().await;
-        phones.values()
+        phones
+            .values()
             .filter(|p| p.is_ready && p.mode == PhoneMode::Slave)
             .cloned()
             .collect()
@@ -239,10 +240,7 @@ impl SlavePhoneState {
     )
 )]
 #[get("/api/phones")]
-pub async fn list_phones(
-    req: HttpRequest,
-    state: web::Data<SlavePhoneState>,
-) -> impl Responder {
+pub async fn list_phones(req: HttpRequest, state: web::Data<SlavePhoneState>) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -274,7 +272,7 @@ pub async fn get_phone(
     }
     let phone_id = path.into_inner();
     let phones = state.phones.read().await;
-    
+
     match phones.get(&phone_id) {
         Some(phone) => HttpResponse::Ok().json(phone),
         None => HttpResponse::NotFound().body("Phone not found"),
@@ -305,22 +303,24 @@ pub async fn capture_phone(
         return resp;
     }
     let phone_id = path.into_inner();
-    
-    let cmd = body.map(|b| b.into_inner()).unwrap_or_else(|| CaptureCommand {
-        capture_id: uuid::Uuid::new_v4().to_string(),
-        flash: false,
-        countdown_ms: 0,
-        quality: 90,
-        resolution: None,
-    });
-    
+
+    let cmd = body
+        .map(|b| b.into_inner())
+        .unwrap_or_else(|| CaptureCommand {
+            capture_id: uuid::Uuid::new_v4().to_string(),
+            flash: false,
+            countdown_ms: 0,
+            quality: 90,
+            resolution: None,
+        });
+
     let msg = WsMessage::Capture {
         capture_id: cmd.capture_id.clone(),
         flash: cmd.flash,
         countdown_ms: cmd.countdown_ms,
         quality: cmd.quality,
     };
-    
+
     match state.send_to_phone(&phone_id, msg).await {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({
             "status": "sent",
@@ -352,24 +352,26 @@ pub async fn capture_all_phones(
         return resp;
     }
     let capture_id = uuid::Uuid::new_v4().to_string();
-    
-    let cmd = body.map(|b| b.into_inner()).unwrap_or_else(|| CaptureCommand {
-        capture_id: capture_id.clone(),
-        flash: false,
-        countdown_ms: 0,
-        quality: 90,
-        resolution: None,
-    });
-    
+
+    let cmd = body
+        .map(|b| b.into_inner())
+        .unwrap_or_else(|| CaptureCommand {
+            capture_id: capture_id.clone(),
+            flash: false,
+            countdown_ms: 0,
+            quality: 90,
+            resolution: None,
+        });
+
     let msg = WsMessage::Capture {
         capture_id: cmd.capture_id.clone(),
         flash: cmd.flash,
         countdown_ms: cmd.countdown_ms,
         quality: cmd.quality,
     };
-    
+
     let ready_count = state.ready_phones().await.len();
-    
+
     match state.broadcast(msg) {
         Ok(sent) => HttpResponse::Ok().json(serde_json::json!({
             "status": "broadcast",
@@ -406,9 +408,9 @@ pub async fn set_phone_resolution(
     }
     let phone_id = path.into_inner();
     let (width, height) = body.into_inner();
-    
+
     let msg = WsMessage::SetResolution { width, height };
-    
+
     match state.send_to_phone(&phone_id, msg).await {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({"status": "sent"})),
         Err(e) => HttpResponse::BadRequest().body(e),
@@ -437,7 +439,7 @@ pub async fn get_capture_results(
     }
     let capture_id = path.into_inner();
     let captures = state.captures.read().await;
-    
+
     match captures.get(&capture_id) {
         Some(results) => HttpResponse::Ok().json(results),
         None => HttpResponse::Ok().json(Vec::<CaptureResult>::new()),
@@ -464,23 +466,23 @@ pub async fn phone_websocket(
         return Ok(resp);
     }
     let (res, mut session, mut msg_stream) = actix_ws::handle(&req, stream)?;
-    
+
     let state = state.get_ref().clone();
     let phone_id = uuid::Uuid::new_v4().to_string();
     let phone_id_clone = phone_id.clone();
-    
+
     // Create command channel for this phone
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<WsMessage>(32);
-    
+
     // Subscribe to broadcast
     let mut broadcast_rx = state.broadcast_tx.subscribe();
-    
+
     // Store command channel
     {
         let mut channels = state.command_tx.write().await;
         channels.insert(phone_id.clone(), cmd_tx);
     }
-    
+
     actix_web::rt::spawn(async move {
         loop {
             tokio::select! {
@@ -503,14 +505,14 @@ pub async fn phone_websocket(
                         _ => {}
                     }
                 }
-                
+
                 // Commands to send to this phone
                 Some(cmd) = cmd_rx.recv() => {
                     if let Ok(json) = serde_json::to_string(&cmd) {
                         let _ = session.text(json).await;
                     }
                 }
-                
+
                 // Broadcast commands
                 Ok(cmd) = broadcast_rx.recv() => {
                     // Check if this phone should receive broadcast
@@ -525,16 +527,16 @@ pub async fn phone_websocket(
                 }
             }
         }
-        
+
         // Cleanup on disconnect
         let mut phones = state.phones.write().await;
         phones.remove(&phone_id_clone);
         let mut channels = state.command_tx.write().await;
         channels.remove(&phone_id_clone);
-        
+
         tracing::info!("Phone {} disconnected", phone_id_clone);
     });
-    
+
     Ok(res)
 }
 
@@ -546,7 +548,12 @@ async fn handle_phone_message(
     session: &mut actix_ws::Session,
 ) {
     match msg {
-        WsMessage::Register { name, device_info, resolution, battery } => {
+        WsMessage::Register {
+            name,
+            device_info,
+            resolution,
+            battery,
+        } => {
             let phone = PhoneSession {
                 id: phone_id.to_string(),
                 mode: PhoneMode::Slave,
@@ -562,10 +569,10 @@ async fn handle_phone_message(
                 last_capture: None,
                 orientation: None,
             };
-            
+
             let mut phones = state.phones.write().await;
             phones.insert(phone_id.to_string(), phone);
-            
+
             // Send registration confirmation
             let response = WsMessage::Registered {
                 session_id: phone_id.to_string(),
@@ -574,10 +581,10 @@ async fn handle_phone_message(
             if let Ok(json) = serde_json::to_string(&response) {
                 let _ = session.text(json).await;
             }
-            
+
             tracing::info!("Phone {} registered", phone_id);
         }
-        
+
         WsMessage::Ready { ready } => {
             let mut phones = state.phones.write().await;
             if let Some(phone) = phones.get_mut(phone_id) {
@@ -586,8 +593,11 @@ async fn handle_phone_message(
             }
             tracing::info!("Phone {} ready: {}", phone_id, ready);
         }
-        
-        WsMessage::StatusUpdate { battery, orientation } => {
+
+        WsMessage::StatusUpdate {
+            battery,
+            orientation,
+        } => {
             let mut phones = state.phones.write().await;
             if let Some(phone) = phones.get_mut(phone_id) {
                 phone.battery_level = battery;
@@ -595,24 +605,32 @@ async fn handle_phone_message(
                 phone.last_seen = Utc::now();
             }
         }
-        
-        WsMessage::CaptureComplete { capture_id, timestamp, file_size, success, error } => {
+
+        WsMessage::CaptureComplete {
+            capture_id,
+            timestamp,
+            file_size,
+            success,
+            error,
+        } => {
             // Record capture result
             let result = CaptureResult {
                 capture_id: capture_id.clone(),
                 phone_id: phone_id.to_string(),
-                timestamp: DateTime::from_timestamp_millis(timestamp)
-                    .unwrap_or_else(Utc::now),
+                timestamp: DateTime::from_timestamp_millis(timestamp).unwrap_or_else(Utc::now),
                 file_size,
                 resolution: (0, 0), // Will be updated with image
                 orientation: None,
                 success,
                 error,
             };
-            
+
             let mut captures = state.captures.write().await;
-            captures.entry(capture_id).or_insert_with(Vec::new).push(result);
-            
+            captures
+                .entry(capture_id)
+                .or_insert_with(Vec::new)
+                .push(result);
+
             // Update phone stats
             let mut phones = state.phones.write().await;
             if let Some(phone) = phones.get_mut(phone_id) {
@@ -621,17 +639,13 @@ async fn handle_phone_message(
                 phone.last_capture = Some(Utc::now());
             }
         }
-        
+
         _ => {}
     }
 }
 
 /// Handle binary image upload from phone
-async fn handle_image_upload(
-    state: &SlavePhoneState,
-    phone_id: &str,
-    data: Vec<u8>,
-) {
+async fn handle_image_upload(state: &SlavePhoneState, phone_id: &str, data: Vec<u8>) {
     let size = data.len() as u64;
     if !state.allow_upload(phone_id, size).await {
         tracing::warn!(
@@ -648,11 +662,11 @@ async fn handle_image_upload(
     // Save image to upload directory
     let filename = format!("{}_{}.jpg", phone_id, Utc::now().timestamp_millis());
     let path = std::path::Path::new(&state.upload_dir).join(&filename);
-    
+
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    
+
     match tokio::fs::write(&path, &data).await {
         Ok(_) => {
             tracing::info!("Saved capture from {} ({} bytes)", phone_id, data.len());
@@ -692,12 +706,14 @@ fn is_jpeg_payload(data: &[u8]) -> bool {
 
 fn dir_size_bytes(root: &std::path::Path) -> u64 {
     let mut total = 0u64;
-    for entry in walkdir::WalkDir::new(root).follow_links(false) {
-        if let Ok(entry) = entry {
-            if entry.file_type().is_file() {
-                if let Ok(meta) = entry.metadata() {
-                    total = total.saturating_add(meta.len());
-                }
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
+        if entry.file_type().is_file() {
+            if let Ok(meta) = entry.metadata() {
+                total = total.saturating_add(meta.len());
             }
         }
     }
@@ -707,7 +723,7 @@ fn dir_size_bytes(root: &std::path::Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_ws_message_serialization() {
         let msg = WsMessage::Capture {
@@ -716,12 +732,12 @@ mod tests {
             countdown_ms: 1000,
             quality: 90,
         };
-        
+
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("capture"));
         assert!(json.contains("flash"));
     }
-    
+
     #[test]
     fn test_phone_mode() {
         assert_eq!(PhoneMode::Slave, PhoneMode::Slave);

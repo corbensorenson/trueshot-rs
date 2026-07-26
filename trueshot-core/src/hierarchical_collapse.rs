@@ -670,8 +670,10 @@ pub fn collapse_a_grade(
     // 4. Subpixel diversity between frames
     let min_coverage_for_sr = 40.0;
 
-    // SR is disabled - we only use native resolution processing
-    let do_sr = false;
+    let do_sr = sr_factor > 1.0
+        && alignments.is_some()
+        && foreground_coverage >= min_coverage_for_sr
+        && has_subpixel_diversity;
 
     if sr_factor > 1.0 {
         if foreground_coverage < min_coverage_for_sr {
@@ -1375,12 +1377,9 @@ pub fn merge_graded_results(
             let merged = merge_native_bayer(bayer_a, b_result, c_result, grades)?;
             Ok(CollapseResult::Bayer(merged))
         }
-        CollapseResult::Rgb(_rgb_a) => {
-            // This should not happen anymore - all collapse functions now return Bayer
-            anyhow::bail!(
-                "Unexpected RGB result from A-grade collapse - all grades should return Bayer now"
-            );
-        }
+        // Joint SR+demosaic already accumulates every foreground grade into the
+        // high-resolution RGB grid, so there is no native-resolution merge.
+        CollapseResult::Rgb(rgb_a) => Ok(CollapseResult::Rgb(rgb_a.clone())),
     }
 }
 

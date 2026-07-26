@@ -1,12 +1,14 @@
-use anyhow::{Result, anyhow};
+use super::{Camera as TetherCamera, CameraConfig};
+use anyhow::{anyhow, Result};
 use nokhwa::{
     pixel_format::RgbFormat,
-    utils::{CameraIndex, RequestedFormat, RequestedFormatType, Resolution, FrameFormat, CameraFormat},
+    utils::{
+        CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
+    },
     Camera,
 };
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-use super::{Camera as TetherCamera, CameraConfig};
+use std::sync::{Arc, Mutex};
 
 pub struct GenericWebcam {
     camera: Arc<Mutex<Camera>>,
@@ -19,19 +21,39 @@ unsafe impl Sync for GenericWebcam {}
 impl GenericWebcam {
     pub fn new(index: u32, name: &str) -> Result<Self> {
         let index_val = CameraIndex::Index(index);
-        
+
         let mut formats_to_try = vec![
-            RequestedFormatType::Closest(CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 30)),
-            RequestedFormatType::Closest(CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 30)),
-            RequestedFormatType::Closest(CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30)),
+            RequestedFormatType::Closest(CameraFormat::new(
+                Resolution::new(1920, 1080),
+                FrameFormat::MJPEG,
+                30,
+            )),
+            RequestedFormatType::Closest(CameraFormat::new(
+                Resolution::new(1280, 720),
+                FrameFormat::MJPEG,
+                30,
+            )),
+            RequestedFormatType::Closest(CameraFormat::new(
+                Resolution::new(640, 480),
+                FrameFormat::MJPEG,
+                30,
+            )),
         ];
 
         // Legacy/Buggy Camera Overrides
         if name.to_lowercase().contains("lifecam") {
             tracing::info!("Applying Safe Mode for Legacy Camera: {}", name);
             formats_to_try = vec![
-                RequestedFormatType::Closest(CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30)),
-                RequestedFormatType::Closest(CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 30)),
+                RequestedFormatType::Closest(CameraFormat::new(
+                    Resolution::new(640, 480),
+                    FrameFormat::MJPEG,
+                    30,
+                )),
+                RequestedFormatType::Closest(CameraFormat::new(
+                    Resolution::new(640, 480),
+                    FrameFormat::YUYV,
+                    30,
+                )),
             ];
         }
 
@@ -49,29 +71,41 @@ impl GenericWebcam {
                 Ok(Ok(mut cam)) => {
                     // Try to open stream to verify it actually works
                     if let Err(e) = cam.open_stream() {
-                         tracing::warn!("Webcam {} stream open failed with {:?}: {}", index, format_type, e);
-                         continue;
+                        tracing::warn!(
+                            "Webcam {} stream open failed with {:?}: {}",
+                            index,
+                            format_type,
+                            e
+                        );
+                        continue;
                     }
                     // It works!
                     camera = Some(Arc::new(Mutex::new(cam)));
                     break;
-                },
+                }
                 Ok(Err(e)) => {
                     tracing::debug!("Webcam {} init failed with {:?}: {}", index, format_type, e);
-                },
+                }
                 Err(_) => {
-                    tracing::warn!("Webcam {} panicked (SIGSEGV/Safe) with format {:?}", index, format_type);
-                },
+                    tracing::warn!(
+                        "Webcam {} panicked (SIGSEGV/Safe) with format {:?}",
+                        index,
+                        format_type
+                    );
+                }
             }
         }
 
         if let Some(cam) = camera {
-             Ok(Self {
-                camera: cam, // Changed from `inner` to `camera` to match struct field
+            Ok(Self {
+                camera: cam,                     // Changed from `inner` to `camera` to match struct field
                 id: format!("Webcam_{}", index), // Changed from `webcam-` to `Webcam_` and removed `index` field
             })
         } else {
-            Err(anyhow::anyhow!("Failed to initialize webcam {} with any format", index))
+            Err(anyhow::anyhow!(
+                "Failed to initialize webcam {} with any format",
+                index
+            ))
         }
     }
 }
@@ -82,28 +116,34 @@ impl TetherCamera for GenericWebcam {
     }
 
     fn capture(&self, _config: &CameraConfig) -> Result<PathBuf> {
-        let mut cam = self.camera.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+        let mut cam = self
+            .camera
+            .lock()
+            .map_err(|e| anyhow!("Lock error: {}", e))?;
         let frame = cam.frame()?;
-        
+
         let filename = format!("capture_{}_{}.jpg", self.id, chrono::Utc::now().timestamp());
         let path = std::env::temp_dir().join(filename);
-        
+
         match frame.source_frame_format() {
-             FrameFormat::MJPEG => {
-                 std::fs::write(&path, frame.buffer())?;
-             }
-             _ => {
-                 let image_buffer = frame.decode_image::<nokhwa::pixel_format::RgbFormat>()?;
-                 image_buffer.save(&path)?; 
-             }
+            FrameFormat::MJPEG => {
+                std::fs::write(&path, frame.buffer())?;
+            }
+            _ => {
+                let image_buffer = frame.decode_image::<nokhwa::pixel_format::RgbFormat>()?;
+                image_buffer.save(&path)?;
+            }
         }
         Ok(path)
     }
 
     fn capture_preview(&self) -> Result<Vec<u8>> {
-        let mut cam = self.camera.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+        let mut cam = self
+            .camera
+            .lock()
+            .map_err(|e| anyhow!("Lock error: {}", e))?;
         let frame = cam.frame()?;
-        
+
         if frame.source_frame_format() == FrameFormat::MJPEG {
             return Ok(frame.buffer().to_vec());
         }
@@ -111,7 +151,10 @@ impl TetherCamera for GenericWebcam {
         // Encode to JPEG if raw
         let image_buffer = frame.decode_image::<nokhwa::pixel_format::RgbFormat>()?;
         let mut bytes: Vec<u8> = Vec::new();
-        image_buffer.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)?;
+        image_buffer.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Jpeg,
+        )?;
         Ok(bytes)
     }
 

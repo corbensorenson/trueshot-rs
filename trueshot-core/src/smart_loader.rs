@@ -86,7 +86,7 @@ impl<'a> NativeFrameGroup<'a> {
     }
 
     pub fn size_bytes(&self) -> usize {
-        self.pixels.len() * std::mem::size_of::<u16>()
+        std::mem::size_of_val(self.pixels)
     }
 
     pub(crate) fn from_parts(

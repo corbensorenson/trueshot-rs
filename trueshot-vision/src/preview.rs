@@ -108,7 +108,11 @@ impl TiffParser {
         Ok(self.read_u32(&offset_bytes)? as u64)
     }
 
-    fn read_tag_data(&self, reader: &mut BufReader<&mut File>, entry: &IfdEntry) -> Result<Vec<u8>> {
+    fn read_tag_data(
+        &self,
+        reader: &mut BufReader<&mut File>,
+        entry: &IfdEntry,
+    ) -> Result<Vec<u8>> {
         let data_size = self.get_data_type_size(entry.data_type)? * entry.count as usize;
         if data_size <= 4 {
             let mut data = Vec::new();
@@ -123,7 +127,11 @@ impl TiffParser {
         }
     }
 
-    fn read_u32_array(&self, reader: &mut BufReader<&mut File>, entry: &IfdEntry) -> Result<Vec<u32>> {
+    fn read_u32_array(
+        &self,
+        reader: &mut BufReader<&mut File>,
+        entry: &IfdEntry,
+    ) -> Result<Vec<u32>> {
         let data = self.read_tag_data(reader, entry)?;
         let mut result = Vec::new();
         for chunk in data.chunks_exact(4) {
@@ -181,8 +189,8 @@ impl VisionPreviewExtractor {
     }
 
     fn extract_from_path(&mut self, path: &Path) -> Result<Vec<u8>> {
-        let mut file = File::open(path)
-            .with_context(|| format!("Failed to open file: {}", path.display()))?;
+        let mut file =
+            File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
         let mut reader = BufReader::new(&mut file);
 
         let header = self.parser.read_header(&mut reader)?;
@@ -253,9 +261,11 @@ impl VisionPreviewExtractor {
                             subifd.get(&TIFF_TAG_JPEG_INTERCHANGE_FORMAT),
                             subifd.get(&TIFF_TAG_JPEG_INTERCHANGE_FORMAT_LENGTH),
                         ) {
-                            if let Ok(jpeg) =
-                                self.read_jpeg(reader, offset_entry.value_offset, length_entry.value_offset)
-                            {
+                            if let Ok(jpeg) = self.read_jpeg(
+                                reader,
+                                offset_entry.value_offset,
+                                length_entry.value_offset,
+                            ) {
                                 if !jpeg.is_empty() {
                                     return Ok(jpeg);
                                 }

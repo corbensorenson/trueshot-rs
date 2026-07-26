@@ -94,9 +94,11 @@ impl LicenseGate {
                 }
             }
         }
-        self.manager
-            .as_mut()
-            .ok_or_else(|| self.init_error.clone().unwrap_or_else(|| "License subsystem unavailable".to_string()))
+        self.manager.as_mut().ok_or_else(|| {
+            self.init_error
+                .clone()
+                .unwrap_or_else(|| "License subsystem unavailable".to_string())
+        })
     }
 
     pub fn status_snapshot(&mut self) -> LicenseSnapshot {
@@ -208,7 +210,11 @@ impl LicenseGate {
             .map_err(|err| err.to_string())
     }
 
-    pub fn activate_with_key(&mut self, license_key: &str, device_name: Option<String>) -> Result<LicenseSnapshot, String> {
+    pub fn activate_with_key(
+        &mut self,
+        license_key: &str,
+        device_name: Option<String>,
+    ) -> Result<LicenseSnapshot, String> {
         let manager = self.ensure_manager()?;
         manager
             .load_license_key(license_key, device_name)
@@ -216,7 +222,11 @@ impl LicenseGate {
         Ok(self.status_snapshot())
     }
 
-    pub fn create_trial(&mut self, duration_days: i64, bundles: &[String]) -> Result<LicenseSnapshot, String> {
+    pub fn create_trial(
+        &mut self,
+        duration_days: i64,
+        bundles: &[String],
+    ) -> Result<LicenseSnapshot, String> {
         let manager = self.ensure_manager()?;
         let selected_bundles = if bundles.is_empty() {
             default_trial_bundles()
@@ -240,9 +250,7 @@ impl LicenseGate {
 
     pub fn list_activated_devices(&mut self) -> Result<Vec<LicenseDeviceRecord>, String> {
         let manager = self.ensure_manager()?;
-        let devices = manager
-            .activated_devices()
-            .map_err(|err| err.to_string())?;
+        let devices = manager.activated_devices().map_err(|err| err.to_string())?;
         Ok(devices
             .into_iter()
             .map(|device| LicenseDeviceRecord {
@@ -254,7 +262,10 @@ impl LicenseGate {
             .collect())
     }
 
-    pub fn activate_current_device(&mut self, device_name: Option<String>) -> Result<LicenseSnapshot, String> {
+    pub fn activate_current_device(
+        &mut self,
+        device_name: Option<String>,
+    ) -> Result<LicenseSnapshot, String> {
         let manager = self.ensure_manager()?;
         manager
             .activate_current_device(device_name)
@@ -372,7 +383,8 @@ pub fn bundle_catalog() -> Vec<BundleDefinition> {
         BundleDefinition {
             key: "advanced_capture".to_string(),
             name: "Advanced Capture Automation".to_string(),
-            description: "HDR bracketing, focus stacking, and intervalometer orchestration".to_string(),
+            description: "HDR bracketing, focus stacking, and intervalometer orchestration"
+                .to_string(),
             features: vec!["advanced_capture_automation".to_string()],
             price_usd: 49,
             billing: "lifetime".to_string(),
@@ -498,7 +510,10 @@ fn tracked_features() -> Vec<(&'static str, Feature)> {
         ("4dgs", Feature::FourDGS),
         ("room_reconstruction", Feature::RoomReconstruction),
         ("avatar_reconstruction", Feature::AvatarReconstruction),
-        ("advanced_capture_automation", Feature::AdvancedCaptureAutomation),
+        (
+            "advanced_capture_automation",
+            Feature::AdvancedCaptureAutomation,
+        ),
         ("cloud_sync_backup", Feature::CloudSyncBackup),
         ("team_collaboration", Feature::TeamCollaboration),
         ("pipeline_automation", Feature::PipelineAutomation),

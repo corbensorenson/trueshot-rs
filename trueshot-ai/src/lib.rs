@@ -1,12 +1,12 @@
 pub mod material;
+pub mod model_manifest;
 pub mod naming;
 pub mod segmentation;
-pub mod model_manifest;
 // pub mod splatting;
 
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use once_cell::sync::Lazy;
 
 /// Central Model Registry
 /// Manages loading and caching of AI models to prevent OOM
@@ -37,7 +37,7 @@ impl ModelRegistry {
         });
         &INSTANCE
     }
-    
+
     // Stub for lazy loading logic
     pub fn get_session(&self, model_key: &str) -> Option<Arc<Session>> {
         self.sessions.lock().unwrap().get(model_key).cloned()

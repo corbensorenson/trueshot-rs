@@ -89,7 +89,7 @@ impl MaterialEstimator {
                 }
             })?;
 
-        let input = session.inputs.get(0).context("ONNX model has no inputs")?;
+        let input = session.inputs.first().context("ONNX model has no inputs")?;
         let input_name = input.name.clone();
         let layout = infer_layout(&input.input_type);
         let (target_width, target_height) = infer_target_dimensions(&input.input_type, layout);
@@ -210,13 +210,13 @@ fn sobel_magnitude(luma: &[f32], width: usize, height: usize) -> Vec<f32> {
     let idx = |x: usize, y: usize| y * width + x;
     for y in 1..height - 1 {
         for x in 1..width - 1 {
-            let gx = -1.0 * luma[idx(x - 1, y - 1)] + 1.0 * luma[idx(x + 1, y - 1)]
+            let gx = -luma[idx(x - 1, y - 1)] + 1.0 * luma[idx(x + 1, y - 1)]
                 - 2.0 * luma[idx(x - 1, y)]
                 + 2.0 * luma[idx(x + 1, y)]
                 - 1.0 * luma[idx(x - 1, y + 1)]
                 + 1.0 * luma[idx(x + 1, y + 1)];
 
-            let gy = -1.0 * luma[idx(x - 1, y - 1)]
+            let gy = -luma[idx(x - 1, y - 1)]
                 - 2.0 * luma[idx(x, y - 1)]
                 - 1.0 * luma[idx(x + 1, y - 1)]
                 + 1.0 * luma[idx(x - 1, y + 1)]
@@ -332,7 +332,7 @@ fn build_input_nchw(rgb: &image::RgbImage) -> (Vec<usize>, Vec<f32>) {
     let (width, height) = rgb.dimensions();
     let h = height as usize;
     let w = width as usize;
-    let mut data = vec![0.0f32; 1 * 3 * h * w];
+    let mut data = vec![0.0f32; 3 * h * w];
     for y in 0..h {
         for x in 0..w {
             let pixel = rgb.get_pixel(x as u32, y as u32);
@@ -341,7 +341,7 @@ fn build_input_nchw(rgb: &image::RgbImage) -> (Vec<usize>, Vec<f32>) {
             let b = pixel[2] as f32 / 255.0;
             let base = y * w + x;
             data[0 * h * w + base] = r;
-            data[1 * h * w + base] = g;
+            data[h * w + base] = g;
             data[2 * h * w + base] = b;
         }
     }
@@ -352,7 +352,7 @@ fn build_input_nhwc(rgb: &image::RgbImage) -> (Vec<usize>, Vec<f32>) {
     let (width, height) = rgb.dimensions();
     let h = height as usize;
     let w = width as usize;
-    let mut data = vec![0.0f32; 1 * h * w * 3];
+    let mut data = vec![0.0f32; h * w * 3];
     for y in 0..h {
         for x in 0..w {
             let pixel = rgb.get_pixel(x as u32, y as u32);
@@ -425,7 +425,7 @@ fn extract_nchw_map(h: usize, w: usize, data: &[f32], channel: OutputChannel) ->
     let mut img = GrayImage::new(w as u32, h as u32);
     for y in 0..h {
         for x in 0..w {
-            let idx = ((channel_idx * h + y) * w + x) as usize;
+            let idx = (channel_idx * h + y) * w + x;
             img.put_pixel(x as u32, y as u32, Luma([to_u8(data[idx])]));
         }
     }
@@ -440,7 +440,7 @@ fn extract_nhwc_map(h: usize, w: usize, data: &[f32], channel: OutputChannel) ->
     let mut img = GrayImage::new(w as u32, h as u32);
     for y in 0..h {
         for x in 0..w {
-            let idx = ((y * w + x) * 2 + channel_idx) as usize;
+            let idx = (y * w + x) * 2 + channel_idx;
             img.put_pixel(x as u32, y as u32, Luma([to_u8(data[idx])]));
         }
     }
@@ -455,7 +455,7 @@ fn extract_chw_map(h: usize, w: usize, data: &[f32], channel: OutputChannel) -> 
     let mut img = GrayImage::new(w as u32, h as u32);
     for y in 0..h {
         for x in 0..w {
-            let idx = ((channel_idx * h + y) * w + x) as usize;
+            let idx = (channel_idx * h + y) * w + x;
             img.put_pixel(x as u32, y as u32, Luma([to_u8(data[idx])]));
         }
     }
@@ -470,7 +470,7 @@ fn extract_hwc_map(h: usize, w: usize, data: &[f32], channel: OutputChannel) -> 
     let mut img = GrayImage::new(w as u32, h as u32);
     for y in 0..h {
         for x in 0..w {
-            let idx = ((y * w + x) * 2 + channel_idx) as usize;
+            let idx = (y * w + x) * 2 + channel_idx;
             img.put_pixel(x as u32, y as u32, Luma([to_u8(data[idx])]));
         }
     }
@@ -481,7 +481,7 @@ fn extract_single_nchw(h: usize, w: usize, data: &[f32]) -> GrayImage {
     let mut img = GrayImage::new(w as u32, h as u32);
     for y in 0..h {
         for x in 0..w {
-            let idx = (y * w + x) as usize;
+            let idx = y * w + x;
             img.put_pixel(x as u32, y as u32, Luma([to_u8(data[idx])]));
         }
     }
@@ -492,7 +492,7 @@ fn extract_single_nhwc(h: usize, w: usize, data: &[f32]) -> GrayImage {
     let mut img = GrayImage::new(w as u32, h as u32);
     for y in 0..h {
         for x in 0..w {
-            let idx = (y * w + x) as usize;
+            let idx = y * w + x;
             img.put_pixel(x as u32, y as u32, Luma([to_u8(data[idx])]));
         }
     }
@@ -503,7 +503,7 @@ fn extract_single_hw(h: usize, w: usize, data: &[f32]) -> GrayImage {
     let mut img = GrayImage::new(w as u32, h as u32);
     for y in 0..h {
         for x in 0..w {
-            let idx = (y * w + x) as usize;
+            let idx = y * w + x;
             img.put_pixel(x as u32, y as u32, Luma([to_u8(data[idx])]));
         }
     }

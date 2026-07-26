@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use pixelcollapse2::timing::{HierarchicalTimer, timed_scope};
+//! use trueshot_core::{timed_scope, timing::HierarchicalTimer};
 //!
 //! let mut timer = HierarchicalTimer::new("sequence_1");
 //! timed_scope!(&mut timer, "preprocess", {
@@ -347,7 +347,7 @@ impl Drop for ScopeGuard {
 /// # Example
 ///
 /// ```no_run
-/// # use pixelcollapse2::timing::{HierarchicalTimer, timed_scope};
+/// # use trueshot_core::{timed_scope, timing::HierarchicalTimer};
 /// let mut timer = HierarchicalTimer::new("test");
 /// timed_scope!(&mut timer, "my_operation", {
 ///     // Your code here
@@ -458,6 +458,7 @@ mod tests {
 
     #[test]
     fn test_timed_scope_macro() {
+        #[allow(unused_mut)]
         let mut timer = HierarchicalTimer::new("test");
 
         let result = timed_scope!(&mut timer, "macro_test", {

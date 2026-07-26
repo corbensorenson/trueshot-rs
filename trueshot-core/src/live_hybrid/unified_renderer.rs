@@ -388,7 +388,7 @@ impl UnifiedRenderer {
                     let b2 = w2 * inv_area;
 
                     let depth = b0 * z0 + b1 * z1 + b2 * z2;
-                    if depth < 0.0 || depth > 1.0 {
+                    if !(0.0..=1.0).contains(&depth) {
                         continue;
                     }
 

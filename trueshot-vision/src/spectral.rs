@@ -20,7 +20,7 @@ impl MultiSpectralImage {
         let start = ((y * self.width + x) * self.channels as u32) as usize;
         &self.data[start..start + self.channels as usize]
     }
-    
+
     pub fn set_pixel(&mut self, x: u32, y: u32, pixel: &[u16]) {
         let start = ((y * self.width + x) * self.channels as u32) as usize;
         let end = start + self.channels as usize;

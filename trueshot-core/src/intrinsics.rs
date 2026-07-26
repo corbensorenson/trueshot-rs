@@ -317,7 +317,7 @@ fn exif_first_f64(value: &Value) -> Option<f64> {
 fn exif_first_u32(value: &Value) -> Option<u32> {
     match value {
         Value::Short(ref v) if !v.is_empty() => Some(v[0] as u32),
-        Value::Long(ref v) if !v.is_empty() => Some(v[0] as u32),
+        Value::Long(ref v) if !v.is_empty() => Some(v[0]),
         Value::Rational(ref v) if !v.is_empty() => {
             let r = v[0];
             if r.denom != 0 {

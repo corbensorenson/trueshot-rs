@@ -16,7 +16,10 @@ pub struct TelemetrySettings {
 impl TelemetrySettings {
     pub fn from_config(config: &AppConfig, is_production: bool) -> Self {
         let enabled = config.server.telemetry_enabled.unwrap_or(is_production);
-        let sample_ratio = config.server.telemetry_sample_ratio.unwrap_or(if is_production { 0.5 } else { 1.0 });
+        let sample_ratio = config
+            .server
+            .telemetry_sample_ratio
+            .unwrap_or(if is_production { 0.5 } else { 1.0 });
         let otlp_endpoint = config
             .server
             .telemetry_otlp_endpoint
@@ -54,7 +57,9 @@ pub fn init_tracer(settings: &TelemetrySettings) -> anyhow::Result<Option<Tracer
     }
 
     let trace_config = trace::config()
-        .with_sampler(Sampler::TraceIdRatioBased(settings.sample_ratio.clamp(0.0, 1.0)))
+        .with_sampler(Sampler::TraceIdRatioBased(
+            settings.sample_ratio.clamp(0.0, 1.0),
+        ))
         .with_resource(Resource::new(vec![
             KeyValue::new("service.name", settings.service_name.clone()),
             KeyValue::new("service.version", settings.service_version.clone()),

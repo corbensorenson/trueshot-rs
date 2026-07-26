@@ -1,4 +1,4 @@
-use sysinfo::{System, SystemExt, DiskExt};
+use sysinfo::{DiskExt, System, SystemExt};
 
 pub struct StorageEstimator {
     sys: System,
@@ -23,7 +23,7 @@ impl StorageEstimator {
 
     pub fn estimate_remaining(&mut self, _current_project_size: u64) -> (String, String) {
         self.sys.refresh_disks();
-        
+
         let mut total_free = 0;
         for disk in self.sys.disks() {
             if disk.mount_point() == std::path::Path::new("/") {
@@ -45,7 +45,7 @@ impl StorageEstimator {
         let size_str = if total_free > 1_000_000_000 {
             format!("{:.1}GB", total_free as f64 / 1_000_000_000.0)
         } else {
-             format!("{:.0}MB", total_free as f64 / 1_000_000.0)
+            format!("{:.0}MB", total_free as f64 / 1_000_000.0)
         };
 
         (size_str, time_str)

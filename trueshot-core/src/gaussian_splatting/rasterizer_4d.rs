@@ -395,14 +395,7 @@ impl GpuRasterizer4D {
         let samples = self.config.motion_blur_samples.max(1);
         let dt = 1.0 / (scene.capture_fps * samples as f32);
 
-        projected
-            .iter()
-            .map(|p| {
-                // For now, just return as-is
-                // Full implementation would trace velocity over dt
-                p.clone()
-            })
-            .collect()
+        projected.iter().cloned().collect()
     }
 
     /// Tile-based rendering (main 3DGS optimization)

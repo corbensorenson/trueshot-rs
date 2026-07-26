@@ -1,7 +1,7 @@
-use actix_web::{get, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use crate::auth::require_admin;
 use crate::audit::AuditEvent;
+use crate::auth::require_admin;
 use crate::state::AppState;
+use actix_web::{get, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use std::io::{Read, Seek, SeekFrom};
 
 /// Health check endpoint
@@ -30,10 +30,10 @@ pub async fn health_check() -> impl Responder {
 )]
 #[get("/api/logs")]
 pub async fn get_logs(req: HttpRequest) -> impl Responder {
-     if let Err(resp) = require_admin(&req) {
-         return resp;
-     }
-     match tokio::task::spawn_blocking(|| read_log_tail("logs/trueshot.log", 512 * 1024)).await {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    match tokio::task::spawn_blocking(|| read_log_tail("logs/trueshot.log", 512 * 1024)).await {
         Ok(Ok(content)) => {
             let redacted = redact_log_content(&content);
             let lines: Vec<&str> = redacted.lines().rev().take(100).collect();
@@ -55,30 +55,34 @@ pub async fn get_logs(req: HttpRequest) -> impl Responder {
 )]
 #[get("/api/logs/export")]
 pub async fn export_logs(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
-     if let Err(resp) = require_admin(&req) {
-         return resp;
-     }
-     match tokio::task::spawn_blocking(|| read_log_tail("logs/trueshot.log", 5 * 1024 * 1024)).await {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    match tokio::task::spawn_blocking(|| read_log_tail("logs/trueshot.log", 5 * 1024 * 1024)).await
+    {
         Ok(Ok(content)) => {
-             let redacted = redact_log_content(&content);
-             log_audit(
-                 &req,
-                 &state,
-                 AuditEvent::new(
-                     audit_actor(&req).0,
-                     audit_actor(&req).1,
-                     "logs.export",
-                     "trueshot.log",
-                     "success",
-                     audit_actor(&req).2,
-                     serde_json::json!({ "bytes": redacted.len() }),
-                 ),
-             );
-             HttpResponse::Ok()
+            let redacted = redact_log_content(&content);
+            log_audit(
+                &req,
+                &state,
+                AuditEvent::new(
+                    audit_actor(&req).0,
+                    audit_actor(&req).1,
+                    "logs.export",
+                    "trueshot.log",
+                    "success",
+                    audit_actor(&req).2,
+                    serde_json::json!({ "bytes": redacted.len() }),
+                ),
+            );
+            HttpResponse::Ok()
                 .content_type("text/plain")
-                .append_header(("Content-Disposition", "attachment; filename=\"trueshot_logs.txt\""))
+                .append_header((
+                    "Content-Disposition",
+                    "attachment; filename=\"trueshot_logs.txt\"",
+                ))
                 .body(redacted)
-        },
+        }
         Ok(Err(e)) => HttpResponse::InternalServerError().body(e.to_string()),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
@@ -94,7 +98,10 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state.audit.append_with_redaction(event, &state.config.privacy) {
+    if let Err(err) = state
+        .audit
+        .append_with_redaction(event, &state.config.privacy)
+    {
         tracing::warn!("audit log failed for {}: {}", req.path(), err);
     }
 }
@@ -141,7 +148,8 @@ fn redact_after_marker(input: &str, marker: &str) -> String {
         let bytes = input.as_bytes();
         while end < input.len() {
             let ch = bytes[end] as char;
-            if ch.is_whitespace() || ch == '"' || ch == '\'' || ch == '&' || ch == ';' || ch == ',' {
+            if ch.is_whitespace() || ch == '"' || ch == '\'' || ch == '&' || ch == ';' || ch == ','
+            {
                 break;
             }
             end += 1;

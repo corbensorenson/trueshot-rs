@@ -1,13 +1,13 @@
-use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
 use crate::auth::require_admin;
 use crate::licensing::require_license_feature;
-use trueshot_core::licensing::Feature;
 use crate::state::AppState;
+use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
 use serde::Deserialize;
 use std::path::PathBuf;
+use trueshot_core::licensing::Feature;
 use trueshot_core::reconstruction::job::{UnifiedJob, UnifiedJobType};
-use uuid::Uuid;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RemoteJobRequest {
@@ -58,7 +58,9 @@ pub async fn submit_job(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::PipelineAutomation, "pipeline_automation") {
+    if let Err(resp) =
+        require_license_feature(&state, Feature::PipelineAutomation, "pipeline_automation")
+    {
         return resp;
     }
 
@@ -66,7 +68,10 @@ pub async fn submit_job(
     if let Some(url) = json.webhook_url.as_ref() {
         if payload.get("webhook_url").is_none() {
             if let Some(map) = payload.as_object_mut() {
-                map.insert("webhook_url".to_string(), serde_json::Value::String(url.clone()));
+                map.insert(
+                    "webhook_url".to_string(),
+                    serde_json::Value::String(url.clone()),
+                );
             }
         }
     }
@@ -128,7 +133,9 @@ pub async fn list_jobs(req: HttpRequest, state: web::Data<AppState>) -> impl Res
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::PipelineAutomation, "pipeline_automation") {
+    if let Err(resp) =
+        require_license_feature(&state, Feature::PipelineAutomation, "pipeline_automation")
+    {
         return resp;
     }
 
@@ -158,7 +165,9 @@ pub async fn get_job(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::PipelineAutomation, "pipeline_automation") {
+    if let Err(resp) =
+        require_license_feature(&state, Feature::PipelineAutomation, "pipeline_automation")
+    {
         return resp;
     }
 
@@ -169,7 +178,10 @@ pub async fn get_job(
     }
 }
 
-pub(crate) fn build_job_from_payload(kind: &str, payload: serde_json::Value) -> Result<UnifiedJob, String> {
+pub(crate) fn build_job_from_payload(
+    kind: &str,
+    payload: serde_json::Value,
+) -> Result<UnifiedJob, String> {
     let payload: UnifiedJobPayload = serde_json::from_value(payload)
         .map_err(|err| format!("Invalid payload format: {}", err))?;
     let job_type = match resolve_job_type(kind, &payload) {

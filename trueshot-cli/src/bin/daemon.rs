@@ -1,16 +1,16 @@
-use anyhow::{Result, Context};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use anyhow::{Context, Result};
 use chrono::Duration as ChronoDuration;
 use config::{Config, File};
 use serde::Deserialize;
-use uuid::Uuid;
-use trueshot_device_manager::{Turntable, Foldio360};
-use trueshot_core::inventory::{Inventory, Sequence, SequenceStatus};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use sysinfo::System;
+use trueshot_core::inventory::{Inventory, Sequence, SequenceStatus};
+use trueshot_device_manager::{Foldio360, Turntable};
+use uuid::Uuid;
 
 // Daemon Loop (SOTA 10)
 // Keeps BLE connection alive and polls for jobs.
@@ -103,7 +103,8 @@ async fn main() -> Result<()> {
             min_images,
             capture_timeout,
         )
-        .await {
+        .await
+        {
             tracing::error!("Job runner error: {}", err);
         }
 
@@ -150,16 +151,22 @@ async fn process_planned_sequences(
     }
 
     for seq in planned {
-        let claimed = inventory.try_acquire_sequence_lease(&seq.id, &owner.id, &owner.name, lease_ttl)?;
+        let claimed =
+            inventory.try_acquire_sequence_lease(&seq.id, &owner.id, &owner.name, lease_ttl)?;
         if !claimed {
             continue;
         }
-        let claimed_status = inventory.transition_sequence_status(&seq.id, SequenceStatus::Planned, SequenceStatus::Capturing)?;
+        let claimed_status = inventory.transition_sequence_status(
+            &seq.id,
+            SequenceStatus::Planned,
+            SequenceStatus::Capturing,
+        )?;
         if claimed_status.is_none() {
             let _ = inventory.release_sequence_lease(&seq.id, &owner.id);
             continue;
         }
-        let _lease_guard = start_lease_renewer(inventory.clone(), seq.id, owner.id, lease_ttl, lease_renew);
+        let _lease_guard =
+            start_lease_renewer(inventory.clone(), seq.id, owner.id, lease_ttl, lease_renew);
         tracing::info!("Claiming sequence {} ({})", seq.id, seq.name);
         let result: Result<()> = async {
             let root = resolve_sequence_root(&seq, &cfg.paths.projects_dir)?;
@@ -169,7 +176,11 @@ async fn process_planned_sequences(
             wait_for_capture_ready(&input_dir, stable_secs, min_images, timeout_secs).await?;
 
             if inventory
-                .transition_sequence_status(&seq.id, SequenceStatus::Capturing, SequenceStatus::Processing)?
+                .transition_sequence_status(
+                    &seq.id,
+                    SequenceStatus::Capturing,
+                    SequenceStatus::Processing,
+                )?
                 .is_none()
             {
                 tracing::warn!("Sequence {} lost claim before processing", seq.id);
@@ -290,7 +301,11 @@ async fn wait_for_capture_ready(
         last_count = count;
 
         if stable_for >= stable_secs {
-            tracing::info!("Capture stabilized ({} images) for {}", count, input_dir.display());
+            tracing::info!(
+                "Capture stabilized ({} images) for {}",
+                count,
+                input_dir.display()
+            );
             return Ok(());
         }
 
@@ -316,15 +331,26 @@ fn count_images(dir: &Path) -> Result<usize> {
 
 fn is_image_path(path: &Path) -> bool {
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) => matches!(ext.to_lowercase().as_str(), "jpg" | "jpeg" | "png" | "tif" | "tiff"),
+        Some(ext) => matches!(
+            ext.to_lowercase().as_str(),
+            "jpg" | "jpeg" | "png" | "tif" | "tiff"
+        ),
         None => false,
     }
 }
 
 fn run_sequence_processing(seq: &Sequence, root: &Path, cfg: &DaemonConfig) -> Result<()> {
     let output_dir = root.join("processed");
-    let mode = cfg.daemon.default_mode.clone().unwrap_or_else(|| "hybrid".to_string());
-    let quality = cfg.daemon.default_quality.clone().unwrap_or_else(|| "high".to_string());
+    let mode = cfg
+        .daemon
+        .default_mode
+        .clone()
+        .unwrap_or_else(|| "hybrid".to_string());
+    let quality = cfg
+        .daemon
+        .default_quality
+        .clone()
+        .unwrap_or_else(|| "high".to_string());
 
     let trueshot_bin = resolve_trueshot_bin()?;
     tracing::info!(
@@ -357,7 +383,9 @@ fn run_sequence_processing(seq: &Sequence, root: &Path, cfg: &DaemonConfig) -> R
 
 fn resolve_trueshot_bin() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
-    let dir = exe.parent().ok_or_else(|| anyhow::anyhow!("Missing executable dir"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Missing executable dir"))?;
     let candidate = dir.join("trueshot");
     if candidate.exists() {
         return Ok(candidate);

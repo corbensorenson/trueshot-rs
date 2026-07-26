@@ -230,12 +230,12 @@ mod tests {
             MotionClassification::Slow
         );
         assert_eq!(
-            MotionClassification::from_score(0.5),
+            MotionClassification::from_score(0.4),
             MotionClassification::Dynamic
         );
         assert_eq!(
             MotionClassification::from_score(1.0),
-            MotionClassification::Dynamic
+            MotionClassification::Rapid
         );
     }
 

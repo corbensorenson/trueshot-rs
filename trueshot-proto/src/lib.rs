@@ -1,7 +1,7 @@
 // Minimal protobuf struct for Job definition
 // Ideally we run `protoc` but for now we define structs that mimic it.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProcessingJob {

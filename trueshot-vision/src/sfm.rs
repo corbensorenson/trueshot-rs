@@ -1,13 +1,13 @@
 // Structure from Motion (SfM) module
 // Estimates camera poses and triangulates 3D points from image sequences
 
-use anyhow::{Context, Result};
 use crate::cv::{CameraIntrinsics, CameraPose, Feature};
+use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgb};
 use nalgebra as na;
 use opencv::{
-    core::{self, Mat, Point2f, Vector},
     calib3d,
+    core::{self, Mat, Point2f, Vector},
     prelude::*,
 };
 
@@ -27,7 +27,10 @@ pub fn estimate_pose(
     intrinsics: &CameraIntrinsics,
 ) -> Result<CameraPose> {
     if matches.len() < 8 {
-        anyhow::bail!("Need at least 8 matches for pose estimation, got {}", matches.len());
+        anyhow::bail!(
+            "Need at least 8 matches for pose estimation, got {}",
+            matches.len()
+        );
     }
 
     // Extract matched points
@@ -87,8 +90,13 @@ pub fn estimate_pose(
         t = t * 0.1;
     }
 
-    log::debug!("Camera pose: rotation norm={:.3}, translation=({:.3}, {:.3}, {:.3})",
-                r.determinant(), t.x, t.y, t.z);
+    log::debug!(
+        "Camera pose: rotation norm={:.3}, translation=({:.3}, {:.3}, {:.3})",
+        r.determinant(),
+        t.x,
+        t.y,
+        t.z
+    );
 
     Ok(CameraPose {
         rotation: r,
@@ -112,16 +120,20 @@ pub fn triangulate_points(
 
     // Create projection matrices
     let k = intrinsics.to_nalgebra_matrix();
-    
+
     // P1 = K * [R1 | t1]
     let mut p1_mat = na::Matrix3x4::zeros();
-    p1_mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&pose1.rotation);
+    p1_mat
+        .fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&pose1.rotation);
     p1_mat.column_mut(3).copy_from(&pose1.translation);
     let proj1 = k * p1_mat;
-    
+
     // P2 = K * [R2 | t2]
     let mut p2_mat = na::Matrix3x4::zeros();
-    p2_mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&pose2.rotation);
+    p2_mat
+        .fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&pose2.rotation);
     p2_mat.column_mut(3).copy_from(&pose2.translation);
     let proj2 = k * p2_mat;
 
@@ -149,14 +161,16 @@ pub fn triangulate_points(
         // Filter out points that are too far or behind camera
         let depth = point_3d.z;
         // More lenient depth range for normalized scale
-        if depth < 0.01 || depth > 5.0 {  // Reasonable depth range for normalized coordinates
+        if depth < 0.01 || depth > 5.0 {
+            // Reasonable depth range for normalized coordinates
             rejected_count += 1;
             continue;
         }
 
         // Also filter by distance from origin (outlier rejection)
         let distance = (point_3d.x.powi(2) + point_3d.y.powi(2) + point_3d.z.powi(2)).sqrt();
-        if distance > 2.0 {  // Points too far from origin are likely outliers
+        if distance > 2.0 {
+            // Points too far from origin are likely outliers
             rejected_count += 1;
             continue;
         }
@@ -171,7 +185,8 @@ pub fn triangulate_points(
         );
 
         // Reject points with high reprojection error
-        if reprojection_error > 5.0 {  // 5 pixels max error
+        if reprojection_error > 5.0 {
+            // 5 pixels max error
             rejected_count += 1;
             continue;
         }
@@ -191,7 +206,11 @@ pub fn triangulate_points(
         });
     }
 
-    log::debug!("Triangulated {} 3D points ({} rejected)", points_3d.len(), rejected_count);
+    log::debug!(
+        "Triangulated {} 3D points ({} rejected)",
+        points_3d.len(),
+        rejected_count
+    );
     Ok(points_3d)
 }
 
@@ -229,14 +248,18 @@ fn triangulate_point_dlt(
 ) -> Result<na::Point3<f64>> {
     // Build matrix A for DLT
     let mut a = na::Matrix4::zeros();
-    
+
     // From first view
-    a.row_mut(0).copy_from(&(point1.0 * proj1.row(2) - proj1.row(0)));
-    a.row_mut(1).copy_from(&(point1.1 * proj1.row(2) - proj1.row(1)));
-    
+    a.row_mut(0)
+        .copy_from(&(point1.0 * proj1.row(2) - proj1.row(0)));
+    a.row_mut(1)
+        .copy_from(&(point1.1 * proj1.row(2) - proj1.row(1)));
+
     // From second view
-    a.row_mut(2).copy_from(&(point2.0 * proj2.row(2) - proj2.row(0)));
-    a.row_mut(3).copy_from(&(point2.1 * proj2.row(2) - proj2.row(1)));
+    a.row_mut(2)
+        .copy_from(&(point2.0 * proj2.row(2) - proj2.row(0)));
+    a.row_mut(3)
+        .copy_from(&(point2.1 * proj2.row(2) - proj2.row(1)));
 
     // Solve using SVD
     let svd = na::SVD::new(a, true, true);
@@ -346,7 +369,9 @@ pub fn estimate_depth_from_motion(
 
     // Calc min and max for log
     let min_d = smoothed_depths.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-    let max_d = smoothed_depths.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+    let max_d = smoothed_depths
+        .iter()
+        .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
     log::debug!("📊 Depth range: {:.3}m to {:.3}m", min_d, max_d);
 
     smoothed_depths
@@ -354,11 +379,7 @@ pub fn estimate_depth_from_motion(
 
 /// Smooth depth estimates using spatial coherence
 /// Points close in image space should have similar depths
-fn smooth_depths(
-    depths: &[f32],
-    features: &[Feature],
-    matches: &[(usize, usize)],
-) -> Vec<f32> {
+fn smooth_depths(depths: &[f32], features: &[Feature], matches: &[(usize, usize)]) -> Vec<f32> {
     let mut smoothed = depths.to_vec();
     let radius = 50.0; // pixels
 

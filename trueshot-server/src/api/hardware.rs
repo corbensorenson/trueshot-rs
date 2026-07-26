@@ -1,26 +1,26 @@
-use actix_web::{get, post, patch, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use crate::state::AppState;
 use crate::auth::{require_admin, AuthContext, Role, SESSION_COOKIE_NAME};
+use crate::intervalometer::{IntervalometerRamp, IntervalometerStatus};
 use crate::licensing::require_license_feature;
+use crate::state::AppState;
+use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
+use chrono::Utc;
+use serde::Deserialize;
+use std::time::Duration;
+use tokio::sync::oneshot;
+use tokio::time::sleep;
+use tokio::time::MissedTickBehavior;
 use trueshot_core::events::SystemEvent;
 use trueshot_core::licensing::Feature;
 use trueshot_device_manager::camera::registry::CameraProfile;
 use trueshot_device_manager::camera::CameraCapabilities;
-use crate::intervalometer::{IntervalometerRamp, IntervalometerStatus};
-use tokio::sync::oneshot;
-use tokio::time::MissedTickBehavior;
-use chrono::Utc;
 use utoipa::ToSchema;
-use tokio::time::sleep;
-use std::time::Duration;
-use serde::Deserialize;
 
 #[derive(serde::Serialize)]
 pub struct CameraStatus {
     #[serde(flatten)]
     pub profile: CameraProfile,
     pub connected: bool,
-    pub battery_level: Option<u8>,  // 0-100 percentage, None if not available
+    pub battery_level: Option<u8>, // 0-100 percentage, None if not available
 }
 
 #[utoipa::path(
@@ -38,28 +38,34 @@ pub async fn get_cameras(req: HttpRequest, state: web::Data<AppState>) -> impl R
         return resp;
     }
     let cm = state.camera_manager.lock().await;
-    
+
     // Create map of connected camera IDs to their battery levels
-    let mut battery_levels: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+    let mut battery_levels: std::collections::HashMap<String, u8> =
+        std::collections::HashMap::new();
     for cam in &cm.cameras {
         if let Ok(level) = cam.battery_level() {
             battery_levels.insert(cam.id(), level);
         }
     }
-    
+
     // Get list of connected IDs
     let connected_ids: Vec<String> = cm.cameras.iter().map(|c| c.id()).collect();
-    
+
     // Iterate registry and enrich
-    let statuses: Vec<CameraStatus> = cm.registry.profiles.values().map(|p| {
-        let connected = connected_ids.contains(&p.id);
-        CameraStatus {
-            profile: p.clone(),
-            connected,
-            battery_level: battery_levels.get(&p.id).copied(),
-        }
-    }).collect();
-    
+    let statuses: Vec<CameraStatus> = cm
+        .registry
+        .profiles
+        .values()
+        .map(|p| {
+            let connected = connected_ids.contains(&p.id);
+            CameraStatus {
+                profile: p.clone(),
+                connected,
+                battery_level: battery_levels.get(&p.id).copied(),
+            }
+        })
+        .collect();
+
     HttpResponse::Ok().json(statuses)
 }
 
@@ -85,24 +91,24 @@ pub async fn update_camera_nickname(
     req: HttpRequest,
     path: web::Path<String>,
     json: web::Json<NicknameUpdate>,
-    state: web::Data<AppState>
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
     let id = path.into_inner();
     let mut cm = state.camera_manager.lock().await;
-    
+
     let mut updated_profile = None;
-    
+
     if let Some(profile) = cm.registry.profiles.get_mut(&id) {
         profile.nickname = Some(json.nickname.clone());
         updated_profile = Some(profile.clone());
     }
-    
+
     if let Some(profile) = updated_profile {
         if let Err(e) = cm.registry.save() {
-             return HttpResponse::InternalServerError().body(e.to_string());
+            return HttpResponse::InternalServerError().body(e.to_string());
         }
         return HttpResponse::Ok().json(profile);
     }
@@ -134,7 +140,7 @@ pub async fn camera_ptz(
     req: HttpRequest,
     path: web::Path<String>,
     json: web::Json<PtzRequest>,
-    state: web::Data<AppState>
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -142,20 +148,20 @@ pub async fn camera_ptz(
     let id = path.into_inner();
     tracing::info!("Received PTZ Request for ID: {}", id);
     let cm = state.camera_manager.lock().await;
-    
+
     // Find camera by ID
     // Optimized: Use get_camera_by_id (Arc clone)
     if let Some(cam) = cm.get_camera_by_id(&id) {
-         // Drop lock implicitly or explicitly if strictly needed, but here we hold it for the duration of the request 
-         // which is fine for simple commands.
-         // Actually, ptz is now &self, so we can drop lock immediately if we wanted to be super optimized,
-         // but keeping logic simple is better for now.
-         
-         if let Err(e) = cam.ptz(json.pan, json.tilt, json.zoom) {
-             tracing::error!("PTZ Failed for {}: {}", id, e);
-             return HttpResponse::InternalServerError().body(e.to_string());
-         }
-         return HttpResponse::Ok().json(serde_json::json!({"status": "moved"}));
+        // Drop lock implicitly or explicitly if strictly needed, but here we hold it for the duration of the request
+        // which is fine for simple commands.
+        // Actually, ptz is now &self, so we can drop lock immediately if we wanted to be super optimized,
+        // but keeping logic simple is better for now.
+
+        if let Err(e) = cam.ptz(json.pan, json.tilt, json.zoom) {
+            tracing::error!("PTZ Failed for {}: {}", id, e);
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+        return HttpResponse::Ok().json(serde_json::json!({"status": "moved"}));
     }
     HttpResponse::NotFound().body("Camera not connected")
 }
@@ -235,7 +241,7 @@ pub async fn set_camera_config(
     req: HttpRequest,
     path: web::Path<String>,
     json: web::Json<ConfigRequest>,
-    state: web::Data<AppState>
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -247,7 +253,7 @@ pub async fn set_camera_config(
     // CameraConfig is defined in trueshot_device_manager::camera::CameraConfig (Wait, I deleted it or restored it?)
     // I restored it as `pub struct CameraConfig` in `mod.rs`.
     // It is `pub use registry::CameraSettings`? No, I defined `CameraConfig` in `mod.rs`.
-    
+
     let config = trueshot_device_manager::camera::CameraConfig {
         iso: json.iso.clone(),
         shutter_speed: json.shutter_speed.clone(),
@@ -259,19 +265,23 @@ pub async fn set_camera_config(
     };
 
     if let Some(cam) = cm.get_camera_by_id(&id) {
-         if let Err(e) = cam.set_config(&config) {
-             return HttpResponse::InternalServerError().body(e.to_string());
-         }
-         // Should we also update registry "last_settings"?
-         // Yes, for persistence.
-         let _ = cm.registry.update_settings(&id, trueshot_device_manager::camera::CameraSettings {
-             resolution: None, fps: None,
-             iso: json.iso.clone(),
-             shutter_speed: json.shutter_speed.clone(),
-             wb: json.wb.clone(),
-         });
-         
-         return HttpResponse::Ok().json(serde_json::json!({"status": "updated"}));
+        if let Err(e) = cam.set_config(&config) {
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+        // Should we also update registry "last_settings"?
+        // Yes, for persistence.
+        let _ = cm.registry.update_settings(
+            &id,
+            trueshot_device_manager::camera::CameraSettings {
+                resolution: None,
+                fps: None,
+                iso: json.iso.clone(),
+                shutter_speed: json.shutter_speed.clone(),
+                wb: json.wb.clone(),
+            },
+        );
+
+        return HttpResponse::Ok().json(serde_json::json!({"status": "updated"}));
     }
     HttpResponse::NotFound().body("Camera not connected")
 }
@@ -291,14 +301,14 @@ pub async fn set_camera_config(
 pub async fn capture_photo(
     req: HttpRequest,
     path: web::Path<String>,
-    state: web::Data<AppState>
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
     let id = path.into_inner();
     let cm = state.camera_manager.lock().await;
-    
+
     if let Some(cam) = cm.get_camera_by_id(&id) {
         // Build a default config for capture
         let config = trueshot_device_manager::camera::CameraConfig {
@@ -310,14 +320,14 @@ pub async fn capture_photo(
             resolution: None,
             fps: None,
         };
-        
+
         match cam.capture(&config) {
             Ok(path) => {
                 return HttpResponse::Ok().json(serde_json::json!({
                     "status": "captured",
                     "path": path.display().to_string()
                 }));
-            },
+            }
             Err(e) => {
                 return HttpResponse::InternalServerError().body(e.to_string());
             }
@@ -349,7 +359,11 @@ pub async fn capture_hdr_bracket(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::AdvancedCaptureAutomation, "advanced_capture_automation") {
+    if let Err(resp) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "advanced_capture_automation",
+    ) {
         return resp;
     }
     if json.bracket_count < 3 || json.bracket_count % 2 == 0 {
@@ -373,11 +387,19 @@ pub async fn capture_hdr_bracket(
         .as_ref()
         .map(|p| p.capabilities.shutter_speed_options.clone())
         .unwrap_or_default();
-    let base_shutter = json
-        .base_shutter
-        .clone()
-        .or_else(|| profile.as_ref().and_then(|p| p.last_settings.as_ref().and_then(|s| s.shutter_speed.clone())));
-    let sequence = build_hdr_sequence(&shutter_options, base_shutter.as_ref(), json.bracket_count, json.ev_spacing);
+    let base_shutter = json.base_shutter.clone().or_else(|| {
+        profile.as_ref().and_then(|p| {
+            p.last_settings
+                .as_ref()
+                .and_then(|s| s.shutter_speed.clone())
+        })
+    });
+    let sequence = build_hdr_sequence(
+        &shutter_options,
+        base_shutter.as_ref(),
+        json.bracket_count,
+        json.ev_spacing,
+    );
 
     let mut shots = Vec::new();
     for shutter in sequence {
@@ -428,7 +450,11 @@ pub async fn capture_focus_stack(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::AdvancedCaptureAutomation, "advanced_capture_automation") {
+    if let Err(resp) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "advanced_capture_automation",
+    ) {
         return resp;
     }
     if json.slice_count < 2 {
@@ -439,7 +465,11 @@ pub async fn capture_focus_stack(
     if direction != "near" && direction != "far" {
         return HttpResponse::BadRequest().body("direction must be 'near' or 'far'");
     }
-    let direction_step = if direction == "near" { step_size } else { -step_size };
+    let direction_step = if direction == "near" {
+        step_size
+    } else {
+        -step_size
+    };
     let camera_id = path.into_inner();
     let cam = {
         let cm = state.camera_manager.lock().await;
@@ -502,7 +532,11 @@ pub async fn capture_hdr_focus_stack(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::AdvancedCaptureAutomation, "advanced_capture_automation") {
+    if let Err(resp) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "advanced_capture_automation",
+    ) {
         return resp;
     }
     if json.bracket_count < 3 || json.bracket_count % 2 == 0 {
@@ -519,7 +553,11 @@ pub async fn capture_hdr_focus_stack(
     if direction != "near" && direction != "far" {
         return HttpResponse::BadRequest().body("direction must be 'near' or 'far'");
     }
-    let direction_step = if direction == "near" { step_size } else { -step_size };
+    let direction_step = if direction == "near" {
+        step_size
+    } else {
+        -step_size
+    };
     let camera_id = path.into_inner();
     let (cam, profile) = {
         let cm = state.camera_manager.lock().await;
@@ -535,11 +573,19 @@ pub async fn capture_hdr_focus_stack(
         .as_ref()
         .map(|p| p.capabilities.shutter_speed_options.clone())
         .unwrap_or_default();
-    let base_shutter = json
-        .base_shutter
-        .clone()
-        .or_else(|| profile.as_ref().and_then(|p| p.last_settings.as_ref().and_then(|s| s.shutter_speed.clone())));
-    let sequence = build_hdr_sequence(&shutter_options, base_shutter.as_ref(), json.bracket_count, json.ev_spacing);
+    let base_shutter = json.base_shutter.clone().or_else(|| {
+        profile.as_ref().and_then(|p| {
+            p.last_settings
+                .as_ref()
+                .and_then(|s| s.shutter_speed.clone())
+        })
+    });
+    let sequence = build_hdr_sequence(
+        &shutter_options,
+        base_shutter.as_ref(),
+        json.bracket_count,
+        json.ev_spacing,
+    );
 
     let mut shots = Vec::new();
     for slice_index in 0..json.slice_count {
@@ -598,7 +644,11 @@ pub async fn start_intervalometer(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::AdvancedCaptureAutomation, "advanced_capture_automation") {
+    if let Err(resp) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "advanced_capture_automation",
+    ) {
         return resp;
     }
     let camera_id = path.into_inner();
@@ -633,7 +683,9 @@ pub async fn start_intervalometer(
         captured_frames: 0,
         started_at: now.to_rfc3339(),
         last_capture_at: None,
-        next_capture_at: Some((now + chrono::Duration::milliseconds(interval_ms as i64)).to_rfc3339()),
+        next_capture_at: Some(
+            (now + chrono::Duration::milliseconds(interval_ms as i64)).to_rfc3339(),
+        ),
         last_error: None,
         ramp: ramp.clone(),
     };
@@ -655,7 +707,17 @@ pub async fn start_intervalometer(
 
     let state_clone = state.clone();
     tokio::spawn(async move {
-        run_intervalometer(state_clone, camera_id, interval_ms, total_frames, ramp, capture_target, capabilities, cancel_rx).await;
+        run_intervalometer(
+            state_clone,
+            camera_id,
+            interval_ms,
+            total_frames,
+            ramp,
+            capture_target,
+            capabilities,
+            cancel_rx,
+        )
+        .await;
     });
 
     HttpResponse::Ok().json(status)
@@ -869,7 +931,6 @@ fn build_hdr_sequence(
     sequence
 }
 
-
 #[derive(serde::Deserialize, ToSchema)]
 pub struct EnabledRequest {
     pub enabled: bool,
@@ -892,7 +953,7 @@ pub async fn set_camera_enabled(
     req: HttpRequest,
     path: web::Path<String>,
     json: web::Json<EnabledRequest>,
-    state: web::Data<AppState>
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -901,40 +962,40 @@ pub async fn set_camera_enabled(
     let mut cm = state.camera_manager.lock().await;
 
     if let Err(e) = cm.registry.set_enabled(&id, json.enabled) {
-         return HttpResponse::InternalServerError().body(e.to_string());
+        return HttpResponse::InternalServerError().body(e.to_string());
     }
-    
+
     // Forces re-init on next use if enabled, or stops if disabled.
     // However, the lazy camera struct has a copy of 'enabled'.
     // We must update the active instance as well!
     if cm.get_camera_by_id(&id).is_some() {
-         // This is hard because cam is Arc<dyn Camera>. 
-         // We can't easily mutate the inner 'enabled' field of LazyNokhwaCamera via trait object.
-         // BUT, reconcile_cameras re-creates the LazyCamera if discovery runs? No, it keeps it.
-         
-         // Solution: We force a reconcile/reload or specialized update?
-         // Simpler: Just rely on reconcile_cameras. If the user toggles, we can trigger a scan?
-         // Or, we update the registry, and the next 'scan_hardware' (polled by frontend) will see the change?
-         // Wait, 'reconcile_cameras' reads from registry! 
-         // "let enabled = self.registry.get_profile(&id)..."
-         // But it only checks this when CREATING a new camera (Discovered::Nokhwa).
-         // It does NOT update existing cameras.
-         
-         // Fix: In reconcile_cameras loop (lines 336+), we should check if enabled state changed?
-         // Or, simpler: When enabling via API, we just return OK. The frontend should trigger a re-scan.
-         // Or we can manually remove it from `cm.cameras` so it gets re-added?
-         
-         // Hack/Fix: Remove it from active list if it exists?
-         // No, that causes race.
-         
-         // Proper fix: Update LazyNokhwaCamera to look up 'enabled' from registry dynamically?
-         // Or pass a shared atomic?
-         // For now, I will instruct the frontend to trigger a scan after enabling.
-         // But to ensure it works, I will remove the camera from the manager's list so it gets re-created on next scan.
-         
-         cm.cameras.retain(|c| c.id() != id); 
+        // This is hard because cam is Arc<dyn Camera>.
+        // We can't easily mutate the inner 'enabled' field of LazyNokhwaCamera via trait object.
+        // BUT, reconcile_cameras re-creates the LazyCamera if discovery runs? No, it keeps it.
+
+        // Solution: We force a reconcile/reload or specialized update?
+        // Simpler: Just rely on reconcile_cameras. If the user toggles, we can trigger a scan?
+        // Or, we update the registry, and the next 'scan_hardware' (polled by frontend) will see the change?
+        // Wait, 'reconcile_cameras' reads from registry!
+        // "let enabled = self.registry.get_profile(&id)..."
+        // But it only checks this when CREATING a new camera (Discovered::Nokhwa).
+        // It does NOT update existing cameras.
+
+        // Fix: In reconcile_cameras loop (lines 336+), we should check if enabled state changed?
+        // Or, simpler: When enabling via API, we just return OK. The frontend should trigger a re-scan.
+        // Or we can manually remove it from `cm.cameras` so it gets re-added?
+
+        // Hack/Fix: Remove it from active list if it exists?
+        // No, that causes race.
+
+        // Proper fix: Update LazyNokhwaCamera to look up 'enabled' from registry dynamically?
+        // Or pass a shared atomic?
+        // For now, I will instruct the frontend to trigger a scan after enabling.
+        // But to ensure it works, I will remove the camera from the manager's list so it gets re-created on next scan.
+
+        cm.cameras.retain(|c| c.id() != id);
     }
-    
+
     HttpResponse::Ok().json(serde_json::json!({"status": "updated", "enabled": json.enabled}))
 }
 
@@ -991,10 +1052,7 @@ fn origin_allowed(req: &HttpRequest, allowed: &Option<Vec<String>>) -> bool {
     let Some(allowed) = allowed.as_ref() else {
         return true;
     };
-    let origin = req
-        .headers()
-        .get("Origin")
-        .and_then(|v| v.to_str().ok());
+    let origin = req.headers().get("Origin").and_then(|v| v.to_str().ok());
     match origin {
         Some(origin) => allowed.iter().any(|o| o == origin),
         None => true,
@@ -1012,7 +1070,8 @@ fn extract_bearer(req: &HttpRequest) -> Option<String> {
 }
 
 fn extract_session_cookie(req: &HttpRequest) -> Option<String> {
-    req.cookie(SESSION_COOKIE_NAME).map(|c| c.value().to_string())
+    req.cookie(SESSION_COOKIE_NAME)
+        .map(|c| c.value().to_string())
 }
 
 fn scopes_allow(ctx: &AuthContext, scope: &str) -> bool {
@@ -1088,19 +1147,19 @@ pub async fn camera_drive_focus(
     req: HttpRequest,
     path: web::Path<String>,
     json: web::Json<DriveFocusRequest>,
-    state: web::Data<AppState>
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
     let id = path.into_inner();
     let cm = state.camera_manager.lock().await;
-    
+
     if let Some(cam) = cm.get_camera_by_id(&id) {
-         if let Err(e) = cam.drive_focus(json.step) {
-             return HttpResponse::InternalServerError().body(e.to_string());
-         }
-         return HttpResponse::Ok().json(serde_json::json!({"status": "driven", "step": json.step}));
+        if let Err(e) = cam.drive_focus(json.step) {
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+        return HttpResponse::Ok().json(serde_json::json!({"status": "driven", "step": json.step}));
     }
     HttpResponse::NotFound().body("Camera not connected")
 }
@@ -1155,8 +1214,10 @@ pub async fn camera_stream(
     let id = path.into_inner();
     let cm = state.camera_manager.clone();
     let limits = load_stream_limits();
-    
-    let stream: std::pin::Pin<Box<dyn futures::stream::Stream<Item = Result<web::Bytes, actix_web::Error>>>> = Box::pin(async_stream::try_stream! {
+
+    let stream: std::pin::Pin<
+        Box<dyn futures::stream::Stream<Item = Result<web::Bytes, actix_web::Error>>>,
+    > = Box::pin(async_stream::try_stream! {
         let interval_ms = (1000.0 / limits.max_fps as f32).max(5.0) as u64;
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
         let mut bytes_budget = limits.max_bytes_per_sec as i64;
@@ -1165,7 +1226,7 @@ pub async fn camera_stream(
         let mut frames_sent: u64 = 0;
         let mut bytes_sent: u64 = 0;
         let stream_start = std::time::Instant::now();
-        
+
         // OPTIMIZATION: Acquire Camera Arc ONCE
         let camera_arc = {
             let cm_lock = cm.lock().await;
@@ -1186,9 +1247,9 @@ pub async fn camera_stream(
                 }
                 // No global lock here! Shared ownership via Arc.
                 // If cam is disconnected, capture_preview might return err.
-                
+
                 let frame_result = cam.capture_preview();
-                
+
                 match frame_result {
                     Ok(jpeg) => {
                         let frame_len = jpeg.len();
@@ -1227,7 +1288,7 @@ pub async fn camera_stream(
         } else {
              // Camera not found initially
              // Yield nothing or error?
-             // yield web::Bytes::from("Camera not found"); 
+             // yield web::Bytes::from("Camera not found");
         }
     });
 
@@ -1253,9 +1314,13 @@ pub async fn get_turntable_status(req: HttpRequest, state: web::Data<AppState>) 
     let status_str = state.turntable_status.lock().unwrap().clone();
     let tt = state.turntable.lock().await;
     let connected = tt.is_some();
-    let angle = if let Some(t) = tt.as_ref() { t.get_rotation() } else { 0.0 };
+    let angle = if let Some(t) = tt.as_ref() {
+        t.get_rotation()
+    } else {
+        0.0
+    };
     let moving = *state.turntable_moving.lock().unwrap();
-    
+
     HttpResponse::Ok().json(serde_json::json!({
         "connected": connected,
         "type": status_str,
@@ -1282,13 +1347,21 @@ pub async fn turntable_home(req: HttpRequest, state: web::Data<AppState>) -> imp
     if let Some(tt) = tt_lock.as_mut() {
         // Set moving = true
         *state.turntable_moving.lock().unwrap() = true;
-        state.event_bus.publish(SystemEvent::TurntableStatus { connected: true, angle: tt.get_rotation(), moving: true });
-        
+        state.event_bus.publish(SystemEvent::TurntableStatus {
+            connected: true,
+            angle: tt.get_rotation(),
+            moving: true,
+        });
+
         let result = tt.home().await;
-        
+
         // Set moving = false
         *state.turntable_moving.lock().unwrap() = false;
-        state.event_bus.publish(SystemEvent::TurntableStatus { connected: true, angle: tt.get_rotation(), moving: false });
+        state.event_bus.publish(SystemEvent::TurntableStatus {
+            connected: true,
+            angle: tt.get_rotation(),
+            moving: false,
+        });
 
         if let Err(e) = result {
             return HttpResponse::InternalServerError().body(e.to_string());
@@ -1299,7 +1372,9 @@ pub async fn turntable_home(req: HttpRequest, state: web::Data<AppState>) -> imp
 }
 
 #[derive(serde::Deserialize, ToSchema)]
-pub struct Rotation { pub degrees: f32 }
+pub struct Rotation {
+    pub degrees: f32,
+}
 
 #[utoipa::path(
     post,
@@ -1312,7 +1387,11 @@ pub struct Rotation { pub degrees: f32 }
     )
 )]
 #[post("/api/turntable/rotate")]
-pub async fn turntable_rotate(req: HttpRequest, state: web::Data<AppState>, json: web::Json<Rotation>) -> impl Responder {
+pub async fn turntable_rotate(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    json: web::Json<Rotation>,
+) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -1320,18 +1399,27 @@ pub async fn turntable_rotate(req: HttpRequest, state: web::Data<AppState>, json
     if let Some(tt) = tt_lock.as_mut() {
         // Set moving = true
         *state.turntable_moving.lock().unwrap() = true;
-        state.event_bus.publish(SystemEvent::TurntableStatus { connected: true, angle: tt.get_rotation(), moving: true });
+        state.event_bus.publish(SystemEvent::TurntableStatus {
+            connected: true,
+            angle: tt.get_rotation(),
+            moving: true,
+        });
 
         let result = tt.rotate(json.degrees).await;
-        
+
         // Set moving = false
         *state.turntable_moving.lock().unwrap() = false;
-        state.event_bus.publish(SystemEvent::TurntableStatus { connected: true, angle: tt.get_rotation(), moving: false });
+        state.event_bus.publish(SystemEvent::TurntableStatus {
+            connected: true,
+            angle: tt.get_rotation(),
+            moving: false,
+        });
 
         if let Err(e) = result {
             return HttpResponse::InternalServerError().body(e.to_string());
         }
-        return HttpResponse::Ok().json(serde_json::json!({"status": "rotated", "degrees": json.degrees}));
+        return HttpResponse::Ok()
+            .json(serde_json::json!({"status": "rotated", "degrees": json.degrees}));
     }
     HttpResponse::NotFound().body("Turntable not connected")
 }
@@ -1357,14 +1445,17 @@ pub async fn scan_hardware(req: HttpRequest, state: web::Data<AppState>) -> impl
     let mut cm = cm_arc.lock().await;
     match cm.reconcile_cameras(mock).await {
         Ok(report) => {
-             for id in &report.added {
-                 eb_arc.publish(SystemEvent::DeviceConnected { kind: "camera".to_string(), id: id.clone() });
-             }
-             for id in &report.removed {
-                 eb_arc.publish(SystemEvent::DeviceDisconnected { id: id.clone() });
-             }
-             HttpResponse::Ok().json(report)
+            for id in &report.added {
+                eb_arc.publish(SystemEvent::DeviceConnected {
+                    kind: "camera".to_string(),
+                    id: id.clone(),
+                });
+            }
+            for id in &report.removed {
+                eb_arc.publish(SystemEvent::DeviceDisconnected { id: id.clone() });
+            }
+            HttpResponse::Ok().json(report)
         }
-        Err(e) => HttpResponse::InternalServerError().body(format!("Scan failed: {}", e))
+        Err(e) => HttpResponse::InternalServerError().body(format!("Scan failed: {}", e)),
     }
 }

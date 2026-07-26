@@ -23,7 +23,7 @@ pub fn undistort_normalized(model: DistortionModel, coeffs: &[f64], x: f64, y: f
 }
 
 fn distort_brown_conrady(coeffs: &[f64], x: f64, y: f64) -> (f64, f64) {
-    let k1 = coeffs.get(0).copied().unwrap_or(0.0);
+    let k1 = coeffs.first().copied().unwrap_or(0.0);
     let k2 = coeffs.get(1).copied().unwrap_or(0.0);
     let p1 = coeffs.get(2).copied().unwrap_or(0.0);
     let p2 = coeffs.get(3).copied().unwrap_or(0.0);
@@ -38,7 +38,11 @@ fn distort_brown_conrady(coeffs: &[f64], x: f64, y: f64) -> (f64, f64) {
 
     let radial_num = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
     let radial_den = 1.0 + k4 * r2 + k5 * r4 + k6 * r6;
-    let radial = if radial_den.abs() > 1e-12 { radial_num / radial_den } else { radial_num };
+    let radial = if radial_den.abs() > 1e-12 {
+        radial_num / radial_den
+    } else {
+        radial_num
+    };
 
     let x_tan = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
     let y_tan = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
@@ -47,7 +51,7 @@ fn distort_brown_conrady(coeffs: &[f64], x: f64, y: f64) -> (f64, f64) {
 }
 
 fn distort_fisheye(coeffs: &[f64], x: f64, y: f64) -> (f64, f64) {
-    let k1 = coeffs.get(0).copied().unwrap_or(0.0);
+    let k1 = coeffs.first().copied().unwrap_or(0.0);
     let k2 = coeffs.get(1).copied().unwrap_or(0.0);
     let k3 = coeffs.get(2).copied().unwrap_or(0.0);
     let k4 = coeffs.get(3).copied().unwrap_or(0.0);

@@ -1494,7 +1494,7 @@ fn run_burst_pipeline(
             failures.join("\n")
         );
     }
-    if let Some(state) = run_state.as_deref_mut() {
+    if let Some(state) = run_state {
         state.mark_step_completed("sfm", collect_artifacts(output, &["focus_stacks"]));
         state.mark_step_completed("reports", collect_artifacts(output, &["run_report.json"]));
     }
@@ -1903,7 +1903,7 @@ fn run_reconstruction_pipeline(
         reprojection_stats.as_ref(),
         inventory_ctx,
     )?;
-    if let Some(state) = run_state.as_deref_mut() {
+    if let Some(state) = run_state {
         state.mark_step_completed(
             "reports",
             collect_artifacts(
@@ -3714,7 +3714,7 @@ fn run_with_tray(port: u16) -> Result<()> {
 
     let _tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
-        .with_tooltip(&format!("TrueShot Server (port {})", port))
+        .with_tooltip(format!("TrueShot Server (port {})", port))
         .build()
         .unwrap();
 

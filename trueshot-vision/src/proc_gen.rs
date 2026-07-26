@@ -2,7 +2,6 @@ use image::DynamicImage;
 /// Procedural Material Generators (Replacing JIT Placeholder)
 /// Implements concrete pixel math for specific material profiles.
 /// This runs on the CPU as a fallback or pre-processor for when GPU is busy.
-
 pub enum MaterialProfile {
     Matte,
     Shiny,
@@ -21,15 +20,15 @@ pub fn apply_profile_proc(img: &mut DynamicImage, profile: MaterialProfile) {
                     pixel[0] = ((pixel[0] as f32 * 1.2) + 10.0).min(255.0) as u8;
                     pixel[1] = ((pixel[1] as f32 * 1.2) + 10.0).min(255.0) as u8;
                     pixel[2] = ((pixel[2] as f32 * 1.2) + 10.0).min(255.0) as u8;
-                },
+                }
                 MaterialProfile::Shiny => {
                     // Increase contrast (S-curve)
                     // pixel = ((pixel - 128) * 1.5) + 128
                     // Simplified: just darken mids to emphasize speculars
-                    pixel[0] = ((pixel[0] as f32 * 0.9)).max(0.0) as u8;
-                    pixel[1] = ((pixel[1] as f32 * 0.9)).max(0.0) as u8;
-                    pixel[2] = ((pixel[2] as f32 * 0.9)).max(0.0) as u8;
-                },
+                    pixel[0] = (pixel[0] as f32 * 0.9).max(0.0) as u8;
+                    pixel[1] = (pixel[1] as f32 * 0.9).max(0.0) as u8;
+                    pixel[2] = (pixel[2] as f32 * 0.9).max(0.0) as u8;
+                }
                 MaterialProfile::Dark => {
                     // Gamma correction
                     // pixel = pow(pixel, 1/2.2)

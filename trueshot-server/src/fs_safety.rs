@@ -1,7 +1,7 @@
 use actix_web::HttpResponse;
 use std::path::{Component, Path, PathBuf};
-use walkdir::WalkDir;
 use sysinfo::Disks;
+use walkdir::WalkDir;
 
 const MAX_ID_LEN: usize = 128;
 const MAX_FILENAME_LEN: usize = 255;
@@ -40,11 +40,13 @@ pub fn ensure_filename(name: &str) -> Result<(), HttpResponse> {
 
 pub fn canonicalize_root(root: &Path) -> Result<PathBuf, HttpResponse> {
     if !root.exists() {
-        std::fs::create_dir_all(root)
-            .map_err(|e| HttpResponse::InternalServerError().body(format!("Failed to create root: {e}")))?;
+        std::fs::create_dir_all(root).map_err(|e| {
+            HttpResponse::InternalServerError().body(format!("Failed to create root: {e}"))
+        })?;
     }
-    root.canonicalize()
-        .map_err(|e| HttpResponse::InternalServerError().body(format!("Failed to resolve root: {e}")))
+    root.canonicalize().map_err(|e| {
+        HttpResponse::InternalServerError().body(format!("Failed to resolve root: {e}"))
+    })
 }
 
 pub fn resolve_project_dir(root: &Path, id: &str) -> Result<PathBuf, HttpResponse> {
@@ -52,9 +54,9 @@ pub fn resolve_project_dir(root: &Path, id: &str) -> Result<PathBuf, HttpRespons
     let root = canonicalize_root(root)?;
     let candidate = root.join(id);
     if candidate.exists() {
-        let canon = candidate
-            .canonicalize()
-            .map_err(|e| HttpResponse::InternalServerError().body(format!("Failed to resolve project: {e}")))?;
+        let canon = candidate.canonicalize().map_err(|e| {
+            HttpResponse::InternalServerError().body(format!("Failed to resolve project: {e}"))
+        })?;
         if !canon.starts_with(&root) {
             return Err(HttpResponse::BadRequest().body("Invalid project path"));
         }
@@ -72,9 +74,10 @@ pub fn resolve_project_child(root: &Path, id: &str, child: &str) -> Result<PathB
     let project_dir = resolve_project_dir(root, id)?;
     let candidate = project_dir.join(child);
     if candidate.exists() {
-        let canon = candidate
-            .canonicalize()
-            .map_err(|e| HttpResponse::InternalServerError().body(format!("Failed to resolve project child: {e}")))?;
+        let canon = candidate.canonicalize().map_err(|e| {
+            HttpResponse::InternalServerError()
+                .body(format!("Failed to resolve project child: {e}"))
+        })?;
         if !canon.starts_with(&project_dir) {
             return Err(HttpResponse::BadRequest().body("Invalid project child path"));
         }
@@ -88,7 +91,11 @@ pub fn resolve_project_child(root: &Path, id: &str, child: &str) -> Result<PathB
     }
 }
 
-pub fn resolve_project_file(root: &Path, id: &str, filename: &str) -> Result<PathBuf, HttpResponse> {
+pub fn resolve_project_file(
+    root: &Path,
+    id: &str,
+    filename: &str,
+) -> Result<PathBuf, HttpResponse> {
     ensure_filename(filename)?;
     let project_dir = resolve_project_dir(root, id)?;
     let candidate = project_dir.join(filename);
@@ -133,10 +140,12 @@ pub fn resolve_project_child_file(
 pub fn project_size_bytes(path: &Path) -> Result<u64, HttpResponse> {
     let mut total = 0u64;
     for entry in WalkDir::new(path).follow_links(false) {
-        let entry = entry.map_err(|e| HttpResponse::InternalServerError().body(format!("Walk failed: {e}")))?;
+        let entry = entry
+            .map_err(|e| HttpResponse::InternalServerError().body(format!("Walk failed: {e}")))?;
         if entry.file_type().is_file() {
-            let meta = entry.metadata()
-                .map_err(|e| HttpResponse::InternalServerError().body(format!("Metadata failed: {e}")))?;
+            let meta = entry.metadata().map_err(|e| {
+                HttpResponse::InternalServerError().body(format!("Metadata failed: {e}"))
+            })?;
             total = total.saturating_add(meta.len());
         }
     }

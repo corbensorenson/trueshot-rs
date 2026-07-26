@@ -1,15 +1,18 @@
 use chrono::{DateTime, Utc};
-use image::RgbImage;
 use image::GrayImage;
+use image::RgbImage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::scan_types::{BoundingBox, ObjectAnalysis, ScanPlan, ScanProgress, StepIntegrity, QualityAssessment, ScaleAnchor};
+use crate::scan_types::{
+    BoundingBox, ObjectAnalysis, QualityAssessment, ScaleAnchor, ScanPlan, ScanProgress,
+    StepIntegrity,
+};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ScanWizardState {
     pub background: Option<RgbImage>,
     pub background_captured_at: Option<DateTime<Utc>>,
@@ -24,26 +27,6 @@ pub struct ScanWizardState {
     pub plan: Option<ScanPlan>,
     pub runtime: Option<ScanRuntime>,
     pub scale_anchor: Option<ScaleAnchor>,
-}
-
-impl Default for ScanWizardState {
-    fn default() -> Self {
-        Self {
-            background: None,
-            background_captured_at: None,
-            background_frames: 0,
-            last_detection: None,
-            last_analysis: None,
-            last_quality: None,
-            last_quality_at: None,
-            last_uncertainty: None,
-            last_preview: None,
-            quality_history: Vec::new(),
-            plan: None,
-            runtime: None,
-            scale_anchor: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -126,9 +109,7 @@ impl ScanRuntime {
     }
 
     pub fn progress(&self) -> ScanProgress {
-        let elapsed_seconds = (Utc::now() - self.started_at)
-            .num_seconds()
-            .max(0) as u64;
+        let elapsed_seconds = (Utc::now() - self.started_at).num_seconds().max(0) as u64;
         ScanProgress {
             status: self.status.clone(),
             current_step: self.current_step as u32,

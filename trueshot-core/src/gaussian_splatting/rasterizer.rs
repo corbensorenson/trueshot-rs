@@ -632,7 +632,7 @@ impl GpuRasterizer {
     /// Upload ground truth RGBA8 image for gradient computation
     pub fn upload_ground_truth(&self, data: &[u8]) {
         let bytes_per_row = self.config.width * 4;
-        let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u32;
+        let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = ((bytes_per_row + alignment - 1) / alignment) * alignment;
         let (upload_data, bytes_per_row) = if padded_bytes_per_row != bytes_per_row {
             let mut padded = vec![0u8; (padded_bytes_per_row * self.config.height) as usize];

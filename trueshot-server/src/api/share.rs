@@ -1,29 +1,29 @@
 use actix_files::NamedFile;
-use anyhow::anyhow;
 use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::auth::require_admin;
-use crate::audit::AuditEvent;
-use crate::at_rest::{decrypt_file_in_place, require_master_key, ProjectKeyStore};
 use crate::api::annotations::load_annotations_for_asset;
+use crate::at_rest::{decrypt_file_in_place, require_master_key, ProjectKeyStore};
+use crate::audit::AuditEvent;
+use crate::auth::require_admin;
 use crate::config::AppConfig;
 use crate::fs_safety::resolve_project_child_file;
 use crate::licensing::require_license_feature;
 use crate::state::AppState;
 use nalgebra as na;
+use std::io::{BufRead, BufReader, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::task;
+use tokio_util::io::ReaderStream;
 use trueshot_core::export::gltf::export_glb;
 use trueshot_core::export::obj::export_obj;
 use trueshot_core::export::ply::{export_ply, PlyExportOptions};
 use trueshot_core::licensing::Feature;
 use trueshot_core::mesh::{apply_mesh_edits, load_mesh, MeshEditOp};
 use trueshot_core::reconstruction::{Face, Mesh};
-use tokio::task;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio_util::io::ReaderStream;
-use std::io::{BufRead, BufReader, Write};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateShareRequest {
@@ -257,7 +257,11 @@ pub async fn create_share_link(
         {
             Ok(public_entry) => {
                 public_flag = Some(true);
-                short_url = Some(share_short_url(&req, &state.config, &public_entry.short_code));
+                short_url = Some(share_short_url(
+                    &req,
+                    &state.config,
+                    &public_entry.short_code,
+                ));
             }
             Err(err) => {
                 tracing::warn!("Failed to publish share: {}", err);
@@ -329,14 +333,24 @@ pub async fn get_share_link(
 
     let (asset_url, download_url, viewer_url) = share_urls(&req, &state.config, &token);
     let card_url = share_card_url(&req, &state.config, &token);
-    let lods = share_lods(&req, &state.config, &token, &link.project_id, &link.asset_path);
+    let lods = share_lods(
+        &req,
+        &state.config,
+        &token,
+        &link.project_id,
+        &link.asset_path,
+    );
     let remaining = link.max_uses.map(|max| max.saturating_sub(link.uses));
     let mut short_url = None;
     let mut public_flag = None;
     if let Ok(Some(public_entry)) = state.auth.get_share_public(&token).await {
         if public_entry.is_public {
             public_flag = Some(true);
-            short_url = Some(share_short_url(&req, &state.config, &public_entry.short_code));
+            short_url = Some(share_short_url(
+                &req,
+                &state.config,
+                &public_entry.short_code,
+            ));
         }
     }
     log_share_access(&state, &token, &req, "meta", false, false).await;
@@ -393,7 +407,8 @@ pub async fn get_share_asset(
         return HttpResponse::Forbidden().body("Embeds disabled");
     }
 
-    let resolved = match resolve_share_asset(&state.config, &link.project_id, &link.asset_path, lod) {
+    let resolved = match resolve_share_asset(&state.config, &link.project_id, &link.asset_path, lod)
+    {
         Ok(path) => path,
         Err(resp) => return resp,
     };
@@ -408,45 +423,44 @@ pub async fn get_share_asset(
             }
             Err(resp) => resp,
         }
-    } else {
-        if let Some(range_header) = req.headers().get(actix_web::http::header::RANGE) {
-            match open_share_file_path(&state, &link.project_id, &resolved).await {
-                Ok(path) => {
-                    let file_size = match std::fs::metadata(&path) {
-                        Ok(meta) => meta.len(),
-                        Err(err) => return HttpResponse::InternalServerError().body(err.to_string()),
-                    };
-                    let header_str = match range_header.to_str() {
-                        Ok(value) => value,
-                        Err(_) => return HttpResponse::BadRequest().body("Invalid Range header"),
-                    };
-                    match parse_range_header(header_str, file_size) {
-                        Ok((start, end)) => {
-                            log_share_access(&state, &token, &req, "asset", !download, download).await;
-                            let limit = end.saturating_sub(start).saturating_add(1);
-                            stream_share_range(&path, start, Some(limit), download).await
-                        }
-                        Err(()) => HttpResponse::RangeNotSatisfiable()
-                            .append_header(("Content-Range", format!("bytes */{}", file_size)))
-                            .finish(),
+    } else if let Some(range_header) = req.headers().get(actix_web::http::header::RANGE) {
+        match open_share_file_path(&state, &link.project_id, &resolved).await {
+            Ok(path) => {
+                let file_size = match std::fs::metadata(&path) {
+                    Ok(meta) => meta.len(),
+                    Err(err) => return HttpResponse::InternalServerError().body(err.to_string()),
+                };
+                let header_str = match range_header.to_str() {
+                    Ok(value) => value,
+                    Err(_) => return HttpResponse::BadRequest().body("Invalid Range header"),
+                };
+                match parse_range_header(header_str, file_size) {
+                    Ok((start, end)) => {
+                        log_share_access(&state, &token, &req, "asset", !download, download).await;
+                        let limit = end.saturating_sub(start).saturating_add(1);
+                        stream_share_range(&path, start, Some(limit), download).await
                     }
+                    Err(()) => HttpResponse::RangeNotSatisfiable()
+                        .append_header(("Content-Range", format!("bytes */{}", file_size)))
+                        .finish(),
                 }
-                Err(resp) => resp,
             }
-        } else {
+            Err(resp) => resp,
+        }
+    } else {
         match open_share_file(&state, &link.project_id, &resolved).await {
             Ok(mut file) => {
                 log_share_access(&state, &token, &req, "asset", !download, download).await;
                 if download {
-                    file = file.set_content_disposition(actix_web::http::header::ContentDisposition {
-                        disposition: actix_web::http::header::DispositionType::Attachment,
-                        parameters: vec![],
-                    });
+                    file =
+                        file.set_content_disposition(actix_web::http::header::ContentDisposition {
+                            disposition: actix_web::http::header::DispositionType::Attachment,
+                            parameters: vec![],
+                        });
                 }
                 file.into_response(&req)
             }
             Err(resp) => resp,
-        }
         }
     }
 }
@@ -471,7 +485,9 @@ pub async fn get_share_analytics(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::TeamCollaboration, "team_collaboration") {
+    if let Err(resp) =
+        require_license_feature(&state, Feature::TeamCollaboration, "team_collaboration")
+    {
         return resp;
     }
     let token = path.into_inner();
@@ -524,7 +540,9 @@ pub async fn set_share_public(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::TeamCollaboration, "team_collaboration") {
+    if let Err(resp) =
+        require_license_feature(&state, Feature::TeamCollaboration, "team_collaboration")
+    {
         return resp;
     }
     if let Err(resp) = require_license_feature(&state, Feature::CommercialUse, "commercial_use") {
@@ -611,7 +629,9 @@ pub async fn get_share_public(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    if let Err(resp) = require_license_feature(&state, Feature::TeamCollaboration, "team_collaboration") {
+    if let Err(resp) =
+        require_license_feature(&state, Feature::TeamCollaboration, "team_collaboration")
+    {
         return resp;
     }
     let token = path.into_inner();
@@ -661,7 +681,9 @@ pub async fn list_public_shares(
     state: web::Data<AppState>,
     query: web::Query<PublicShareQuery>,
 ) -> impl Responder {
-    if let Err(resp) = require_license_feature(&state, Feature::TeamCollaboration, "team_collaboration") {
+    if let Err(resp) =
+        require_license_feature(&state, Feature::TeamCollaboration, "team_collaboration")
+    {
         return resp;
     }
     if let Err(resp) = require_license_feature(&state, Feature::CommercialUse, "commercial_use") {
@@ -677,10 +699,24 @@ pub async fn list_public_shares(
         Ok(records) => records,
         Err(err) => return HttpResponse::InternalServerError().body(err.to_string()),
     };
-    let public_base = state.config.server.public_base_url.clone().unwrap_or_else(|| {
-        format!("{}://{}", req.connection_info().scheme(), req.connection_info().host())
-    });
-    let frontend_base = state.config.server.frontend_base_url.clone().unwrap_or_else(|| public_base.clone());
+    let public_base = state
+        .config
+        .server
+        .public_base_url
+        .clone()
+        .unwrap_or_else(|| {
+            format!(
+                "{}://{}",
+                req.connection_info().scheme(),
+                req.connection_info().host()
+            )
+        });
+    let frontend_base = state
+        .config
+        .server
+        .frontend_base_url
+        .clone()
+        .unwrap_or_else(|| public_base.clone());
     let items = records
         .into_iter()
         .map(|record| {
@@ -745,10 +781,24 @@ pub async fn share_card(
         Ok(None) => return HttpResponse::NotFound().body("Share link expired or invalid"),
         Err(err) => return HttpResponse::InternalServerError().body(err.to_string()),
     };
-    let public_base = state.config.server.public_base_url.clone().unwrap_or_else(|| {
-        format!("{}://{}", req.connection_info().scheme(), req.connection_info().host())
-    });
-    let frontend_base = state.config.server.frontend_base_url.clone().unwrap_or_else(|| public_base.clone());
+    let public_base = state
+        .config
+        .server
+        .public_base_url
+        .clone()
+        .unwrap_or_else(|| {
+            format!(
+                "{}://{}",
+                req.connection_info().scheme(),
+                req.connection_info().host()
+            )
+        });
+    let frontend_base = state
+        .config
+        .server
+        .frontend_base_url
+        .clone()
+        .unwrap_or_else(|| public_base.clone());
     let viewer_url = format!("{frontend_base}/share/{token}");
     let card_image = format!("{public_base}/assets/share-card.svg");
     let mut title = format!("TrueShot Share • {}", link.asset_path);
@@ -852,10 +902,11 @@ pub async fn get_share_annotations(
     if asset_path != link.asset_path {
         return HttpResponse::Forbidden().body("Asset mismatch");
     }
-    let annotations = match load_annotations_for_asset(&state, &link.project_id, &asset_path, &layer) {
-        Ok(layer) => layer,
-        Err(resp) => return resp,
-    };
+    let annotations =
+        match load_annotations_for_asset(&state, &link.project_id, &asset_path, &layer) {
+            Ok(layer) => layer,
+            Err(resp) => return resp,
+        };
     log_share_access(&state, &token, &req, "annotations", true, false).await;
     HttpResponse::Ok().json(annotations)
 }
@@ -872,16 +923,23 @@ fn resolve_share_asset(
     } else if let Some(rest) = normalized.strip_prefix("processed/") {
         ("processed", rest)
     } else {
-        return Err(HttpResponse::BadRequest().body("asset_path must begin with output/ or processed/"));
+        return Err(
+            HttpResponse::BadRequest().body("asset_path must begin with output/ or processed/")
+        );
     };
     let rest_path = std::path::Path::new(rest);
-    let parent = rest_path.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let parent = rest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
     let file_name = rest_path.file_name().and_then(|v| v.to_str()).unwrap_or("");
     if lod.is_none() {
         return resolve_project_child_file(&config.paths.projects_dir, project_id, root, rest);
     }
     let lod_level = lod.unwrap_or(0);
-    let stem = rest_path.file_stem().and_then(|v| v.to_str()).unwrap_or(file_name);
+    let stem = rest_path
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .unwrap_or(file_name);
     let ext = rest_path.extension().and_then(|v| v.to_str()).unwrap_or("");
     let mut candidates = Vec::new();
     if ext.is_empty() {
@@ -897,7 +955,8 @@ fn resolve_share_asset(
         } else {
             parent.join(candidate).to_string_lossy().to_string()
         };
-        let resolved = resolve_project_child_file(&config.paths.projects_dir, project_id, root, &rel)?;
+        let resolved =
+            resolve_project_child_file(&config.paths.projects_dir, project_id, root, &rel)?;
         if resolved.exists() {
             return Ok(resolved);
         }
@@ -911,9 +970,17 @@ fn resolve_share_asset(
 
 fn share_urls(req: &HttpRequest, config: &AppConfig, token: &str) -> (String, String, String) {
     let public_base = config.server.public_base_url.clone().unwrap_or_else(|| {
-        format!("{}://{}", req.connection_info().scheme(), req.connection_info().host())
+        format!(
+            "{}://{}",
+            req.connection_info().scheme(),
+            req.connection_info().host()
+        )
     });
-    let frontend_base = config.server.frontend_base_url.clone().unwrap_or_else(|| public_base.clone());
+    let frontend_base = config
+        .server
+        .frontend_base_url
+        .clone()
+        .unwrap_or_else(|| public_base.clone());
     let asset_url = format!("{public_base}/api/share/{token}/asset");
     let download_url = format!("{public_base}/api/share/{token}/asset?download=true");
     let viewer_url = format!("{frontend_base}/share/{token}");
@@ -922,14 +989,22 @@ fn share_urls(req: &HttpRequest, config: &AppConfig, token: &str) -> (String, St
 
 fn share_card_url(req: &HttpRequest, config: &AppConfig, token: &str) -> String {
     let public_base = config.server.public_base_url.clone().unwrap_or_else(|| {
-        format!("{}://{}", req.connection_info().scheme(), req.connection_info().host())
+        format!(
+            "{}://{}",
+            req.connection_info().scheme(),
+            req.connection_info().host()
+        )
     });
     format!("{public_base}/share/{token}/card")
 }
 
 fn share_short_url(req: &HttpRequest, config: &AppConfig, code: &str) -> String {
     let public_base = config.server.public_base_url.clone().unwrap_or_else(|| {
-        format!("{}://{}", req.connection_info().scheme(), req.connection_info().host())
+        format!(
+            "{}://{}",
+            req.connection_info().scheme(),
+            req.connection_info().host()
+        )
     });
     format!("{public_base}/s/{code}")
 }
@@ -959,14 +1034,20 @@ fn share_lods(
         return Vec::new();
     };
     let rest_path = std::path::Path::new(rest);
-    let parent = rest_path.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let parent = rest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
     let stem = rest_path.file_stem().and_then(|v| v.to_str()).unwrap_or("");
     let ext = rest_path.extension().and_then(|v| v.to_str()).unwrap_or("");
     if stem.is_empty() {
         return Vec::new();
     }
     let public_base = config.server.public_base_url.clone().unwrap_or_else(|| {
-        format!("{}://{}", req.connection_info().scheme(), req.connection_info().host())
+        format!(
+            "{}://{}",
+            req.connection_info().scheme(),
+            req.connection_info().host()
+        )
     });
     let mut lods = Vec::new();
     for level in 0u8..5u8 {
@@ -984,7 +1065,12 @@ fn share_lods(
             } else {
                 parent.join(candidate).to_string_lossy().to_string()
             };
-            let resolved = match resolve_project_child_file(&config.paths.projects_dir, project_id, root, &rel) {
+            let resolved = match resolve_project_child_file(
+                &config.paths.projects_dir,
+                project_id,
+                root,
+                &rel,
+            ) {
                 Ok(path) => path,
                 Err(_) => continue,
             };
@@ -1001,7 +1087,11 @@ fn share_lods(
             }
             if exists {
                 let asset_url = format!("{public_base}/api/share/{token}/asset?lod={level}");
-                lods.push(ShareAssetLod { level, asset_url, bytes });
+                lods.push(ShareAssetLod {
+                    level,
+                    asset_url,
+                    bytes,
+                });
                 break;
             }
         }
@@ -1018,7 +1108,8 @@ fn should_generate_lods() -> bool {
 }
 
 fn parse_lod_ratios() -> Vec<f32> {
-    let raw = std::env::var("TRUESHOT_SHARE_LOD_RATIOS").unwrap_or_else(|_| "0.35,0.15,0.05".to_string());
+    let raw =
+        std::env::var("TRUESHOT_SHARE_LOD_RATIOS").unwrap_or_else(|_| "0.35,0.15,0.05".to_string());
     let mut ratios: Vec<f32> = raw
         .split(',')
         .filter_map(|v| v.trim().parse::<f32>().ok())
@@ -1039,8 +1130,8 @@ fn ensure_share_lods(
     if !resolved.exists() {
         let enc_path = std::path::PathBuf::from(format!("{}.enc", resolved.display()));
         if enc_path.exists() {
-            let key_store = project_key_store(state)
-                .map_err(|e| anyhow!("Key store error: {:?}", e))?;
+            let key_store =
+                project_key_store(state).map_err(|e| anyhow!("Key store error: {:?}", e))?;
             let key = key_store.load_or_create(project_id)?;
             if let Ok(restored) = decrypt_file_in_place(&enc_path, &key) {
                 resolved = restored;
@@ -1068,7 +1159,10 @@ fn ensure_share_lods(
             }
             let lod_path = resolved.with_file_name(format!(
                 "{}.lod{}.{}",
-                resolved.file_stem().and_then(|v| v.to_str()).unwrap_or("lod"),
+                resolved
+                    .file_stem()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("lod"),
                 level,
                 ext
             ));
@@ -1102,7 +1196,10 @@ fn ensure_share_lods(
                     }
                     let lod_path = resolved.with_file_name(format!(
                         "{}.lod{}.{}",
-                        resolved.file_stem().and_then(|v| v.to_str()).unwrap_or("lod"),
+                        resolved
+                            .file_stem()
+                            .and_then(|v| v.to_str())
+                            .unwrap_or("lod"),
                         level,
                         ext
                     ));
@@ -1144,7 +1241,10 @@ fn ensure_share_lods(
                     }
                     let lod_path = resolved.with_file_name(format!(
                         "{}.lod{}.{}",
-                        resolved.file_stem().and_then(|v| v.to_str()).unwrap_or("lod"),
+                        resolved
+                            .file_stem()
+                            .and_then(|v| v.to_str())
+                            .unwrap_or("lod"),
                         level,
                         ext
                     ));
@@ -1173,7 +1273,10 @@ fn ensure_share_lods(
                 }
                 let lod_path = resolved.with_file_name(format!(
                     "{}.lod{}.{}",
-                    resolved.file_stem().and_then(|v| v.to_str()).unwrap_or("lod"),
+                    resolved
+                        .file_stem()
+                        .and_then(|v| v.to_str())
+                        .unwrap_or("lod"),
                     level,
                     ext
                 ));
@@ -1203,7 +1306,10 @@ fn ensure_share_lods(
             }
             let lod_path = resolved.with_file_name(format!(
                 "{}.lod{}.{}",
-                resolved.file_stem().and_then(|v| v.to_str()).unwrap_or("lod"),
+                resolved
+                    .file_stem()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("lod"),
                 level,
                 ext
             ));
@@ -1412,28 +1518,61 @@ fn load_ply_ascii_mesh(path: &std::path::Path) -> anyhow::Result<Mesh> {
         if parts.len() <= z_idx {
             continue;
         }
-        let x = parts.get(x_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-        let y = parts.get(y_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-        let z = parts.get(z_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+        let x = parts
+            .get(x_idx)
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let y = parts
+            .get(y_idx)
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let z = parts
+            .get(z_idx)
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
         vertices.push(na::Point3::new(x, y, z));
 
         if let (Some(nx_idx), Some(ny_idx), Some(nz_idx)) = (nx_idx, ny_idx, nz_idx) {
-            let nx = parts.get(nx_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-            let ny = parts.get(ny_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-            let nz = parts.get(nz_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            let nx = parts
+                .get(nx_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let ny = parts
+                .get(ny_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let nz = parts
+                .get(nz_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
             normals.push(na::Vector3::new(nx, ny, nz));
         }
 
         if let (Some(u_idx), Some(v_idx)) = (u_idx, v_idx) {
-            let u = parts.get(u_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-            let v = parts.get(v_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            let u = parts
+                .get(u_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let v = parts
+                .get(v_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
             uvs.push([u, v]);
         }
 
         if let (Some(r_idx), Some(g_idx), Some(b_idx)) = (r_idx, g_idx, b_idx) {
-            let r = parts.get(r_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(255.0);
-            let g = parts.get(g_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(255.0);
-            let b = parts.get(b_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(255.0);
+            let r = parts
+                .get(r_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(255.0);
+            let g = parts
+                .get(g_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(255.0);
+            let b = parts
+                .get(b_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(255.0);
             colors.push([
                 if r <= 1.0 { (r * 255.0) as u8 } else { r as u8 },
                 if g <= 1.0 { (g * 255.0) as u8 } else { g as u8 },
@@ -1458,7 +1597,10 @@ fn load_ply_ascii_mesh(path: &std::path::Path) -> anyhow::Result<Mesh> {
         }
         let mut indices: Vec<usize> = Vec::with_capacity(count);
         for idx in 0..count {
-            let value = parts.get(idx + 1).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+            let value = parts
+                .get(idx + 1)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
             indices.push(value);
         }
         for tri in 1..(indices.len() - 1) {
@@ -1492,11 +1634,17 @@ fn load_gltf_mesh(path: &std::path::Path) -> anyhow::Result<Mesh> {
                 continue;
             }
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-            let positions: Vec<[f32; 3]> = reader.read_positions().map(|iter| iter.collect()).unwrap_or_default();
+            let positions: Vec<[f32; 3]> = reader
+                .read_positions()
+                .map(|iter| iter.collect())
+                .unwrap_or_default();
             if positions.is_empty() {
                 continue;
             }
-            let prim_normals: Vec<[f32; 3]> = reader.read_normals().map(|iter| iter.collect()).unwrap_or_default();
+            let prim_normals: Vec<[f32; 3]> = reader
+                .read_normals()
+                .map(|iter| iter.collect())
+                .unwrap_or_default();
             let prim_uvs: Vec<[f32; 2]> = reader
                 .read_tex_coords(0)
                 .map(|iter| iter.into_f32().collect())
@@ -1515,7 +1663,8 @@ fn load_gltf_mesh(path: &std::path::Path) -> anyhow::Result<Mesh> {
                 vertices.push(na::Point3::new(p[0], p[1], p[2]));
             }
 
-            let should_fill_normals = !prim_normals.is_empty() && prim_normals.len() == positions.len();
+            let should_fill_normals =
+                !prim_normals.is_empty() && prim_normals.len() == positions.len();
             if !normals.is_empty() || should_fill_normals {
                 for i in 0..positions.len() {
                     if should_fill_normals {
@@ -1538,7 +1687,8 @@ fn load_gltf_mesh(path: &std::path::Path) -> anyhow::Result<Mesh> {
                 }
             }
 
-            let should_fill_colors = !prim_colors.is_empty() && prim_colors.len() == positions.len();
+            let should_fill_colors =
+                !prim_colors.is_empty() && prim_colors.len() == positions.len();
             if !colors.is_empty() || should_fill_colors {
                 for i in 0..positions.len() {
                     if should_fill_colors {
@@ -1654,14 +1804,14 @@ async fn stream_share_range(
     let mime = mime_guess::from_path(file_path).first_or_octet_stream();
     let mut response = HttpResponse::PartialContent();
     response.append_header(("Content-Type", mime.to_string()));
-    response.append_header(("Content-Range", format!("bytes {}-{}/{}", offset, end - 1, file_size)));
+    response.append_header((
+        "Content-Range",
+        format!("bytes {}-{}/{}", offset, end - 1, file_size),
+    ));
     response.append_header(("Content-Length", length.to_string()));
     response.append_header(("Accept-Ranges", "bytes"));
     if download {
-        response.append_header((
-            actix_web::http::header::CONTENT_DISPOSITION,
-            "attachment",
-        ));
+        response.append_header((actix_web::http::header::CONTENT_DISPOSITION, "attachment"));
     }
     response.streaming(stream)
 }
@@ -1669,7 +1819,10 @@ async fn stream_share_range(
 fn project_key_store(state: &AppState) -> Result<ProjectKeyStore, HttpResponse> {
     let master_key = require_master_key(&state.config.privacy, &state.config.paths.projects_dir)
         .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-    Ok(ProjectKeyStore::new(&state.config.paths.projects_dir, master_key))
+    Ok(ProjectKeyStore::new(
+        &state.config.paths.projects_dir,
+        master_key,
+    ))
 }
 
 fn unix_timestamp() -> i64 {
@@ -1680,7 +1833,10 @@ fn unix_timestamp() -> i64 {
 }
 
 fn request_metadata(req: &HttpRequest) -> (Option<String>, Option<String>, Option<String>) {
-    let ip = req.connection_info().realip_remote_addr().map(|v| v.to_string());
+    let ip = req
+        .connection_info()
+        .realip_remote_addr()
+        .map(|v| v.to_string());
     let user_agent = req
         .headers()
         .get(actix_web::http::header::USER_AGENT)
@@ -1769,7 +1925,10 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
         .get::<crate::auth::AuthContext>()
         .map(|ctx| format!("{:?}", ctx.role))
         .unwrap_or_else(|| "Unknown".to_string());
-    let ip = req.connection_info().realip_remote_addr().map(|v| v.to_string());
+    let ip = req
+        .connection_info()
+        .realip_remote_addr()
+        .map(|v| v.to_string());
     (actor, role, ip)
 }
 

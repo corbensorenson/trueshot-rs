@@ -1,31 +1,36 @@
 #![recursion_limit = "256"]
 
-use actix_web::{middleware::{Condition, DefaultHeaders}, web, App, HttpResponse, HttpServer};
-use actix_cors::Cors;
-use actix_files as fs;
-use actix_web_prom::PrometheusMetricsBuilder;
-use chrono::Utc;
-use trueshot_core::events::{EventBus, SystemEvent};
-use trueshot_core::scheduler::{Scheduler, SchedulerObserver};
-use trueshot_core::crash_handler::init_crash_handler;
 use crate::auth::{AuthManager, AuthMiddleware};
 use crate::config::AppConfig as Config;
-use std::sync::{Arc, Mutex};
+use crate::queue::{JobQueue, QueueJobPayload, QueueObserver};
+use actix_cors::Cors;
+use actix_files as fs;
+use actix_web::{
+    middleware::{Condition, DefaultHeaders},
+    web, App, HttpResponse, HttpServer,
+};
+use actix_web_prom::PrometheusMetricsBuilder;
+use chrono::Utc;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use trueshot_device_manager::{CameraManager, Foldio360, SerialTurntable, Turntable, TurntableFeedbackConfig};
+use trueshot_core::crash_handler::init_crash_handler;
+use trueshot_core::events::{EventBus, SystemEvent};
 use trueshot_core::inventory::Inventory;
-use crate::queue::{JobQueue, QueueJobPayload, QueueObserver};
+use trueshot_core::scheduler::{Scheduler, SchedulerObserver};
+use trueshot_device_manager::{
+    CameraManager, Foldio360, SerialTurntable, Turntable, TurntableFeedbackConfig,
+};
 use utoipa::OpenApi;
 
 mod api;
 mod api_doc;
+mod at_rest;
+mod audit;
 mod auth;
 mod auth_store;
-mod audit;
-mod at_rest;
 mod config;
 mod distributed_bus;
 mod fs_safety;
@@ -33,20 +38,20 @@ mod guest;
 mod intervalometer;
 mod licensing;
 mod queue;
-mod retention;
 mod rate_limit;
+mod retention;
 mod scan_types;
 mod scan_wizard;
 mod state;
 mod telemetry;
-mod trace_middleware;
 mod tls;
+mod trace_middleware;
 
-use scan_wizard::ScanWizardState;
-use state::AppState;
+use api_doc::ApiDoc;
 use guest::SlavePhoneState;
 use intervalometer::IntervalometerState;
-use api_doc::ApiDoc;
+use scan_wizard::ScanWizardState;
+use state::AppState;
 
 // --- Main ---
 
@@ -86,10 +91,14 @@ async fn main() -> std::io::Result<()> {
         None
     };
     let telemetry_settings = telemetry::TelemetrySettings::from_config(&config, is_production);
-    let telemetry_tracer = telemetry::init_tracer(&telemetry_settings)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Telemetry init failed: {}", e)))?;
-    let telemetry_layer = telemetry_tracer
-        .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer));
+    let telemetry_tracer = telemetry::init_tracer(&telemetry_settings).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Telemetry init failed: {}", e),
+        )
+    })?;
+    let telemetry_layer =
+        telemetry_tracer.map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer));
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt_layer)
@@ -98,12 +107,10 @@ async fn main() -> std::io::Result<()> {
         .init();
     info!("Inventory DB: {:?}", config.paths.inventory_db);
     info!("Camera index hints: {:?}", config.hardware.camera_indices);
-    let admin_ttl = std::time::Duration::from_secs(
-        config.server.admin_token_ttl_seconds.unwrap_or(3600),
-    );
-    let guest_ttl = std::time::Duration::from_secs(
-        config.server.guest_token_ttl_seconds.unwrap_or(900),
-    );
+    let admin_ttl =
+        std::time::Duration::from_secs(config.server.admin_token_ttl_seconds.unwrap_or(3600));
+    let guest_ttl =
+        std::time::Duration::from_secs(config.server.guest_token_ttl_seconds.unwrap_or(900));
     let refresh_ttl = std::time::Duration::from_secs(
         config
             .server
@@ -112,7 +119,10 @@ async fn main() -> std::io::Result<()> {
     );
 
     if let Some(path) = config.privacy.provenance_key_path.as_ref() {
-        std::env::set_var("TRUESHOT_PROVENANCE_KEY_PATH", path.to_string_lossy().to_string());
+        std::env::set_var(
+            "TRUESHOT_PROVENANCE_KEY_PATH",
+            path.to_string_lossy().to_string(),
+        );
     }
     if config.privacy.redact_device_id.unwrap_or(false) {
         std::env::set_var("TRUESHOT_REDACT_DEVICE_ID", "1");
@@ -141,27 +151,49 @@ async fn main() -> std::io::Result<()> {
     let auth_store = Arc::new(
         auth_store::AuthStore::new(&config.paths.auth_db)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Auth store init failed: {}", e)))?
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Auth store init failed: {}", e),
+                )
+            })?,
     );
     let auth = Arc::new(
-        AuthManager::new("trueshot".to_string(), admin_ttl, guest_ttl, refresh_ttl, auth_store)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Auth init failed: {}", e)))?
+        AuthManager::new(
+            "trueshot".to_string(),
+            admin_ttl,
+            guest_ttl,
+            refresh_ttl,
+            auth_store,
+        )
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Auth init failed: {}", e),
+            )
+        })?,
     );
     if at_rest::encryption_required(&config.privacy, &config.paths.projects_dir) {
-        at_rest::require_master_key(&config.privacy, &config.paths.projects_dir)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Encryption master key required: {}", e)))?;
+        at_rest::require_master_key(&config.privacy, &config.paths.projects_dir).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Encryption master key required: {}", e),
+            )
+        })?;
     }
-    let rate_limiter = rate_limit::RateLimiter::from_config(&config, is_production)
-        .map(Arc::new);
-    
+    let rate_limiter = rate_limit::RateLimiter::from_config(&config, is_production).map(Arc::new);
+
     // 2. State
     let event_bus = Arc::new(EventBus::new());
-    let worker_count = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let job_queue = Arc::new(
-        JobQueue::new(&config.paths.jobs_db)
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Job queue init failed: {}", e)))?
-    );
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let job_queue = Arc::new(JobQueue::new(&config.paths.jobs_db).await.map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Job queue init failed: {}", e),
+        )
+    })?);
     let observer: Arc<dyn SchedulerObserver> = Arc::new(QueueObserver::new(job_queue.clone()));
     let scheduler = Arc::new(Scheduler::with_observer(worker_count, Some(observer)));
 
@@ -178,19 +210,25 @@ async fn main() -> std::io::Result<()> {
             }
         });
     }
-    
+
     // Init Cameras
     let mut camera_manager = CameraManager::new();
     let mock_enabled = config.hardware.mock_devices.unwrap_or(false);
     match camera_manager.reconcile_cameras(mock_enabled).await {
-        Ok(report) => info!("Auto-detected {} cameras (Added: {:?})", camera_manager.cameras.len(), report.added),
+        Ok(report) => info!(
+            "Auto-detected {} cameras (Added: {:?})",
+            camera_manager.cameras.len(),
+            report.added
+        ),
         Err(e) => warn!("Camera auto-detection failed: {}", e),
     }
     let camera_manager = Arc::new(AsyncMutex::new(camera_manager));
-    let inventory = Arc::new(
-        Inventory::new(&config.paths.inventory_db)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Inventory init failed: {}", e)))?
-    );
+    let inventory = Arc::new(Inventory::new(&config.paths.inventory_db).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Inventory init failed: {}", e),
+        )
+    })?);
     {
         let cm = camera_manager.lock().await;
         for profile in cm.registry.profiles.values() {
@@ -219,16 +257,22 @@ async fn main() -> std::io::Result<()> {
     let turntable: Arc<AsyncMutex<Option<Box<dyn Turntable>>>> = Arc::new(AsyncMutex::new(None));
     let turntable_status = Arc::new(Mutex::new("Scanning...".to_string()));
     let turntable_moving = Arc::new(Mutex::new(false));
-    
+
     let tt_clone = turntable.clone();
     let status_clone = turntable_status.clone();
     let tt_config = config.hardware.clone();
-    let tt_feedback_config = tt_config.turntable_feedback.as_ref().map(|cfg| TurntableFeedbackConfig {
-        query_command: cfg.query_command.clone(),
-        query_timeout: std::time::Duration::from_millis(cfg.query_timeout_ms.unwrap_or(800)),
-        max_angle_error_deg: cfg.max_angle_error_deg.unwrap_or(2.0),
-        auto_correct: cfg.auto_correct.unwrap_or(false),
-    });
+    let tt_feedback_config =
+        tt_config
+            .turntable_feedback
+            .as_ref()
+            .map(|cfg| TurntableFeedbackConfig {
+                query_command: cfg.query_command.clone(),
+                query_timeout: std::time::Duration::from_millis(
+                    cfg.query_timeout_ms.unwrap_or(800),
+                ),
+                max_angle_error_deg: cfg.max_angle_error_deg.unwrap_or(2.0),
+                auto_correct: cfg.auto_correct.unwrap_or(false),
+            });
     let eb_turntable = event_bus.clone(); // Clone for turntable loop
 
     tokio::spawn(async move {
@@ -236,11 +280,11 @@ async fn main() -> std::io::Result<()> {
             // Check if already connected
             let mut is_still_connected = false;
             if tt_clone.lock().await.is_some() {
-                 if let Some(tt) = tt_clone.lock().await.as_ref() {
-                     if tt.is_connected().await {
-                         is_still_connected = true;
-                     }
-                 }
+                if let Some(tt) = tt_clone.lock().await.as_ref() {
+                    if tt.is_connected().await {
+                        is_still_connected = true;
+                    }
+                }
             }
 
             if is_still_connected {
@@ -254,13 +298,17 @@ async fn main() -> std::io::Result<()> {
                     warn!("Turntable connection lost! Re-scanning...");
                     *tt_lock = None;
                     *status_clone.lock().unwrap() = "Disconnected".to_string();
-                    eb_turntable.publish(SystemEvent::TurntableStatus { connected: false, angle: 0.0, moving: false });
+                    eb_turntable.publish(SystemEvent::TurntableStatus {
+                        connected: false,
+                        angle: 0.0,
+                        moving: false,
+                    });
                 }
             }
 
             info!("Starting Turntable Scan...");
             *status_clone.lock().unwrap() = "Scanning...".to_string();
-            
+
             // Try Foldio360
             if tt_config.turntable_type == "foldio360" || tt_config.turntable_type == "auto" {
                 let mut foldio = Foldio360::new();
@@ -271,38 +319,46 @@ async fn main() -> std::io::Result<()> {
                     info!("Foldio360 Connected!");
                     *tt_clone.lock().await = Some(Box::new(foldio) as Box<dyn Turntable>);
                     *status_clone.lock().unwrap() = "Foldio360".to_string();
-                    
-                    eb_turntable.publish(SystemEvent::DeviceConnected { 
-                        kind: "turntable".to_string(), 
-                        id: "Foldio360".to_string() 
+
+                    eb_turntable.publish(SystemEvent::DeviceConnected {
+                        kind: "turntable".to_string(),
+                        id: "Foldio360".to_string(),
                     });
-                    eb_turntable.publish(SystemEvent::TurntableStatus { connected: true, angle: 0.0, moving: false });
-                    
+                    eb_turntable.publish(SystemEvent::TurntableStatus {
+                        connected: true,
+                        angle: 0.0,
+                        moving: false,
+                    });
+
                     continue; // Connected!
                 }
             }
-            
+
             // Try Serial if config present
             if let Some(port) = &tt_config.serial_port {
-                 let mut serial = SerialTurntable::new(port, 115200); // Default baud
-                 if let Some(feedback) = tt_feedback_config.clone() {
+                let mut serial = SerialTurntable::new(port, 115200); // Default baud
+                if let Some(feedback) = tt_feedback_config.clone() {
                     serial.set_feedback_config(feedback);
-                 }
-                 if let Ok(_) = serial.connect().await {
-                     info!("Serial Turntable Connected on {}", port);
-                     *tt_clone.lock().await = Some(Box::new(serial) as Box<dyn Turntable>);
-                     *status_clone.lock().unwrap() = "Serial".to_string();
-                     
-                     eb_turntable.publish(SystemEvent::DeviceConnected { 
-                        kind: "turntable".to_string(), 
-                        id: "Serial".to_string() 
-                     });
-                     eb_turntable.publish(SystemEvent::TurntableStatus { connected: true, angle: 0.0, moving: false });
+                }
+                if let Ok(_) = serial.connect().await {
+                    info!("Serial Turntable Connected on {}", port);
+                    *tt_clone.lock().await = Some(Box::new(serial) as Box<dyn Turntable>);
+                    *status_clone.lock().unwrap() = "Serial".to_string();
 
-                     continue; // Connected!
-                 }
+                    eb_turntable.publish(SystemEvent::DeviceConnected {
+                        kind: "turntable".to_string(),
+                        id: "Serial".to_string(),
+                    });
+                    eb_turntable.publish(SystemEvent::TurntableStatus {
+                        connected: true,
+                        angle: 0.0,
+                        moving: false,
+                    });
+
+                    continue; // Connected!
+                }
             }
-            
+
             *status_clone.lock().unwrap() = "Not Found".to_string();
             // info!("Turntable Scan Complete (None found). Retrying in 10s...");
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -311,12 +367,12 @@ async fn main() -> std::io::Result<()> {
 
     // Background Camera Scanner
     let cm_clone = camera_manager.clone();
-    let eb_clone = event_bus.clone(); 
+    let eb_clone = event_bus.clone();
     let mock_clone = mock_enabled;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            
+
             // Auto Update Logic
             {
                 let mut cm = cm_clone.lock().await;
@@ -332,12 +388,10 @@ async fn main() -> std::io::Result<()> {
                         }
                         // Broadcast removed
                         for id in report.removed {
-                             info!("Broadcast Disconnected: {}", id);
-                             eb_clone.publish(SystemEvent::DeviceDisconnected {
-                                 id,
-                             });
+                            info!("Broadcast Disconnected: {}", id);
+                            eb_clone.publish(SystemEvent::DeviceDisconnected { id });
                         }
-                    },
+                    }
                     Err(_e) => {
                         // Reduce log spam?
                         // warn!("Camera reconciliation failed: {}", e);
@@ -355,7 +409,7 @@ async fn main() -> std::io::Result<()> {
         disk_free_gb: 0,
     }));
     let stats_clone = system_stats.clone();
-    
+
     tokio::task::spawn_blocking(move || {
         use sysinfo::{Disks, System};
 
@@ -389,11 +443,14 @@ async fn main() -> std::io::Result<()> {
     });
 
     // Initialize phone state for slave phone management
-    let max_phone_upload_bytes = config.server.max_phone_upload_bytes.unwrap_or(25 * 1024 * 1024);
-    let max_phone_upload_rate_bytes_per_minute =
-        config.server
-            .max_phone_upload_rate_bytes_per_minute
-            .unwrap_or(200 * 1024 * 1024);
+    let max_phone_upload_bytes = config
+        .server
+        .max_phone_upload_bytes
+        .unwrap_or(25 * 1024 * 1024);
+    let max_phone_upload_rate_bytes_per_minute = config
+        .server
+        .max_phone_upload_rate_bytes_per_minute
+        .unwrap_or(200 * 1024 * 1024);
     let max_phone_total_bytes = config
         .server
         .max_project_bytes
@@ -409,12 +466,8 @@ async fn main() -> std::io::Result<()> {
         max_phone_total_bytes,
         min_free_bytes,
     ));
-    
-    let audit_log_path = config
-        .paths
-        .projects_dir
-        .join("_audit")
-        .join("audit.log");
+
+    let audit_log_path = config.paths.projects_dir.join("_audit").join("audit.log");
     let audit_anchor_url = config
         .privacy
         .audit_anchor_url
@@ -431,10 +484,7 @@ async fn main() -> std::io::Result<()> {
             "Audit anchor is required in production. Set privacy.audit_anchor_url.",
         ));
     }
-    let audit_anchor_timeout_seconds = config
-        .privacy
-        .audit_anchor_timeout_seconds
-        .unwrap_or(3);
+    let audit_anchor_timeout_seconds = config.privacy.audit_anchor_timeout_seconds.unwrap_or(3);
     let audit = Arc::new(
         audit::AuditLog::new(
             audit_log_path,
@@ -444,7 +494,7 @@ async fn main() -> std::io::Result<()> {
                 required: audit_anchor_required,
             }),
         )
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
     );
     let license_gate = Arc::new(Mutex::new(licensing::LicenseGate::initialize()));
 
@@ -471,12 +521,8 @@ async fn main() -> std::io::Result<()> {
 
     retention::spawn_retention_task(state.clone());
     at_rest::spawn_encryption_task(state.clone());
-    let retry_interval = std::time::Duration::from_secs(
-        config
-            .server
-            .job_retry_interval_seconds
-            .unwrap_or(30),
-    );
+    let retry_interval =
+        std::time::Duration::from_secs(config.server.job_retry_interval_seconds.unwrap_or(30));
     let queue_bootstrap = job_queue.clone();
     let scheduler_bootstrap = state.scheduler.clone();
     tokio::spawn(async move {
@@ -490,7 +536,8 @@ async fn main() -> std::io::Result<()> {
             interval.tick().await;
             if let Ok(retries) = queue_bootstrap.load_retry_jobs().await {
                 for job in retries {
-                    schedule_queue_job(queue_bootstrap.clone(), scheduler_bootstrap.clone(), job).await;
+                    schedule_queue_job(queue_bootstrap.clone(), scheduler_bootstrap.clone(), job)
+                        .await;
                 }
             }
         }
@@ -512,11 +559,7 @@ async fn main() -> std::io::Result<()> {
         ));
     }
     if tls_proxy {
-        let public_base_url = config
-            .server
-            .public_base_url
-            .clone()
-            .unwrap_or_default();
+        let public_base_url = config.server.public_base_url.clone().unwrap_or_default();
         if !public_base_url.starts_with("https://") {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -540,11 +583,13 @@ async fn main() -> std::io::Result<()> {
         "http://localhost:3000".to_string(),
         "http://127.0.0.1:3000".to_string(),
     ];
-    let allowed_origins = config
-        .server
-        .allowed_origins
-        .clone()
-        .unwrap_or_else(|| if is_production { Vec::new() } else { default_dev_origins });
+    let allowed_origins = config.server.allowed_origins.clone().unwrap_or_else(|| {
+        if is_production {
+            Vec::new()
+        } else {
+            default_dev_origins
+        }
+    });
     if is_production && allowed_origins.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -552,7 +597,10 @@ async fn main() -> std::io::Result<()> {
         ));
     }
 
-    info!("Starting TrueShot Server (Actix) on {}:{}", config.server.host, config.server.port);
+    info!(
+        "Starting TrueShot Server (Actix) on {}:{}",
+        config.server.host, config.server.port
+    );
 
     let enable_hsts = is_production && (tls_configured || tls_proxy);
     let hsts_max_age = config.server.hsts_max_age_seconds.unwrap_or(31536000);
@@ -575,7 +623,12 @@ async fn main() -> std::io::Result<()> {
     let prometheus = PrometheusMetricsBuilder::new("trueshot")
         .endpoint(metrics_path.as_str())
         .build()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Metrics init failed: {}", e)))?;
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Metrics init failed: {}", e),
+            )
+        })?;
 
     // 3. Server
     let server = HttpServer::new(move || {
@@ -595,7 +648,7 @@ async fn main() -> std::io::Result<()> {
 
         let phone_state_data = web::Data::from(phone_state.clone());
 
-        let app = App::new()
+        App::new()
             .wrap(cors)
             .wrap(
                 DefaultHeaders::new()
@@ -757,14 +810,15 @@ async fn main() -> std::io::Result<()> {
                     "frontend": "http://localhost:5173"
                 }))
             }))
-        ;
-        app
     });
 
     let server = if let Some(tls) = config.server.tls.as_ref() {
         let tls_config = tls::load_rustls_config(&tls.cert_path, &tls.key_path)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-        server.bind_rustls_0_23((config.server.host.as_str(), config.server.port), tls_config)?
+        server.bind_rustls_0_23(
+            (config.server.host.as_str(), config.server.port),
+            tls_config,
+        )?
     } else {
         server.bind((config.server.host.as_str(), config.server.port))?
     };
@@ -805,14 +859,7 @@ async fn schedule_queue_job(
         Ok(job) => job,
         Err(err) => {
             let _ = job_queue
-                .sync_job_info(
-                    job.id,
-                    "failed",
-                    0.0,
-                    None,
-                    Some(Utc::now()),
-                    Some(err),
-                )
+                .sync_job_info(job.id, "failed", 0.0, None, Some(Utc::now()), Some(err))
                 .await;
             return;
         }

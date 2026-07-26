@@ -1,6 +1,6 @@
-use actix_web::{get, web, HttpRequest, Responder, HttpResponse};
-use crate::state::AppState;
 use crate::auth::{require_guest_or_admin, require_scope};
+use crate::state::AppState;
+use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 
 /// Get system resource statistics
 #[utoipa::path(

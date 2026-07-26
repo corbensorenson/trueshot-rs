@@ -20,7 +20,10 @@ fn decode_luma(luma: &GrayImage) -> Option<String> {
 
     let mut hints = HashMap::new();
     hints.insert(DecodeHintType::TRY_HARDER, DecodeHintValue::TryHarder(true));
-    hints.insert(DecodeHintType::ALSO_INVERTED, DecodeHintValue::AlsoInverted(true));
+    hints.insert(
+        DecodeHintType::ALSO_INVERTED,
+        DecodeHintValue::AlsoInverted(true),
+    );
     hints.insert(
         DecodeHintType::POSSIBLE_FORMATS,
         DecodeHintValue::PossibleFormats(HashSet::from([
@@ -34,13 +37,9 @@ fn decode_luma(luma: &GrayImage) -> Option<String> {
         ])),
     );
 
-    if let Ok(result) = rxing::helpers::detect_in_luma_with_hints(
-        data.clone(),
-        width,
-        height,
-        None,
-        &mut hints,
-    ) {
+    if let Ok(result) =
+        rxing::helpers::detect_in_luma_with_hints(data.clone(), width, height, None, &mut hints)
+    {
         let text = result.getText().trim().to_string();
         if !text.is_empty() {
             return Some(text);

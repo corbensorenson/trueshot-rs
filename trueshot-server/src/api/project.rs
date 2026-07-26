@@ -1,33 +1,24 @@
+use crate::at_rest::{
+    clear_project_encrypted, decrypt_file_in_place, decrypt_project_scopes, encrypt_file_in_place,
+    encrypt_project_scopes, mark_project_encrypted, policy_for_project, require_master_key,
+    ProjectKeyStore,
+};
+use crate::audit::AuditEvent;
+use crate::auth::require_admin;
+use crate::fs_safety::{
+    project_size_bytes, resolve_project_child, resolve_project_child_file, resolve_project_dir,
+    resolve_project_file,
+};
+use crate::state::AppState;
 use actix_files::NamedFile;
 use actix_web::{delete, get, post, put, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use crate::state::AppState;
-use crate::auth::require_admin;
-use crate::audit::AuditEvent;
-use crate::fs_safety::{
-    resolve_project_child,
-    resolve_project_child_file,
-    resolve_project_dir,
-    resolve_project_file,
-    project_size_bytes,
-};
-use crate::at_rest::{
-    ProjectKeyStore,
-    encrypt_project_scopes,
-    decrypt_project_scopes,
-    encrypt_file_in_place,
-    decrypt_file_in_place,
-    mark_project_encrypted,
-    clear_project_encrypted,
-    policy_for_project,
-    require_master_key,
-};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::UNIX_EPOCH;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use utoipa::ToSchema;
 use walkdir::WalkDir;
-use std::time::UNIX_EPOCH;
 
 // Struct for create request
 #[derive(serde::Deserialize, ToSchema)]
@@ -92,7 +83,11 @@ struct ImuSample {
     )
 )]
 #[post("/api/projects")]
-pub async fn create_project(req: HttpRequest, json: web::Json<CreateProjectRequest>, state: web::Data<AppState>) -> impl Responder {
+pub async fn create_project(
+    req: HttpRequest,
+    json: web::Json<CreateProjectRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -101,15 +96,15 @@ pub async fn create_project(req: HttpRequest, json: web::Json<CreateProjectReque
         Ok(path) => path,
         Err(resp) => return resp,
     };
-    
+
     if project_path.exists() {
-         return HttpResponse::Conflict().body("Project already exists");
+        return HttpResponse::Conflict().body("Project already exists");
     }
-    
+
     if let Err(e) = fs::create_dir_all(&project_path).await {
-         return HttpResponse::InternalServerError().body(e.to_string());
+        return HttpResponse::InternalServerError().body(e.to_string());
     }
-    
+
     // Create raw/processed dirs
     let _ = fs::create_dir_all(project_path.join("raw")).await;
     let _ = fs::create_dir_all(project_path.join("processed")).await;
@@ -125,12 +120,22 @@ pub async fn create_project(req: HttpRequest, json: web::Json<CreateProjectReque
     });
     if let Ok(payload) = serde_json::to_vec_pretty(&metadata) {
         if let Err(e) = fs::write(&metadata_path, payload).await {
-            tracing::warn!("Failed to write project metadata {:?}: {}", metadata_path, e);
+            tracing::warn!(
+                "Failed to write project metadata {:?}: {}",
+                metadata_path,
+                e
+            );
         }
     }
 
-    if let Some(policy) = policy_for_project(&state.config.paths.projects_dir, &json.name, &state.config.privacy) {
-        if let Err(err) = mark_project_encrypted(&state.config.paths.projects_dir, &json.name, &policy.scopes) {
+    if let Some(policy) = policy_for_project(
+        &state.config.paths.projects_dir,
+        &json.name,
+        &state.config.privacy,
+    ) {
+        if let Err(err) =
+            mark_project_encrypted(&state.config.paths.projects_dir, &json.name, &policy.scopes)
+        {
             tracing::warn!("Failed to mark project encryption: {}", err);
         }
     }
@@ -148,7 +153,7 @@ pub async fn create_project(req: HttpRequest, json: web::Json<CreateProjectReque
             serde_json::json!({ "description": json.description.clone() }),
         ),
     );
-    
+
     HttpResponse::Ok().json(serde_json::json!({
         "status": "created",
         "name": json.name,
@@ -169,7 +174,11 @@ pub async fn create_project(req: HttpRequest, json: web::Json<CreateProjectReque
     )
 )]
 #[delete("/api/projects/{id}/raw")]
-pub async fn purge_project_raw(req: HttpRequest, path: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
+pub async fn purge_project_raw(
+    req: HttpRequest,
+    path: web::Path<String>,
+    state: web::Data<AppState>,
+) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -178,10 +187,10 @@ pub async fn purge_project_raw(req: HttpRequest, path: web::Path<String>, state:
         Ok(path) => path,
         Err(resp) => return resp,
     };
-    
+
     if project_path.exists() {
         if let Err(e) = fs::remove_dir_all(project_path).await {
-             return HttpResponse::InternalServerError().body(e.to_string());
+            return HttpResponse::InternalServerError().body(e.to_string());
         }
     }
     log_audit(
@@ -206,11 +215,10 @@ async fn get_projects_impl(req: HttpRequest, state: web::Data<AppState>) -> Http
     }
     let projects_dir = &state.config.paths.projects_dir;
 
-    
     // std::fs::read_dir is blocking, but iterating directories is complex in async without a stream.
     // For now, we wrap it in spawn_blocking to be safe, or just accept it's fast on FS cache.
     // Using tokio::task::spawn_blocking is the "correct" way for blocking std calls.
-    
+
     let dir = projects_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut list = Vec::new();
@@ -232,11 +240,12 @@ async fn get_projects_impl(req: HttpRequest, state: web::Data<AppState>) -> Http
             }
         }
         list
-    }).await;
+    })
+    .await;
 
     match result {
         Ok(list) => HttpResponse::Ok().json(list),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string())
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
 }
 
@@ -280,7 +289,11 @@ pub async fn get_projects_legacy(req: HttpRequest, state: web::Data<AppState>) -
     )
 )]
 #[post("/api/projects/{id}/open")]
-pub async fn open_project_fs(req: HttpRequest, path: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
+pub async fn open_project_fs(
+    req: HttpRequest,
+    path: web::Path<String>,
+    state: web::Data<AppState>,
+) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
@@ -293,11 +306,11 @@ pub async fn open_project_fs(req: HttpRequest, path: web::Path<String>, state: w
         Ok(path) => path,
         Err(resp) => return resp,
     };
-    
+
     if !project_path.exists() {
         return HttpResponse::NotFound().body("Project not found");
     }
-    
+
     // MacOS "open", Windows "explorer", Linux "xdg-open"
     #[cfg(target_os = "macos")]
     let cmd = "open";
@@ -305,9 +318,10 @@ pub async fn open_project_fs(req: HttpRequest, path: web::Path<String>, state: w
     let cmd = "explorer";
     #[cfg(target_os = "linux")]
     let cmd = "xdg-open";
-    
+
     if let Err(e) = std::process::Command::new(cmd).arg(&project_path).spawn() {
-         return HttpResponse::InternalServerError().body(format!("Failed to open filesystem: {}", e));
+        return HttpResponse::InternalServerError()
+            .body(format!("Failed to open filesystem: {}", e));
     }
 
     log_audit(
@@ -323,7 +337,7 @@ pub async fn open_project_fs(req: HttpRequest, path: web::Path<String>, state: w
             serde_json::json!({ "path": project_path.to_string_lossy() }),
         ),
     );
-    
+
     HttpResponse::Ok().json(serde_json::json!({"status": "opened"}))
 }
 
@@ -346,9 +360,9 @@ use sha2::{Digest, Sha256};
 #[post("/api/projects/{id}/import")]
 pub async fn import_model(
     req: HttpRequest,
-    path: web::Path<String>, 
+    path: web::Path<String>,
     mut payload: Multipart,
-    state: web::Data<AppState>
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -358,13 +372,21 @@ pub async fn import_model(
         Ok(path) => path,
         Err(resp) => return resp,
     };
-    
+
     if !project_path.exists() {
         return HttpResponse::NotFound().body("Project not found");
     }
 
-    let max_upload_bytes = state.config.server.max_upload_bytes.unwrap_or(10 * 1024 * 1024 * 1024);
-    let max_project_bytes = state.config.server.max_project_bytes.unwrap_or(100 * 1024 * 1024 * 1024);
+    let max_upload_bytes = state
+        .config
+        .server
+        .max_upload_bytes
+        .unwrap_or(10 * 1024 * 1024 * 1024);
+    let max_project_bytes = state
+        .config
+        .server
+        .max_project_bytes
+        .unwrap_or(100 * 1024 * 1024 * 1024);
 
     let existing_size = match project_size_bytes(&project_path) {
         Ok(size) => size,
@@ -372,17 +394,20 @@ pub async fn import_model(
     };
     let mut total_written: u64 = 0;
     let mut imported_files: Vec<serde_json::Value> = Vec::new();
-    
+
     // Iterate over multipart stream
     while let Ok(Some(mut field)) = payload.try_next().await {
         let content_disposition = field.content_disposition();
-        let filename = content_disposition.and_then(|cd| cd.get_filename()).map(|f| f.to_string());
-        
-    if let Some(fname) = filename {
-        if !is_allowed_model_extension(&fname) {
-            return HttpResponse::BadRequest().body("Unsupported file type");
-        }
-            let filepath = match resolve_project_file(&state.config.paths.projects_dir, &id, &fname) {
+        let filename = content_disposition
+            .and_then(|cd| cd.get_filename())
+            .map(|f| f.to_string());
+
+        if let Some(fname) = filename {
+            if !is_allowed_model_extension(&fname) {
+                return HttpResponse::BadRequest().body("Unsupported file type");
+            }
+            let filepath = match resolve_project_file(&state.config.paths.projects_dir, &id, &fname)
+            {
                 Ok(path) => path,
                 Err(resp) => return resp,
             };
@@ -403,7 +428,7 @@ pub async fn import_model(
             let mut sniff_buf: Vec<u8> = Vec::new();
             let mut sniffed_mime: Option<String> = None;
             let mut file_written: u64 = 0;
-            
+
             // Field streaming
             while let Some(chunk) = field.next().await {
                 match chunk {
@@ -412,7 +437,8 @@ pub async fn import_model(
                         file_written = file_written.saturating_add(data.len() as u64);
                         if total_written > max_upload_bytes {
                             let _ = tokio::fs::remove_file(&filepath).await;
-                            return HttpResponse::PayloadTooLarge().body("Upload exceeded max size");
+                            return HttpResponse::PayloadTooLarge()
+                                .body("Upload exceeded max size");
                         }
                         if existing_size.saturating_add(total_written) > max_project_bytes {
                             let _ = tokio::fs::remove_file(&filepath).await;
@@ -430,10 +456,10 @@ pub async fn import_model(
                         }
                         hasher.update(&data);
                         if let Err(e) = f.write_all(&data).await {
-                             let _ = tokio::fs::remove_file(&filepath).await;
-                             return HttpResponse::InternalServerError().body(e.to_string());
+                            let _ = tokio::fs::remove_file(&filepath).await;
+                            return HttpResponse::InternalServerError().body(e.to_string());
                         }
-                    },
+                    }
                     Err(e) => {
                         let _ = tokio::fs::remove_file(&filepath).await;
                         return HttpResponse::InternalServerError().body(e.to_string());
@@ -471,7 +497,9 @@ pub async fn import_model(
 
             let sha256 = hex::encode(hasher.finalize());
             let mut stored_path = filepath.clone();
-            if policy_for_project(&state.config.paths.projects_dir, &id, &state.config.privacy).is_some() {
+            if policy_for_project(&state.config.paths.projects_dir, &id, &state.config.privacy)
+                .is_some()
+            {
                 let key_store = match project_key_store(&state) {
                     Ok(store) => store,
                     Err(resp) => return resp,
@@ -493,7 +521,7 @@ pub async fn import_model(
             }));
         }
     }
-    
+
     let files_for_log = imported_files.clone();
     log_audit(
         &req,
@@ -539,10 +567,11 @@ pub async fn download_output_file(
         return resp;
     }
     let (id, tail) = path.into_inner();
-    let file_path = match resolve_project_child_file(&state.config.paths.projects_dir, &id, "output", &tail) {
-        Ok(path) => path,
-        Err(resp) => return resp,
-    };
+    let file_path =
+        match resolve_project_child_file(&state.config.paths.projects_dir, &id, "output", &tail) {
+            Ok(path) => path,
+            Err(resp) => return resp,
+        };
 
     match open_project_file(&state, &id, &file_path).await {
         Ok(file) => {
@@ -596,36 +625,44 @@ pub async fn list_project_assets(
 
     let mut assets: Vec<(i64, ProjectAsset)> = Vec::new();
 
-    let add_scope = |root: std::path::PathBuf, prefix: &str, assets: &mut Vec<(i64, ProjectAsset)>| {
-        for entry in WalkDir::new(&root).follow_links(false).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() {
-                continue;
+    let add_scope =
+        |root: std::path::PathBuf, prefix: &str, assets: &mut Vec<(i64, ProjectAsset)>| {
+            for entry in WalkDir::new(&root)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let rel = match path.strip_prefix(&root) {
+                    Ok(rel) => rel,
+                    Err(_) => continue,
+                };
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                let meta = entry.metadata().ok();
+                let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified_at = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64);
+                let modified_label = modified_at.map(|ts| {
+                    DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(ts as u64))
+                        .to_rfc3339()
+                });
+                let path = format!("{}/{}", prefix, rel_str);
+                assets.push((
+                    modified_at.unwrap_or(0),
+                    ProjectAsset {
+                        path,
+                        bytes,
+                        modified_at: modified_label,
+                    },
+                ));
             }
-            let path = entry.path();
-            let rel = match path.strip_prefix(&root) {
-                Ok(rel) => rel,
-                Err(_) => continue,
-            };
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            let meta = entry.metadata().ok();
-            let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            let modified_at = meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64);
-            let modified_label = modified_at.map(|ts| DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(ts as u64)).to_rfc3339());
-            let path = format!("{}/{}", prefix, rel_str);
-            assets.push((
-                modified_at.unwrap_or(0),
-                ProjectAsset {
-                    path,
-                    bytes,
-                    modified_at: modified_label,
-                },
-            ));
-        }
-    };
+        };
 
     match scope.as_str() {
         "output" => {
@@ -636,10 +673,11 @@ pub async fn list_project_assets(
             add_scope(dir, "output", &mut assets);
         }
         "processed" => {
-            let dir = match resolve_project_child(&state.config.paths.projects_dir, &id, "processed") {
-                Ok(path) => path,
-                Err(resp) => return resp,
-            };
+            let dir =
+                match resolve_project_child(&state.config.paths.projects_dir, &id, "processed") {
+                    Ok(path) => path,
+                    Err(resp) => return resp,
+                };
             add_scope(dir, "processed", &mut assets);
         }
         "all" => {
@@ -648,10 +686,11 @@ pub async fn list_project_assets(
                 Err(resp) => return resp,
             };
             add_scope(dir, "output", &mut assets);
-            let dir = match resolve_project_child(&state.config.paths.projects_dir, &id, "processed") {
-                Ok(path) => path,
-                Err(resp) => return resp,
-            };
+            let dir =
+                match resolve_project_child(&state.config.paths.projects_dir, &id, "processed") {
+                    Ok(path) => path,
+                    Err(resp) => return resp,
+                };
             add_scope(dir, "processed", &mut assets);
         }
         _ => {
@@ -708,7 +747,9 @@ pub async fn get_project_license(
         }
     }
 
-    let response = license.or_else(|| license_from_config(&state.config)).unwrap_or_default();
+    let response = license
+        .or_else(|| license_from_config(&state.config))
+        .unwrap_or_default();
     HttpResponse::Ok().json(response)
 }
 
@@ -745,7 +786,8 @@ pub async fn update_project_license(
 
     let metadata_path = project_path.join("project.json");
     let mut metadata = if let Ok(payload) = fs::read(&metadata_path).await {
-        serde_json::from_slice::<serde_json::Value>(&payload).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_slice::<serde_json::Value>(&payload)
+            .unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
@@ -947,10 +989,12 @@ pub async fn download_processed_file(
         return resp;
     }
     let (id, tail) = path.into_inner();
-    let file_path = match resolve_project_child_file(&state.config.paths.projects_dir, &id, "processed", &tail) {
-        Ok(path) => path,
-        Err(resp) => return resp,
-    };
+    let file_path =
+        match resolve_project_child_file(&state.config.paths.projects_dir, &id, "processed", &tail)
+        {
+            Ok(path) => path,
+            Err(resp) => return resp,
+        };
 
     match open_project_file(&state, &id, &file_path).await {
         Ok(file) => {
@@ -997,10 +1041,11 @@ pub async fn download_raw_file(
         return resp;
     }
     let (id, tail) = path.into_inner();
-    let file_path = match resolve_project_child_file(&state.config.paths.projects_dir, &id, "raw", &tail) {
-        Ok(path) => path,
-        Err(resp) => return resp,
-    };
+    let file_path =
+        match resolve_project_child_file(&state.config.paths.projects_dir, &id, "raw", &tail) {
+            Ok(path) => path,
+            Err(resp) => return resp,
+        };
 
     match open_project_file(&state, &id, &file_path).await {
         Ok(file) => {
@@ -1061,7 +1106,13 @@ pub async fn encrypt_project(
     let scopes = payload
         .as_ref()
         .and_then(|p| p.scopes.clone())
-        .unwrap_or_else(|| vec!["raw".to_string(), "processed".to_string(), "output".to_string()]);
+        .unwrap_or_else(|| {
+            vec![
+                "raw".to_string(),
+                "processed".to_string(),
+                "output".to_string(),
+            ]
+        });
     let scopes_for_job = scopes.clone();
 
     let key_store = match project_key_store(&state) {
@@ -1134,7 +1185,13 @@ pub async fn decrypt_project(
     let scopes = payload
         .as_ref()
         .and_then(|p| p.scopes.clone())
-        .unwrap_or_else(|| vec!["raw".to_string(), "processed".to_string(), "output".to_string()]);
+        .unwrap_or_else(|| {
+            vec![
+                "raw".to_string(),
+                "processed".to_string(),
+                "output".to_string(),
+            ]
+        });
     let scopes_for_job = scopes.clone();
 
     let key_store = match project_key_store(&state) {
@@ -1190,12 +1247,24 @@ fn is_allowed_mime_for_extension(ext: &str, mime: &str) -> bool {
     }
 
     match ext {
-        "glb" => matches!(mime.as_str(), "model/gltf-binary" | "application/octet-stream"),
-        "gltf" => matches!(mime.as_str(), "model/gltf+json" | "application/json" | "text/plain"),
+        "glb" => matches!(
+            mime.as_str(),
+            "model/gltf-binary" | "application/octet-stream"
+        ),
+        "gltf" => matches!(
+            mime.as_str(),
+            "model/gltf+json" | "application/json" | "text/plain"
+        ),
         "obj" => matches!(mime.as_str(), "text/plain" | "application/octet-stream"),
         "ply" => matches!(mime.as_str(), "application/octet-stream" | "text/plain"),
-        "usdz" => matches!(mime.as_str(), "model/vnd.usdz+zip" | "application/zip" | "application/octet-stream"),
-        "usd" => matches!(mime.as_str(), "model/vnd.usd" | "text/plain" | "application/octet-stream"),
+        "usdz" => matches!(
+            mime.as_str(),
+            "model/vnd.usdz+zip" | "application/zip" | "application/octet-stream"
+        ),
+        "usd" => matches!(
+            mime.as_str(),
+            "model/vnd.usd" | "text/plain" | "application/octet-stream"
+        ),
         _ => false,
     }
 }
@@ -1269,7 +1338,10 @@ fn vector_norm(values: [f64; 3]) -> f64 {
 fn project_key_store(state: &AppState) -> Result<ProjectKeyStore, HttpResponse> {
     let master_key = require_master_key(&state.config.privacy, &state.config.paths.projects_dir)
         .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-    Ok(ProjectKeyStore::new(&state.config.paths.projects_dir, master_key))
+    Ok(ProjectKeyStore::new(
+        &state.config.paths.projects_dir,
+        master_key,
+    ))
 }
 
 fn license_from_config(config: &crate::config::AppConfig) -> Option<ProjectLicense> {
@@ -1318,9 +1390,9 @@ async fn run_antivirus_scan(state: &AppState, path: &std::path::Path) -> Result<
             let msg = if !stderr.is_empty() { stderr } else { stdout };
             Err(HttpResponse::BadRequest().body(format!("Antivirus scan failed: {}", msg.trim())))
         }
-        Err(e) => Err(HttpResponse::InternalServerError().body(format!(
-            "Antivirus scan error: {e}"
-        ))),
+        Err(e) => {
+            Err(HttpResponse::InternalServerError().body(format!("Antivirus scan error: {e}")))
+        }
     }
 }
 
@@ -1334,7 +1406,10 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state.audit.append_with_redaction(event, &state.config.privacy) {
+    if let Err(err) = state
+        .audit
+        .append_with_redaction(event, &state.config.privacy)
+    {
         tracing::warn!("audit log failed for {}: {}", req.path(), err);
     }
 }

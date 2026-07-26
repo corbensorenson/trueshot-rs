@@ -2,12 +2,12 @@
 //!
 //! Single endpoint returning all device types for the Device Manager UI.
 
-use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use sysinfo::{CpuRefreshKind, Disks, DiskKind, MemoryRefreshKind, RefreshKind, System};
-use crate::state::AppState;
 use crate::auth::require_admin;
+use crate::state::AppState;
+use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sysinfo::{CpuRefreshKind, DiskKind, Disks, MemoryRefreshKind, RefreshKind, System};
 use utoipa::ToSchema;
 
 // ============================================================================
@@ -46,7 +46,7 @@ pub enum DeviceStatus {
     Error,
     Busy,
     Initializing,
-    Ready,  // For phones that are ready to capture
+    Ready, // For phones that are ready to capture
 }
 
 /// Unified device representation for frontend
@@ -99,35 +99,44 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
         return resp;
     }
     let mut devices: Vec<UnifiedDevice> = Vec::new();
-    
+
     // ========================================================================
     // 1. Cameras (from CameraManager)
     // ========================================================================
     {
         let cm = state.camera_manager.lock().await;
-        
+
         // Battery levels
-        let mut battery_levels: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+        let mut battery_levels: std::collections::HashMap<String, u8> =
+            std::collections::HashMap::new();
         for cam in &cm.cameras {
             if let Ok(level) = cam.battery_level() {
                 battery_levels.insert(cam.id(), level);
             }
         }
-        
+
         // Connected IDs
         let connected_ids: Vec<String> = cm.cameras.iter().map(|c| c.id()).collect();
-        
+
         // Convert registry profiles to unified devices
         for profile in cm.registry.profiles.values() {
             let connected = connected_ids.contains(&profile.id);
             let is_depth = profile.capabilities.has_depth;
-            
+
             devices.push(UnifiedDevice {
                 id: profile.id.clone(),
-                device_type: if is_depth { DeviceType::DepthCamera } else { DeviceType::Camera },
+                device_type: if is_depth {
+                    DeviceType::DepthCamera
+                } else {
+                    DeviceType::Camera
+                },
                 name: profile.name.clone(),
                 nickname: profile.nickname.clone(),
-                status: if connected { DeviceStatus::Connected } else { DeviceStatus::Disconnected },
+                status: if connected {
+                    DeviceStatus::Connected
+                } else {
+                    DeviceStatus::Disconnected
+                },
                 connection: ConnectionType::Usb,
                 manufacturer: None,
                 model: None,
@@ -147,7 +156,7 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
             });
         }
     }
-    
+
     // ========================================================================
     // 2. Turntable
     // ========================================================================
@@ -157,16 +166,24 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
         let angle = tt_lock.as_ref().map(|t| t.get_rotation()).unwrap_or(0.0);
         let moving = *state.turntable_moving.lock().unwrap();
         let tt_type = state.turntable_status.lock().unwrap().clone();
-        
+
         devices.push(UnifiedDevice {
             id: "turntable-main".to_string(),
             device_type: DeviceType::Turntable,
-            name: if tt_type.is_empty() { "Turntable".to_string() } else { tt_type },
+            name: if tt_type.is_empty() {
+                "Turntable".to_string()
+            } else {
+                tt_type
+            },
             nickname: None,
-            status: if connected { 
-                if moving { DeviceStatus::Busy } else { DeviceStatus::Connected }
-            } else { 
-                DeviceStatus::Disconnected 
+            status: if connected {
+                if moving {
+                    DeviceStatus::Busy
+                } else {
+                    DeviceStatus::Connected
+                }
+            } else {
+                DeviceStatus::Disconnected
             },
             connection: ConnectionType::Serial,
             manufacturer: None,
@@ -183,7 +200,7 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
             }),
         });
     }
-    
+
     // ========================================================================
     // 3. Phones (from SlavePhoneState)
     // ========================================================================
@@ -195,10 +212,10 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
                 device_type: DeviceType::Phone,
                 name: phone.name.clone(),
                 nickname: None,
-                status: if phone.is_ready { 
-                    DeviceStatus::Ready 
-                } else { 
-                    DeviceStatus::Connected 
+                status: if phone.is_ready {
+                    DeviceStatus::Ready
+                } else {
+                    DeviceStatus::Connected
                 },
                 connection: ConnectionType::Network,
                 manufacturer: None,
@@ -219,7 +236,7 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
             });
         }
     }
-    
+
     // ========================================================================
     // 4. Sensors (host telemetry)
     // ========================================================================
@@ -232,8 +249,8 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
         sys.refresh_cpu_usage();
         sys.refresh_memory();
         let load_avg = System::load_average();
-        let total_memory_mb = (sys.total_memory() / 1024) as u64;
-        let used_memory_mb = ((sys.total_memory() - sys.available_memory()) / 1024) as u64;
+        let total_memory_mb = sys.total_memory() / 1024;
+        let used_memory_mb = (sys.total_memory() - sys.available_memory()) / 1024;
 
         devices.push(UnifiedDevice {
             id: "sensor-host".to_string(),
@@ -262,7 +279,7 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
             }),
         });
     }
-    
+
     // ========================================================================
     // 5. Storage (local disks)
     // ========================================================================
@@ -312,7 +329,7 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
             });
         }
     }
-    
+
     HttpResponse::Ok().json(devices)
 }
 
@@ -337,22 +354,22 @@ pub async fn get_device_stats(req: HttpRequest, state: web::Data<AppState>) -> i
         by_type: std::collections::HashMap::new(),
         by_connection: std::collections::HashMap::new(),
     };
-    
+
     // Get all devices and compute stats
     // This is a simplified version - in production, cache this
-    
+
     // Count cameras
     {
         let cm = state.camera_manager.lock().await;
         let connected_count = cm.cameras.len();
         let total_count = cm.registry.profiles.len();
-        
+
         stats.total += total_count;
         stats.connected += connected_count;
         *stats.by_type.entry("camera".to_string()).or_insert(0) += total_count;
         *stats.by_connection.entry("usb".to_string()).or_insert(0) += total_count;
     }
-    
+
     // Count phones
     if let Some(phone_state) = state.phone_state.as_ref() {
         let phones = phone_state.phones.read().await;
@@ -360,14 +377,20 @@ pub async fn get_device_stats(req: HttpRequest, state: web::Data<AppState>) -> i
         stats.total += phone_count;
         stats.connected += phone_count; // All listed phones are connected
         *stats.by_type.entry("phone".to_string()).or_insert(0) += phone_count;
-        *stats.by_connection.entry("network".to_string()).or_insert(0) += phone_count;
+        *stats
+            .by_connection
+            .entry("network".to_string())
+            .or_insert(0) += phone_count;
     }
 
     // Count sensors (host telemetry)
     stats.total += 1;
     stats.connected += 1;
     *stats.by_type.entry("sensor".to_string()).or_insert(0) += 1;
-    *stats.by_connection.entry("network".to_string()).or_insert(0) += 1;
+    *stats
+        .by_connection
+        .entry("network".to_string())
+        .or_insert(0) += 1;
 
     // Count storage devices
     let disks = Disks::new_with_refreshed_list();
@@ -376,9 +399,12 @@ pub async fn get_device_stats(req: HttpRequest, state: web::Data<AppState>) -> i
         stats.total += storage_count;
         stats.connected += storage_count;
         *stats.by_type.entry("storage".to_string()).or_insert(0) += storage_count;
-        *stats.by_connection.entry("network".to_string()).or_insert(0) += storage_count;
+        *stats
+            .by_connection
+            .entry("network".to_string())
+            .or_insert(0) += storage_count;
     }
-    
+
     // Count turntable
     {
         let tt = state.turntable.lock().await;
@@ -389,14 +415,14 @@ pub async fn get_device_stats(req: HttpRequest, state: web::Data<AppState>) -> i
         *stats.by_type.entry("turntable".to_string()).or_insert(0) += 1;
         *stats.by_connection.entry("serial".to_string()).or_insert(0) += 1;
     }
-    
+
     HttpResponse::Ok().json(stats)
 }
 
 /// Trigger action on a device
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DeviceAction {
-    pub action: String,  // "capture", "enable", "disable", etc.
+    pub action: String, // "capture", "enable", "disable", etc.
     #[serde(default)]
     pub params: serde_json::Value,
 }
@@ -426,24 +452,36 @@ pub async fn device_action(
     }
     let device_id = path.into_inner();
     let action = &body.action;
-    
+
     // Route action based on device type
     // First, find which manager owns this device
-    
+
     // Check if it's a phone
     if let Some(phone_state) = state.phone_state.as_ref() {
         let phones = phone_state.phones.read().await;
         if phones.contains_key(&device_id) {
             drop(phones); // Release read lock
-            
+
             if action.as_str() == "capture" {
                 let msg = crate::guest::slave::WsMessage::Capture {
                     capture_id: uuid::Uuid::new_v4().to_string(),
-                    flash: body.params.get("flash").and_then(|v| v.as_bool()).unwrap_or(false),
-                    countdown_ms: body.params.get("countdown_ms").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    quality: body.params.get("quality").and_then(|v| v.as_u64()).unwrap_or(90) as u8,
+                    flash: body
+                        .params
+                        .get("flash")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    countdown_ms: body
+                        .params
+                        .get("countdown_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    quality: body
+                        .params
+                        .get("quality")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(90) as u8,
                 };
-                
+
                 match phone_state.send_to_phone(&device_id, msg).await {
                     Ok(_) => return HttpResponse::Ok().json(serde_json::json!({"status": "sent"})),
                     Err(e) => return HttpResponse::BadRequest().body(e),
@@ -451,7 +489,7 @@ pub async fn device_action(
             }
         }
     }
-    
+
     // Check if it's a camera
     {
         let cm = state.camera_manager.lock().await;
@@ -469,11 +507,15 @@ pub async fn device_action(
                             fps: None,
                         };
                         match cam.capture(&config) {
-                            Ok(path) => return HttpResponse::Ok().json(serde_json::json!({
-                                "status": "captured",
-                                "path": path.display().to_string()
-                            })),
-                            Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+                            Ok(path) => {
+                                return HttpResponse::Ok().json(serde_json::json!({
+                                    "status": "captured",
+                                    "path": path.display().to_string()
+                                }))
+                            }
+                            Err(e) => {
+                                return HttpResponse::InternalServerError().body(e.to_string())
+                            }
                         }
                     }
                 }
@@ -493,7 +535,7 @@ pub async fn device_action(
             }
         }
     }
-    
+
     // Check if it's the turntable
     if device_id == "turntable-main" {
         match action.as_str() {
@@ -507,10 +549,12 @@ pub async fn device_action(
                 }
             }
             "rotate" => {
-                let degrees = body.params.get("degrees")
+                let degrees = body
+                    .params
+                    .get("degrees")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0) as f32;
-                    
+
                 let mut tt_lock = state.turntable.lock().await;
                 if let Some(tt) = tt_lock.as_mut() {
                     if let Err(e) = tt.rotate(degrees).await {
@@ -525,7 +569,7 @@ pub async fn device_action(
             _ => {}
         }
     }
-    
+
     HttpResponse::NotFound().body("Device not found or action not supported")
 }
 
@@ -551,7 +595,7 @@ pub async fn batch_device_action(
         return resp;
     }
     let action = &body.action;
-    
+
     match action.as_str() {
         "capture_all_phones" => {
             if let Some(phone_state) = state.phone_state.as_ref() {
@@ -562,9 +606,9 @@ pub async fn batch_device_action(
                     countdown_ms: 0,
                     quality: 90,
                 };
-                
+
                 let ready_count = phone_state.ready_phones().await.len();
-                
+
                 match phone_state.broadcast(msg) {
                     Ok(sent) => {
                         return HttpResponse::Ok().json(serde_json::json!({
@@ -579,7 +623,7 @@ pub async fn batch_device_action(
             }
             HttpResponse::BadRequest().body("Phone state not available")
         }
-        
+
         "scan" => {
             // Trigger hardware scan
             let mut cm = state.camera_manager.lock().await;
@@ -589,8 +633,8 @@ pub async fn batch_device_action(
                 Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
             }
         }
-        
-        _ => HttpResponse::BadRequest().body("Unknown batch action")
+
+        _ => HttpResponse::BadRequest().body("Unknown batch action"),
     }
 }
 

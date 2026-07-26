@@ -867,7 +867,7 @@ fn qem_simplify(
     let mut vertices = mesh.vertices;
     let mut uvs = mesh.uvs;
     let mut indices = mesh.indices;
-    let mut normals = mesh.normals;
+    let normals = mesh.normals;
 
     let mut face_valid = vec![true; indices.len()];
     let mut vertex_faces = build_vertex_faces(vertices.len(), &indices);
@@ -1206,7 +1206,7 @@ mod tests {
 
     #[test]
     fn test_depth_map_unproject() {
-        let mut depth_map = DepthMap {
+        let depth_map = DepthMap {
             data: vec![1.0; 100],
             width: 10,
             height: 10,

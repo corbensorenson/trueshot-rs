@@ -1,10 +1,10 @@
+use crate::auth::{require_guest_or_admin, require_scope};
+use crate::state::AppState;
 use actix_web::{web, HttpRequest, HttpResponse};
 use actix_ws;
 use futures::StreamExt as _;
-use crate::state::AppState;
-use trueshot_core::events::SystemEvent;
-use crate::auth::{require_guest_or_admin, require_scope};
 use tokio::sync::mpsc;
+use trueshot_core::events::SystemEvent;
 
 struct WsLimits {
     max_message_bytes: usize,
@@ -36,10 +36,7 @@ fn origin_allowed(req: &HttpRequest, allowed: &Option<Vec<String>>) -> bool {
     let Some(allowed) = allowed.as_ref() else {
         return true;
     };
-    let origin = req
-        .headers()
-        .get("Origin")
-        .and_then(|v| v.to_str().ok());
+    let origin = req.headers().get("Origin").and_then(|v| v.to_str().ok());
     match origin {
         Some(origin) => allowed.iter().any(|o| o == origin),
         None => true,
@@ -70,13 +67,13 @@ pub async fn ws_index(
         return Ok(resp);
     }
     let (res, session, msg_stream) = actix_ws::handle(&req, stream)?;
-    
+
     // Spawn task to handle this session
     let event_rx = state.event_bus.subscribe();
     let state_clone = state.clone();
     let limits = ws_limits_from_env();
     let (tx, rx) = mpsc::channel::<String>(limits.max_pending_messages);
-    
+
     actix_rt::spawn(async move {
         forward_events(event_rx, tx, limits).await;
     });
@@ -98,9 +95,9 @@ async fn handle_ws_session(
     {
         let cm = state.camera_manager.lock().await;
         for cam in &cm.cameras {
-            let event = SystemEvent::DeviceConnected { 
-                kind: "camera".to_string(), 
-                id: cam.id() 
+            let event = SystemEvent::DeviceConnected {
+                kind: "camera".to_string(),
+                id: cam.id(),
             };
             if let Ok(json) = serde_json::to_string(&event) {
                 let _ = session.text(json).await;
@@ -112,12 +109,12 @@ async fn handle_ws_session(
     {
         let tt = state.turntable.lock().await;
         if tt.is_some() {
-            let event = SystemEvent::TurntableStatus { 
-                connected: true, 
-                angle: 0.0, 
-                moving: *state.turntable_moving.lock().unwrap() 
+            let event = SystemEvent::TurntableStatus {
+                connected: true,
+                angle: 0.0,
+                moving: *state.turntable_moving.lock().unwrap(),
             };
-             if let Ok(json) = serde_json::to_string(&event) {
+            if let Ok(json) = serde_json::to_string(&event) {
                 let _ = session.text(json).await;
             }
         }
@@ -138,14 +135,14 @@ async fn handle_ws_session(
                      _ => {} // Ignore text/binary for now
                  }
              }
-             
+
              // Handle outgoing events from bounded queue
              Some(payload) = outbound.recv() => {
                  if session.text(payload).await.is_err() {
                      break;
                  }
              }
-             
+
              else => break,
         }
     }
@@ -172,7 +169,9 @@ async fn forward_events(
                     dropped += 1;
                 }
                 if dropped >= limits.max_dropped_messages {
-                    tracing::warn!("WebSocket event backlog exceeded drop limit; terminating sender");
+                    tracing::warn!(
+                        "WebSocket event backlog exceeded drop limit; terminating sender"
+                    );
                     break;
                 }
             }

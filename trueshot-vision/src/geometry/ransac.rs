@@ -1,8 +1,8 @@
 //! RANSAC (Random Sample Consensus) Framework
-//! 
+//!
 //! Generic RANSAC implementation for robust estimation.
 
-use rand::Rng;
+use rand::seq::index;
 
 /// RANSAC configuration
 #[derive(Debug, Clone)]
@@ -42,13 +42,13 @@ pub struct RansacResult<M> {
 /// Trait for models that can be estimated with RANSAC
 pub trait RansacModel: Clone {
     type Point: Clone;
-    
+
     /// Minimum number of points needed to estimate model
     fn min_samples() -> usize;
-    
+
     /// Estimate model from minimal sample
     fn estimate(points: &[Self::Point]) -> Option<Self>;
-    
+
     /// Calculate error for a single point
     fn error(&self, point: &Self::Point) -> f64;
 }
@@ -78,24 +78,15 @@ impl Ransac {
         let mut best_inlier_count = 0;
 
         // Adaptive iteration count
-        let mut iterations = self.config.max_iterations;
+        let mut iteration_limit = self.config.max_iterations;
+        let mut iterations_run = 0;
 
-        for iter in 0..iterations {
-            // Random sample
-            let sample: Vec<usize> = (0..min_samples)
-                .map(|_| rng.gen_range(0..n))
-                .collect();
-
-            // Check for duplicates
-            let unique: std::collections::HashSet<_> = sample.iter().collect();
-            if unique.len() != min_samples {
-                continue;
-            }
+        while iterations_run < iteration_limit {
+            iterations_run += 1;
+            let sample = index::sample(&mut rng, n, min_samples).into_vec();
 
             // Estimate model from sample
-            let sample_points: Vec<M::Point> = sample.iter()
-                .map(|&i| data[i].clone())
-                .collect();
+            let sample_points: Vec<M::Point> = sample.iter().map(|&i| data[i].clone()).collect();
 
             let model = match M::estimate(&sample_points) {
                 Some(m) => m,
@@ -119,8 +110,8 @@ impl Ransac {
                 // Update iteration count based on inlier ratio
                 let inlier_ratio = best_inlier_count as f64 / n as f64;
                 if inlier_ratio > self.config.min_inlier_ratio {
-                    let new_iterations = self.compute_iterations(inlier_ratio, min_samples);
-                    iterations = iterations.min(iter + new_iterations);
+                    let required = self.compute_iterations(inlier_ratio, min_samples);
+                    iteration_limit = iteration_limit.min(required.max(iterations_run));
                 }
             }
         }
@@ -134,7 +125,7 @@ impl Ransac {
         best_model.map(|model| RansacResult {
             model,
             inliers: best_inliers,
-            iterations,
+            iterations: iterations_run,
         })
     }
 
@@ -147,7 +138,7 @@ impl Ransac {
         if p <= 0.0 {
             return self.config.max_iterations;
         }
-        
+
         let n = (1.0 - self.config.confidence).ln() / (1.0 - p).ln();
         (n.ceil() as usize).min(self.config.max_iterations)
     }
@@ -185,7 +176,7 @@ impl RansacModel for EssentialMatrixModel {
 
         // Use fundamental matrix estimation and convert to essential
         let f = super::estimate_fundamental_8point(&pts1, &pts2)?;
-        
+
         // Assuming same camera for now
         let k = &points[0].k1;
         let e = super::fundamental_to_essential(&f, k);
@@ -195,15 +186,18 @@ impl RansacModel for EssentialMatrixModel {
 
     fn error(&self, point: &Self::Point) -> f64 {
         // Sampson error for essential matrix
-        let k_inv = point.k1.try_inverse().unwrap_or(nalgebra::Matrix3::identity());
-        
+        let k_inv = point
+            .k1
+            .try_inverse()
+            .unwrap_or(nalgebra::Matrix3::identity());
+
         let x1 = k_inv * nalgebra::Vector3::new(point.p1.0, point.p1.1, 1.0);
         let x2 = k_inv * nalgebra::Vector3::new(point.p2.0, point.p2.1, 1.0);
 
         // Epipolar constraint: x2^T * E * x1 = 0
         let ex1 = self.matrix * x1;
         let etx2 = self.matrix.transpose() * x2;
-        
+
         let x2tex1 = x2.dot(&(self.matrix * x1));
 
         // Sampson error
@@ -239,7 +233,7 @@ mod tests {
             }
             let (x1, y1) = points[0];
             let (x2, y2) = points[1];
-            
+
             if (x2 - x1).abs() < 1e-10 {
                 return None;
             }
@@ -260,10 +254,8 @@ mod tests {
     #[test]
     fn test_ransac_line() {
         // Create points on a line with some outliers
-        let mut data: Vec<(f64, f64)> = (0..20)
-            .map(|i| (i as f64, 2.0 * i as f64 + 1.0))
-            .collect();
-        
+        let mut data: Vec<(f64, f64)> = (0..20).map(|i| (i as f64, 2.0 * i as f64 + 1.0)).collect();
+
         // Add outliers
         data.push((5.0, 100.0));
         data.push((10.0, -50.0));
@@ -279,5 +271,19 @@ mod tests {
         assert!((result.model.slope - 2.0).abs() < 0.1);
         assert!((result.model.intercept - 1.0).abs() < 0.5);
         assert!(result.inliers.len() >= 19); // Most inliers
+    }
+
+    #[test]
+    fn adaptive_stopping_reports_executed_iterations() {
+        let data: Vec<(f64, f64)> = (0..100).map(|i| (i as f64, 3.0 * i as f64 - 2.0)).collect();
+        let ransac = Ransac::new(RansacConfig {
+            max_iterations: 500,
+            threshold: 1e-9,
+            min_inlier_ratio: 0.5,
+            ..Default::default()
+        });
+
+        let result: RansacResult<LinearModel> = ransac.estimate(&data).expect("perfect line");
+        assert_eq!(result.iterations, 1);
     }
 }

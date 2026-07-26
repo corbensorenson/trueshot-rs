@@ -48,3 +48,5 @@ libc = "0.2"
 
 [features]
 opencv = ["trueshot-core/opencv"]
+[lints]
+workspace = true

@@ -6,7 +6,7 @@ allow-unwrap-in-tests = true
 
 # Linting toggles
 avoid-breaking-exported-api = true
-msrv = "1.70"
+msrv = "1.80"
 
 # Complexity thresholds
 cognitive-complexity-threshold = 25

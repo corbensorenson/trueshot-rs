@@ -214,7 +214,7 @@ fn test_multicam_config_defaults() {
 
 #[test]
 fn test_empty_reconstruction_fails_gracefully() {
-    let mut sfm = MultiCamSfm::new(MultiCamConfig::default());
+    let sfm = MultiCamSfm::new(MultiCamConfig::default());
 
     // No images ingested - should handle gracefully
     // (In production this would return an error)

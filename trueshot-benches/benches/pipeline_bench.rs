@@ -1,40 +1,68 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use trueshot_core::pipeline::Pipeline; 
+//! Capture-guidance pipeline benchmarks.
+//!
+//! These gates track the sparse coverage data structure used by live capture
+//! guidance without introducing filesystem or reconstruction noise.
 
-// Mock Pipeline for Benchmark
-// Real pipeline requires FS, so we will benchmark the "Throughput" logic
-// using a temporary directory.
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use nalgebra as na;
+use trueshot_core::photogrammetry::heatmap::CoverageVoxelGrid;
+use trueshot_core::reconstruction::ColoredPoint;
 
-fn benchmark_pipeline(c: &mut Criterion) {
-    let dir = std::env::temp_dir().join("trueshot_bench");
-    std::fs::create_dir_all(&dir).ok();
-
-    c.bench_function("pipeline_write_throughput", |b| {
-        b.iter(|| {
-            // Setup
-            let pipeline = Pipeline::new(dir.clone());
-            // Send 10 frames
-            // We can't easily inject into the private channel of pipeline.
-            // But we can benchmark the `write` portion directly if we expose it,
-            // or just benchmark a similar loop.
-            // Ideally we benchmark the `heatmap` compute.
-            
-            // Let's benchmark heatmap math.
-             use trueshot_core::photogrammetry::heatmap::{CoverageVoxelGrid, CoverageDensity}; // Assuming pub
-             use nalgebra::Point3;
-             use trueshot_core::reconstruction::ColoredPoint;
-             
-             let pts: Vec<ColoredPoint> = (0..1000).map(|i| ColoredPoint {
-                 position: Point3::new(i as f32, i as f32, i as f32),
-                 color: [255, 255, 255],
-                 confidence: 1.0
-             }).collect();
-             
-             let mut grid = CoverageVoxelGrid::new(10.0);
-             grid.add_points(black_box(&pts));
+fn coverage_points(count: usize) -> Vec<ColoredPoint> {
+    (0..count)
+        .map(|i| {
+            let ring = (i / 1_000) as f32;
+            let angle = i as f32 * 0.061_803_4;
+            ColoredPoint {
+                position: na::Point3::new(
+                    angle.cos() * (1.0 + ring * 0.01),
+                    angle.sin() * (1.0 + ring * 0.01),
+                    (i % 257) as f32 * 0.002,
+                ),
+                color: [255, 255, 255],
+                confidence: 1.0,
+            }
         })
+        .collect()
+}
+
+fn benchmark_coverage_ingest(c: &mut Criterion) {
+    let mut group = c.benchmark_group("capture_coverage_ingest");
+    for count in [1_000, 10_000, 100_000] {
+        let points = coverage_points(count);
+        group.bench_with_input(BenchmarkId::from_parameter(count), &points, |b, points| {
+            b.iter(|| {
+                let mut grid = CoverageVoxelGrid::new(black_box(0.02));
+                grid.add_points(black_box(points));
+                black_box(grid.get_stats())
+            });
+        });
+    }
+    group.finish();
+}
+
+fn benchmark_coverage_queries(c: &mut Criterion) {
+    let points = coverage_points(100_000);
+    let mut grid = CoverageVoxelGrid::new(0.02);
+    grid.add_points(&points);
+    let queries: Vec<_> = points
+        .iter()
+        .step_by(10)
+        .map(|point| point.position)
+        .collect();
+
+    c.bench_function("capture_coverage_query_10k", |b| {
+        b.iter(|| {
+            for query in &queries {
+                black_box(grid.get_density(black_box(query)));
+            }
+        });
     });
 }
 
-criterion_group!(benches, benchmark_pipeline);
+criterion_group!(
+    benches,
+    benchmark_coverage_ingest,
+    benchmark_coverage_queries
+);
 criterion_main!(benches);

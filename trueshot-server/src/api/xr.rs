@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::audit::AuditEvent;
 use crate::auth::{require_admin, AuthContext};
 use crate::licensing::require_license_feature;
-use trueshot_core::licensing::Feature;
 use crate::state::AppState;
+use trueshot_core::licensing::Feature;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct XrSessionStartRequest {
@@ -137,7 +137,10 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state.audit.append_with_redaction(event, &state.config.privacy) {
+    if let Err(err) = state
+        .audit
+        .append_with_redaction(event, &state.config.privacy)
+    {
         tracing::warn!("audit log failed for {}: {}", req.path(), err);
     }
 }

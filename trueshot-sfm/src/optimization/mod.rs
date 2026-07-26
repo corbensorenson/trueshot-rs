@@ -5,11 +5,11 @@
 pub mod bundle_adjustment;
 
 pub use bundle_adjustment::{
-    BundleAdjustmentConfig, BundleAdjustmentResult, Observation,
-    PosePrior, bundle_adjust_lm, build_observations_with_images,
+    build_observations_with_images, bundle_adjust_lm, BundleAdjustmentConfig,
+    BundleAdjustmentResult, Observation, PosePrior,
 };
 
-use crate::{Point3D, CameraPose, ImageData, CameraIntrinsics, CameraMotion};
+use crate::{CameraIntrinsics, CameraMotion, CameraPose, ImageData, Point3D};
 use nalgebra as na;
 
 /// Run bundle adjustment to refine reconstruction
@@ -19,7 +19,10 @@ pub fn bundle_adjust(
     images: &[ImageData],
     max_iterations: usize,
 ) -> anyhow::Result<()> {
-    tracing::info!("Running {} iterations of bundle adjustment (LM)", max_iterations);
+    tracing::info!(
+        "Running {} iterations of bundle adjustment (LM)",
+        max_iterations
+    );
     if points.is_empty() || poses.is_empty() {
         return Ok(());
     }
@@ -33,17 +36,21 @@ pub fn bundle_adjust(
         ..Default::default()
     };
     let pose_priors: Vec<Option<PosePrior>> = if config.use_pose_priors {
-        images.iter().map(|img| {
-            img.prior_pose.as_ref().map(|pose| PosePrior {
-                pose: pose.clone(),
-                rotation_sigma: config.pose_prior_rotation_sigma,
-                translation_sigma: config.pose_prior_translation_sigma,
+        images
+            .iter()
+            .map(|img| {
+                img.prior_pose.as_ref().map(|pose| PosePrior {
+                    pose: pose.clone(),
+                    rotation_sigma: config.pose_prior_rotation_sigma,
+                    translation_sigma: config.pose_prior_translation_sigma,
+                })
             })
-        }).collect()
+            .collect()
     } else {
         vec![None; images.len()]
     };
-    let camera_motions: Vec<Option<CameraMotion>> = images.iter().map(|img| img.camera_motion.clone()).collect();
+    let camera_motions: Vec<Option<CameraMotion>> =
+        images.iter().map(|img| img.camera_motion.clone()).collect();
     let _ = bundle_adjust_lm(
         points,
         poses,
@@ -104,17 +111,22 @@ pub fn local_bundle_adjust(
             continue;
         }
 
-        let local_poses: Vec<CameraPose> = camera_indices.iter().map(|&i| poses[i].clone()).collect();
-        let local_intrinsics: Vec<CameraIntrinsics> =
-            camera_indices.iter().map(|&i| images[i].intrinsics.clone()).collect();
+        let local_poses: Vec<CameraPose> =
+            camera_indices.iter().map(|&i| poses[i].clone()).collect();
+        let local_intrinsics: Vec<CameraIntrinsics> = camera_indices
+            .iter()
+            .map(|&i| images[i].intrinsics.clone())
+            .collect();
 
         let observations = build_local_observations(&local_points, images, &camera_indices);
         if observations.is_empty() {
             start += stride;
             continue;
         }
-        let local_motions: Vec<Option<CameraMotion>> =
-            camera_indices.iter().map(|&idx| images[idx].camera_motion.clone()).collect();
+        let local_motions: Vec<Option<CameraMotion>> = camera_indices
+            .iter()
+            .map(|&idx| images[idx].camera_motion.clone())
+            .collect();
         let rmse = reprojection_rmse(
             &local_points,
             &local_poses,
@@ -134,13 +146,16 @@ pub fn local_bundle_adjust(
         let mut refined_poses = local_poses.clone();
         let mut refined_points = local_points.clone();
         let local_priors: Vec<Option<PosePrior>> = if config.use_pose_priors {
-            camera_indices.iter().map(|&idx| {
-                images[idx].prior_pose.as_ref().map(|pose| PosePrior {
-                    pose: pose.clone(),
-                    rotation_sigma: config.pose_prior_rotation_sigma,
-                    translation_sigma: config.pose_prior_translation_sigma,
+            camera_indices
+                .iter()
+                .map(|&idx| {
+                    images[idx].prior_pose.as_ref().map(|pose| PosePrior {
+                        pose: pose.clone(),
+                        rotation_sigma: config.pose_prior_rotation_sigma,
+                        translation_sigma: config.pose_prior_translation_sigma,
+                    })
                 })
-            }).collect()
+                .collect()
         } else {
             vec![None; camera_indices.len()]
         };
@@ -186,7 +201,14 @@ fn build_local_observations(
                 let time_offset = image
                     .rolling_shutter
                     .as_ref()
-                    .map(|rs| rs.time_offset_seconds(kp.x as f64, kp.y as f64, image.intrinsics.width, image.intrinsics.height))
+                    .map(|rs| {
+                        rs.time_offset_seconds(
+                            kp.x as f64,
+                            kp.y as f64,
+                            image.intrinsics.width,
+                            image.intrinsics.height,
+                        )
+                    })
                     .unwrap_or(0.0);
                 observations.push(Observation {
                     point_idx,
@@ -211,15 +233,20 @@ fn reprojection_rmse(
     let mut total = 0.0;
     let mut count = 0usize;
     for obs in observations {
-        if obs.point_idx >= points.len() || obs.camera_idx >= poses.len() || obs.camera_idx >= intrinsics.len() {
+        if obs.point_idx >= points.len()
+            || obs.camera_idx >= poses.len()
+            || obs.camera_idx >= intrinsics.len()
+        {
             continue;
         }
         let point = &points[obs.point_idx];
         let pose = &poses[obs.camera_idx];
         let motion = camera_motions.get(obs.camera_idx).and_then(|m| m.as_ref());
-        let pose_eff = crate::optimization::bundle_adjustment::pose_with_motion(pose, motion, obs.time_offset);
+        let pose_eff =
+            crate::optimization::bundle_adjustment::pose_with_motion(pose, motion, obs.time_offset);
         let intr = &intrinsics[obs.camera_idx];
-        let p_cam = pose_eff.rotation.inverse() * (point.position - na::Point3::from(pose_eff.translation));
+        let p_cam =
+            pose_eff.rotation.inverse() * (point.position - na::Point3::from(pose_eff.translation));
         if p_cam.z <= 0.0 {
             continue;
         }

@@ -1596,6 +1596,10 @@ Scope: production readiness + commercial hardening (CLI + licensing UX + QA)
   - Store baselines and compare against new runs in PRs.
 - Acceptance criteria:
   - CI blocks regressions in end-to-end quality and functional outputs.
+- Status: In Progress (2026-07-26)
+  - Verified: all Criterion targets compile against current public APIs and execute once in CI smoke mode, covering coverage ingestion/queries, marching cubes, voxel access, segmentation, motion analysis, bounds, and million-Gaussian CPU preparation.
+  - Verified: the metric gate is executed against a checked-in quality baseline, and workspace `--all-targets` compilation now catches stale examples and benchmarks.
+  - Remaining: a legally redistributable image fixture and deterministic capture-to-reconstruction-to-export CI run with PSNR/SSIM/Chamfer comparisons.
 
 118. No centralized license/plan management view in the dashboard
 - Evidence:
@@ -2048,3 +2052,82 @@ Scope: local-first product architecture + monetization operations reconciliation
 - Status: In Progress (2026-07-26)
   - Verified: the local corruption runner catches panics, exercises descending truncations and mutates every critical TIFF header byte. The Z9 run completed 14 probes with zero panics, rejected all eight header mutations and accepted only two near-end truncations whose requested ROI data remained intact.
   - Remaining: legally redistributable multi-body/multi-firmware Nikon corpus, LibRaw/RawSpeed differential coverage, sustained parser fuzzing, published support matrix and CI performance thresholds.
+
+## P0: Release Blockers
+
+149. Webcam ownership crosses thread-safety boundaries through unsafe trait assertions
+- Evidence:
+  - `trueshot-device-manager/src/camera/insta360.rs` and `trueshot-device-manager/src/camera/webcam.rs` store non-`Send` Nokhwa camera handles in `Arc<Mutex<_>>`.
+  - Both wrappers use `unsafe impl Send` and `unsafe impl Sync`; strict Clippy correctly rejects the ownership pattern.
+- Risk: backend camera objects may be called from a thread other than the thread that created them, causing undefined behavior, driver crashes, or platform-specific deadlocks.
+- Upgrade actions:
+  - Replace shared camera handles with a dedicated thread-owned camera actor created and used on one backend-compatible thread.
+  - Send typed capture, preview, configuration, and shutdown commands through bounded channels with deadlines and cancellation.
+  - Remove all unsafe `Send`/`Sync` assertions for Nokhwa-backed cameras and add actor lifecycle/fault-injection tests.
+- Acceptance criteria:
+  - No non-`Send` camera handle crosses a thread boundary.
+  - Strict workspace Clippy passes without suppressing `arc_with_non_send_sync`.
+  - Camera disconnect, timeout, panic, and shutdown tests prove bounded recovery without deadlock.
+- Status: Open
+
+## P1: Launch Readiness
+
+150. Rust formatting and lint gates do not yet describe a clean repository baseline
+- Evidence:
+  - Stable rustfmt reported approximately 22,000 inherited formatting differences and hard trailing-whitespace errors.
+  - Crates previously ignored the workspace lint policy; inheritance is now standardized, but strict Clippy remains blocked by P0 #149 and additional server concurrency findings may appear afterward.
+- Risk: CI is permanently red, real regressions are hidden in noise, and contributors cannot know which quality contract is authoritative.
+- Upgrade actions:
+  - Land a dedicated behavior-neutral repository-wide rustfmt commit.
+  - Resolve strict Clippy in dependency order without blanket correctness-lint suppressions.
+  - Run Clippy with `--workspace --all-targets --all-features` on supported platforms and document the MSRV/toolchain contract.
+- Acceptance criteria:
+  - `cargo fmt --all -- --check` and strict all-target/all-feature Clippy pass from a clean checkout.
+  - CI remains green on Linux, macOS, and Windows with no ignored correctness warnings.
+- Status: In Progress (2026-07-26)
+  - Verified: every workspace crate now inherits one lint policy, ignored nightly-only rustfmt options were removed, the declared Clippy MSRV matches APIs already used by the codebase, and the full repository passes `cargo fmt --all -- --check`.
+  - Verified: workspace tests, doctests, all-target compilation, and public benchmark smoke binaries execute successfully.
+  - Verified: avoidable device-manager lint findings are resolved; strict Clippy now stops only at the two unsafe Nokhwa ownership sites tracked by P0 #149.
+  - Remaining: P0 #149 and any subsequent strict Clippy findings exposed after the camera actor removes the current blocker.
+
+151. 3DGS performance claims lack adapter-specific GPU benchmarks
+- Evidence:
+  - `trueshot-benches/benches/gaussian_splatting_bench.rs` measured CPU reference preparation while its previous title claimed GPU rasterizer performance.
+  - The benchmark is now labeled accurately, but no WGPU render/gradient readback benchmark records adapter, backend, resolution, Gaussian count, or VRAM behavior.
+- Risk: real-time and million-Gaussian claims cannot be defended across customer hardware.
+- Upgrade actions:
+  - Add adapter-enumerated WGPU benchmarks for upload, projection/binning, rasterization, gradient accumulation, and readback.
+  - Record GPU model/backend/driver, warmup, frame-time percentiles, VRAM, image quality, and parity against CPU reference output.
+  - Maintain hardware-tier baselines and block material regressions on dedicated GPU runners.
+- Acceptance criteria:
+  - Published claims map to reproducible benchmark artifacts for each supported hardware tier.
+  - Unsupported or software adapters skip with an explicit reason rather than reporting CPU simulation as GPU performance.
+- Status: Open
+
+152. Director workflow startup could self-deadlock and project load moved hardware
+- Evidence:
+  - `trueshot-core/src/director.rs` retained the workflow mutex while recursively entering the first task.
+  - Loading a project implicitly started the standard scan workflow.
+- Risk: opening a project could hang indefinitely, home hardware without explicit consent, or leave capture locks held.
+- Upgrade actions:
+  - Make project loading side-effect free and require an explicit scan command.
+  - Release workflow/session/step locks before task entry.
+  - Exercise successful file-backed capture and empty-camera failure under hard test deadlines.
+- Acceptance criteria:
+  - Project loading emits no scan event or hardware command.
+  - Workflow startup cannot re-lock a held Director mutex.
+  - Mock capture produces a verified artifact and no-camera capture fails within two seconds.
+- Status: Done (2026-07-26) - lock scopes corrected; project loading is side-effect free; bounded success and no-camera integration tests pass in under one second.
+
+153. Redis dependency is future-incompatible with the supported Rust toolchain
+- Evidence:
+  - `cargo test --workspace` reports that `redis v0.24.0` contains code a future Rust release will reject.
+- Risk: an otherwise routine toolchain update can break builds or delay a security update near release.
+- Upgrade actions:
+  - Migrate the optional cache/event bridge to a current Redis client version.
+  - Run cache, reconnect, stream, and degraded-offline tests against a pinned Redis container.
+  - Add `cargo report future-incompatibilities` and dependency freshness review to release CI.
+- Acceptance criteria:
+  - Workspace validation emits no future-incompatibility warning.
+  - Redis bridge behavior and local-first operation without Redis both pass integration tests.
+- Status: Open

@@ -76,7 +76,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    label: Some("pixelcollapse2_gpu"),
+                    label: Some("trueshot_gpu"),
                     required_features: wgpu::Features::empty(),
                     required_limits: limits,
                 },

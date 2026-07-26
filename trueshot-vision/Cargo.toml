@@ -31,3 +31,5 @@ opencv = { version = "0.96", features = ["imgproc", "highgui", "videoio", "calib
 
 [dev-dependencies]
 trueshot-core = { path = "../trueshot-core" }
+[lints]
+workspace = true

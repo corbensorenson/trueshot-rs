@@ -1,6 +1,6 @@
-pub mod auth;
-pub mod audit;
 pub mod annotations;
+pub mod audit;
+pub mod auth;
 pub mod calibration;
 pub mod devices;
 pub mod docs;

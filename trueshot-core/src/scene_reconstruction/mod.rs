@@ -475,10 +475,15 @@ pub fn extract_floorplan_from_mesh(
         }
     }
 
+    let max_cell_count = counts.iter().copied().max().unwrap_or(0);
+    let effective_min_points = options
+        .min_points_per_cell
+        .max(1)
+        .min(max_cell_count.max(1));
     let mut occupied = vec![false; width * height];
     let mut occupied_count = 0usize;
     for i in 0..counts.len() {
-        if counts[i] >= options.min_points_per_cell {
+        if counts[i] >= effective_min_points {
             occupied[i] = true;
             occupied_count += 1;
         }
@@ -1193,8 +1198,8 @@ impl AudioSynchronizer {
                 if dt < min_dt || dt > max_dt {
                     continue;
                 }
-                let f1 = (peak.freq.min(1023) as u32) & 0x3FF;
-                let f2 = (next.freq.min(1023) as u32) & 0x3FF;
+                let f1 = peak.freq.min(1023) & 0x3FF;
+                let f2 = next.freq.min(1023) & 0x3FF;
                 let dt_bin = (dt.min(4095) as u32) & 0xFFF;
                 let hash = (f1 << 22) | (f2 << 12) | dt_bin;
                 hashes.push(FingerprintHash {

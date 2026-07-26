@@ -36,15 +36,15 @@ pub struct ObjectAnalysis {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SizeInfo {
-    pub category: String,       // tiny, small, medium, large, xlarge
-    pub dimensions: [f32; 3],   // width, height, depth in cm
+    pub category: String,     // tiny, small, medium, large, xlarge
+    pub dimensions: [f32; 3], // width, height, depth in cm
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ComplexityInfo {
-    pub category: String,   // simple, moderate, complex, intricate
+    pub category: String, // simple, moderate, complex, intricate
     pub feature_count: u32,
-    pub score: f32,         // 0.0 - 1.0
+    pub score: f32, // 0.0 - 1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

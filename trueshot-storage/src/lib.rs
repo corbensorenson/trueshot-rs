@@ -1,11 +1,11 @@
 pub mod direct;
+pub mod estimator;
 pub mod octree;
 pub mod sidecar;
 pub mod tiering;
-pub mod estimator;
 
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
 
 /// Unified Asset Manager
 pub trait AssetManager {
@@ -37,6 +37,9 @@ impl AssetManager for LocalAssetManager {
         Ok(std::fs::read(self.root.join(id))?)
     }
     fn archive_project(&self, project_id: &str) -> Result<()> {
-        Ok(tiering::tier_project(&self.root.join(project_id), &self.root.join("archive"))?)
+        Ok(tiering::tier_project(
+            &self.root.join(project_id),
+            &self.root.join("archive"),
+        )?)
     }
 }

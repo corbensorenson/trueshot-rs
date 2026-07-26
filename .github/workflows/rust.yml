@@ -78,6 +78,9 @@ jobs:
     - name: Clippy (Linting)
       run: cargo clippy --workspace -- -D warnings
 
+    - name: Check All Rust Targets
+      run: cargo check --workspace --all-targets
+
     - name: Build Backend
       run: cargo build --verbose --workspace
 
@@ -248,5 +251,14 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libudev-dev libssl-dev pkg-config libasound2-dev cmake
     
-    - name: Check Benchmarks Compile
-      run: cargo build --release -p trueshot-benches
+    - name: Check Benchmark Targets
+      run: cargo check -p trueshot-benches --all-targets
+
+    - name: Smoke Test Benchmark Paths
+      run: cargo bench -p trueshot-benches -- --test
+
+    - name: Validate Quality Gate
+      run: |
+        node scripts/benchmarks/ci_gate.js \
+          benchmarks/results/realtest_20260208T082507Z.json \
+          benchmarks/results/realtest_20260208T082507Z.json

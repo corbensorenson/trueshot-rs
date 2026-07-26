@@ -1,10 +1,10 @@
+use anyhow::{Context, Result, anyhow};
+use colored::*;
+use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
-use std::path::Path;
-use colored::*;
-use anyhow::{Result, Context, anyhow};
-use std::io::Write;
 
 fn main() -> Result<()> {
     println!("{}", "🚀 Initializing TrueShot Launcher...".bold().cyan());
@@ -14,9 +14,12 @@ fn main() -> Result<()> {
     println!("📂 Workspace: {:?}", root);
 
     // 2. Build Frontend
-    println!("{}", "\n📦 Building Frontend (trueshot-dashboard)...".yellow());
+    println!(
+        "{}",
+        "\n📦 Building Frontend (trueshot-dashboard)...".yellow()
+    );
     let dashboard_path = root.join("trueshot-dashboard");
-    
+
     // Check for node
     if which::which("npm").is_err() {
         return Err(anyhow!("NPM not found. Please install Node.js."));
@@ -38,7 +41,7 @@ fn main() -> Result<()> {
     if static_dest.exists() {
         std::fs::remove_dir_all(&static_dest)?;
     }
-    
+
     // Copy dist -> static
     let dist_src = dashboard_path.join("dist");
     let options = fs_extra::dir::CopyOptions::new().content_only(true);
@@ -48,12 +51,16 @@ fn main() -> Result<()> {
 
     // 4. Build Backend
     println!("{}", "\n🔧 Compiling Server...".yellow());
-    run_command(&root, "cargo", &["build", "-p", "trueshot-server", "--release"])?;
+    run_command(
+        &root,
+        "cargo",
+        &["build", "-p", "trueshot-server", "--release"],
+    )?;
 
     // 5. Start Server
     println!("{}", "\n🌐 Starting TrueShot Server...".green().bold());
     let server_bin = root.join("target/release/trueshot-server");
-    
+
     let mut child = Command::new(server_bin)
         .current_dir(&root)
         .stdout(Stdio::inherit())
@@ -65,11 +72,11 @@ fn main() -> Result<()> {
     println!("   Waiting for health check...");
     let start = std::time::Instant::now();
     let mut ready = false;
-    
+
     while start.elapsed().as_secs() < 10 {
-        if let Ok(_) = std::net::TcpStream::connect("127.0.0.1:3000") {
-             ready = true;
-             break;
+        if std::net::TcpStream::connect("127.0.0.1:3000").is_ok() {
+            ready = true;
+            break;
         }
         thread::sleep(Duration::from_millis(500));
         print!(".");
@@ -91,10 +98,10 @@ fn main() -> Result<()> {
     }
 
     println!("{}", "\n🛑 Press Ctrl+C to stop.".dimmed());
-    
+
     // Monitors user interrupt in terminal, or waits for child
     child.wait()?;
-    
+
     Ok(())
 }
 
@@ -104,7 +111,7 @@ fn run_command(cwd: &Path, program: &str, args: &[&str]) -> Result<()> {
         .args(args)
         .status()
         .context(format!("Failed to run {} {:?}", program, args))?;
-        
+
     if !status.success() {
         return Err(anyhow!("Command failed: {} {:?}", program, args));
     }

@@ -97,20 +97,21 @@ impl Director {
     pub async fn set_project(&self, project: ScanProject) {
         let mut p = self.project.lock().await;
         *p = Some(project);
-
-        // Start Standard Workflow by default when project is loaded
-        self.start_workflow(ScanWorkflow::standard()).await;
     }
 
     pub async fn start_workflow(&self, wf: ScanWorkflow) {
-        let mut w = self.workflow.lock().await;
-        *w = Some(wf);
-
-        let mut s = self.session.lock().await;
-        *s = Some(ScanSession::new());
-
-        let mut step = self.current_step.lock().await;
-        *step = 0;
+        {
+            let mut workflow = self.workflow.lock().await;
+            *workflow = Some(wf);
+        }
+        {
+            let mut session = self.session.lock().await;
+            *session = Some(ScanSession::new());
+        }
+        {
+            let mut step = self.current_step.lock().await;
+            *step = 0;
+        }
 
         // Kickoff first step
         self.execute_step(0).await;
@@ -155,13 +156,13 @@ impl Director {
                     ScanAction::CheckCentering => Box::new(CheckCenteringTask),
                     ScanAction::Calibrate { quality } => Box::new(CalibrateTask { quality: *quality }),
                     ScanAction::PromptUser { message } => Box::new(PromptUserTask { message: message.clone() }),
-                    ScanAction::WaitForSDCard => Box::new(PromptUserTask { 
-                        message: "Please insert SD Cards into Computer (if applicable) and click Continue.".into() 
+                    ScanAction::WaitForSDCard => Box::new(PromptUserTask {
+                        message: "Please insert SD Cards into Computer (if applicable) and click Continue.".into()
                     }),
-                    ScanAction::SmartScan { quality, capture } => Box::new(SmartScanTask { 
-                        quality: *quality, 
+                    ScanAction::SmartScan { quality, capture } => Box::new(SmartScanTask {
+                        quality: *quality,
                         capture: capture.clone(),
-                        step_idx 
+                        step_idx
                     }),
                     ScanAction::StartProcessing => Box::new(StartProcessingTask),
                     ScanAction::CaptureBackground => Box::new(BackgroundScanTask { step_idx }),

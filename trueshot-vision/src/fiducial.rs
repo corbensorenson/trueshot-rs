@@ -1,11 +1,10 @@
-use image::DynamicImage;
 use anyhow::Result;
+use image::DynamicImage;
 use rxing::{BarcodeFormat, DecodeHintType, DecodeHintValue};
 use std::collections::{HashMap, HashSet};
 
 /// Fiducial Tracking (QR Codes / Markers)
 /// Used to precisely determine turntable angle.
-
 pub struct FiducialTracker;
 
 #[derive(Debug)]
@@ -23,7 +22,10 @@ impl FiducialTracker {
 
         let mut hints = HashMap::new();
         hints.insert(DecodeHintType::TRY_HARDER, DecodeHintValue::TryHarder(true));
-        hints.insert(DecodeHintType::ALSO_INVERTED, DecodeHintValue::AlsoInverted(true));
+        hints.insert(
+            DecodeHintType::ALSO_INVERTED,
+            DecodeHintValue::AlsoInverted(true),
+        );
         hints.insert(
             DecodeHintType::POSSIBLE_FORMATS,
             DecodeHintValue::PossibleFormats(HashSet::from([
@@ -35,8 +37,9 @@ impl FiducialTracker {
             ])),
         );
 
-        let results = rxing::helpers::detect_multiple_in_luma_with_hints(data, width, height, &mut hints)
-            .unwrap_or_default();
+        let results =
+            rxing::helpers::detect_multiple_in_luma_with_hints(data, width, height, &mut hints)
+                .unwrap_or_default();
 
         let mut out = Vec::new();
         for result in results {

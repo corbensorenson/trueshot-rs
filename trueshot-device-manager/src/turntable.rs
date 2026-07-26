@@ -3,17 +3,17 @@
 //! Controls hardware turntables for photogrammetry.
 //! Supports Foldio360 (via BLE) and generic serial turntables.
 
-use anyhow::{Result, Context, anyhow};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use std::io::{Read, Write};
-use std::time::{Duration, Instant};
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Manager, Peripheral};
-use uuid::Uuid;
 use futures::stream::StreamExt;
-use std::sync::Arc;
-use tokio::sync::Notify;
 use parking_lot::Mutex;
+use std::io::{Read, Write};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Notify;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait Turntable: Send + Sync {
@@ -116,7 +116,8 @@ impl SerialTurntable {
             }
 
             Ok(parse_angle_from_bytes(&buf))
-        }).await?
+        })
+        .await?
     }
 
     async fn rotate_internal(&mut self, degrees: f32, verify: bool) -> Result<()> {
@@ -160,9 +161,13 @@ impl SerialTurntable {
             } else {
                 Err(anyhow!("Not connected"))
             }
-        }).await??;
+        })
+        .await??;
 
-        tokio::time::sleep(tokio::time::Duration::from_millis((degrees.abs() * 100.0) as u64)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(
+            (degrees.abs() * 100.0) as u64,
+        ))
+        .await;
         let expected = normalize_angle(self.current_angle + degrees);
         self.current_angle = expected;
         Ok(())
@@ -177,13 +182,13 @@ impl Turntable for SerialTurntable {
     async fn connect(&mut self) -> Result<()> {
         let port_name = self.port_name.clone();
         let baud_rate = self.baud_rate;
-        
+
         // Blocking open, maybe should be spawn_blocking but this is init
         let port = serialport::new(&port_name, baud_rate)
             .timeout(Duration::from_millis(1000))
             .open()
             .with_context(|| format!("Failed to open serial port {}", port_name))?;
-        
+
         *self.port.lock() = Some(port);
         tracing::info!("Connected to serial turntable on {}", self.port_name);
         Ok(())
@@ -193,37 +198,38 @@ impl Turntable for SerialTurntable {
         *self.port.lock() = None;
         Ok(())
     }
-    
+
     async fn rotate(&mut self, degrees: f32) -> Result<()> {
         self.rotate_internal(degrees, true).await
     }
-    
+
     async fn rotate_to(&mut self, angle: f32) -> Result<()> {
         let diff = angle - self.current_angle;
         self.rotate(diff).await
     }
-    
+
     async fn home(&mut self) -> Result<()> {
         let port_clone = self.port.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-             let mut lock = port_clone.lock();
-             if let Some(port) = lock.as_mut() {
-                 port.write_all(b"HOME\n")?;
-                 Ok(())
-             } else {
-                  Err(anyhow!("Not connected"))
-             }
-        }).await??;
+            let mut lock = port_clone.lock();
+            if let Some(port) = lock.as_mut() {
+                port.write_all(b"HOME\n")?;
+                Ok(())
+            } else {
+                Err(anyhow!("Not connected"))
+            }
+        })
+        .await??;
 
         self.current_angle = 0.0;
         Ok(())
     }
-    
+
     async fn set_origin(&mut self) -> Result<()> {
         self.current_angle = 0.0;
         Ok(())
     }
-    
+
     fn get_rotation(&self) -> f32 {
         self.current_angle
     }
@@ -241,6 +247,12 @@ pub struct Foldio360 {
     rotation_complete: Arc<Notify>,
     last_feedback_angle: Arc<Mutex<Option<f32>>>,
     feedback: TurntableFeedbackConfig,
+}
+
+impl Default for Foldio360 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Foldio360 {
@@ -278,62 +290,78 @@ impl Turntable for Foldio360 {
 
         tracing::info!("DEBUG: Turntable Connect Step 4: Start Scan");
         if let Err(e) = adapter.start_scan(ScanFilter::default()).await {
-             tracing::error!("Foldio360: Failed to start scan: {}", e);
-             return Err(e.into());
+            tracing::error!("Foldio360: Failed to start scan: {}", e);
+            return Err(e.into());
         }
         tracing::info!("DEBUG: Turntable Connect Step 5: Waiting 10s...");
         tokio::time::sleep(Duration::from_secs(10)).await;
         tracing::info!("DEBUG: Turntable Connect Step 6: Get Peripherals");
         let peripherals = adapter.peripherals().await?;
         let mut target = None;
-        
+
         let nordic_uart_service = Uuid::parse_str("6e400001-b5a3-f393-e0a9-e50e24dcca9e").unwrap();
-        
+
         for p in peripherals {
-             if let Ok(Some(props)) = p.properties().await {
-                 let name = props.local_name.clone().unwrap_or_else(|| "Unknown".to_string());
-                 let has_nordic_uart = props.services.contains(&nordic_uart_service);
-                 
-                 tracing::info!("Discovered device: {} (Services: {:?})", name, props.services);
-                 
-                 if name.to_lowercase().contains("foldio") || name.to_lowercase().contains("360") || has_nordic_uart {
-                     target = Some(p);
-                     tracing::info!("Foldio360 matched: {}", name);
-                     break;
-                 }
-             }
+            if let Ok(Some(props)) = p.properties().await {
+                let name = props
+                    .local_name
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let has_nordic_uart = props.services.contains(&nordic_uart_service);
+
+                tracing::info!(
+                    "Discovered device: {} (Services: {:?})",
+                    name,
+                    props.services
+                );
+
+                if name.to_lowercase().contains("foldio")
+                    || name.to_lowercase().contains("360")
+                    || has_nordic_uart
+                {
+                    target = Some(p);
+                    tracing::info!("Foldio360 matched: {}", name);
+                    break;
+                }
+            }
         }
-        
+
         let target = target.ok_or_else(|| {
             tracing::warn!("Foldio360: Device not found in scan results.");
             anyhow!("Foldio360 not found")
         })?;
-        
+
         target.connect().await?;
         target.discover_services().await?;
-        
+
         // Subscribe to notifications (using UUIDs from example)
         let notify_uuid = Uuid::parse_str("6e400003-b5a3-f393-e0a9-e50e24dcca9e").unwrap();
         let chars = target.characteristics();
-        let notify_char = chars.iter().find(|c| c.uuid == notify_uuid).ok_or_else(|| anyhow!("Notify char not found"))?;
-        
+        let notify_char = chars
+            .iter()
+            .find(|c| c.uuid == notify_uuid)
+            .ok_or_else(|| anyhow!("Notify char not found"))?;
+
         target.subscribe(notify_char).await?;
-        
+
         let rotation_complete = self.rotation_complete.clone();
         let current_angle = self.current_angle.clone();
         let last_feedback_angle = self.last_feedback_angle.clone();
         let mut notification_stream = target.notifications().await?;
-        
+
         tokio::spawn(async move {
             while let Some(data) = notification_stream.next().await {
-                 tracing::debug!("Received notification: {:?}", String::from_utf8_lossy(&data.value));
-                 if let Some(angle) = parse_angle_from_bytes(&data.value) {
-                     *current_angle.lock() = normalize_angle(angle);
-                     *last_feedback_angle.lock() = Some(normalize_angle(angle));
-                 }
-                 if data.value == b"OK" {
-                     rotation_complete.notify_one();
-                 }
+                tracing::debug!(
+                    "Received notification: {:?}",
+                    String::from_utf8_lossy(&data.value)
+                );
+                if let Some(angle) = parse_angle_from_bytes(&data.value) {
+                    *current_angle.lock() = normalize_angle(angle);
+                    *last_feedback_angle.lock() = Some(normalize_angle(angle));
+                }
+                if data.value == b"OK" {
+                    rotation_complete.notify_one();
+                }
             }
         });
 
@@ -343,39 +371,46 @@ impl Turntable for Foldio360 {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-         if let Some(p) = &self.peripheral {
-             p.disconnect().await?;
-         }
-         self.peripheral = None;
-         Ok(())
+        if let Some(p) = &self.peripheral {
+            p.disconnect().await?;
+        }
+        self.peripheral = None;
+        Ok(())
     }
 
     async fn rotate(&mut self, degrees: f32) -> Result<()> {
-        let p = self.peripheral.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        let p = self
+            .peripheral
+            .as_ref()
+            .ok_or_else(|| anyhow!("Not connected"))?;
         *self.last_feedback_angle.lock() = None;
-        
+
         // Command format: "rotate(direction, degrees, speed, 1)"
         let dir = if degrees >= 0.0 { "CW" } else { "CCW" };
         let cmd = format!("rotate({},{},3,1)\r\n", dir, degrees.abs() as u32);
-        
+
         let write_uuid = Uuid::parse_str("6e400002-b5a3-f393-e0a9-e50e24dcca9e").unwrap();
         let chars = p.characteristics();
-        let write_char = chars.iter().find(|c| c.uuid == write_uuid).ok_or_else(|| anyhow!("Write char not found"))?;
-        
+        let write_char = chars
+            .iter()
+            .find(|c| c.uuid == write_uuid)
+            .ok_or_else(|| anyhow!("Write char not found"))?;
+
         tracing::debug!("Sending command: {}", cmd.trim());
         // Use WithoutResponse for lower latency, fallback if needed is handled by device logic
-        p.write(write_char, cmd.as_bytes(), WriteType::WithoutResponse).await?;
-        
+        p.write(write_char, cmd.as_bytes(), WriteType::WithoutResponse)
+            .await?;
+
         // Wait for notification with timeout to prevent hanging the system
         let timeout_duration = Duration::from_secs(5);
         match tokio::time::timeout(timeout_duration, self.rotation_complete.notified()).await {
-             Ok(_) => {},
-             Err(_) => {
-                 tracing::warn!("Foldio360 rotation acknowledgment timed out");
-                 // We assume it moved anyway to unblock UI
-             }
+            Ok(_) => {}
+            Err(_) => {
+                tracing::warn!("Foldio360 rotation acknowledgment timed out");
+                // We assume it moved anyway to unblock UI
+            }
         }
-        
+
         let expected = normalize_angle(*self.current_angle.lock() + degrees);
         *self.current_angle.lock() = expected;
 
@@ -402,29 +437,26 @@ impl Turntable for Foldio360 {
     }
 
     async fn rotate_to(&mut self, angle: f32) -> Result<()> {
-         let diff = angle - *self.current_angle.lock();
-         self.rotate(diff).await
+        let diff = angle - *self.current_angle.lock();
+        self.rotate(diff).await
     }
-    
+
     async fn home(&mut self) -> Result<()> {
-         self.rotate_to(0.0).await
+        self.rotate_to(0.0).await
     }
-    
+
     async fn set_origin(&mut self) -> Result<()> {
-         *self.current_angle.lock() = 0.0;
-         Ok(())
+        *self.current_angle.lock() = 0.0;
+        Ok(())
     }
-    
+
     fn get_rotation(&self) -> f32 {
-         *self.current_angle.lock()
+        *self.current_angle.lock()
     }
 
     async fn is_connected(&self) -> bool {
         if let Some(p) = &self.peripheral {
-            match p.is_connected().await {
-                Ok(connected) => connected,
-                Err(_) => false
-            }
+            p.is_connected().await.unwrap_or_default()
         } else {
             false
         }
@@ -433,13 +465,20 @@ impl Turntable for Foldio360 {
 
 impl Foldio360 {
     async fn rotate_raw(&mut self, degrees: f32) -> Result<()> {
-        let p = self.peripheral.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        let p = self
+            .peripheral
+            .as_ref()
+            .ok_or_else(|| anyhow!("Not connected"))?;
         let dir = if degrees >= 0.0 { "CW" } else { "CCW" };
         let cmd = format!("rotate({},{},3,1)\r\n", dir, degrees.abs() as u32);
         let write_uuid = Uuid::parse_str("6e400002-b5a3-f393-e0a9-e50e24dcca9e").unwrap();
         let chars = p.characteristics();
-        let write_char = chars.iter().find(|c| c.uuid == write_uuid).ok_or_else(|| anyhow!("Write char not found"))?;
-        p.write(write_char, cmd.as_bytes(), WriteType::WithoutResponse).await?;
+        let write_char = chars
+            .iter()
+            .find(|c| c.uuid == write_uuid)
+            .ok_or_else(|| anyhow!("Write char not found"))?;
+        p.write(write_char, cmd.as_bytes(), WriteType::WithoutResponse)
+            .await?;
         tokio::time::sleep(Duration::from_millis((degrees.abs() * 100.0) as u64)).await;
         let expected = normalize_angle(*self.current_angle.lock() + degrees);
         *self.current_angle.lock() = expected;
@@ -485,9 +524,18 @@ pub struct MockTurntable {
     connected: bool,
 }
 
+impl Default for MockTurntable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockTurntable {
     pub fn new() -> Self {
-        Self { angle: 0.0, connected: false }
+        Self {
+            angle: 0.0,
+            connected: false,
+        }
     }
 }
 
@@ -498,34 +546,38 @@ impl Turntable for MockTurntable {
         tracing::info!("MockTurntable connected");
         Ok(())
     }
-    
+
     async fn disconnect(&mut self) -> Result<()> {
         self.connected = false;
         Ok(())
     }
-    
+
     async fn rotate(&mut self, degrees: f32) -> Result<()> {
         self.angle = (self.angle + degrees) % 360.0;
-        tracing::info!("MockTurntable rotated by {}. Now at {}", degrees, self.angle);
+        tracing::info!(
+            "MockTurntable rotated by {}. Now at {}",
+            degrees,
+            self.angle
+        );
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         Ok(())
     }
-    
+
     async fn rotate_to(&mut self, angle: f32) -> Result<()> {
         let diff = angle - self.angle;
         self.rotate(diff).await
     }
-    
+
     async fn home(&mut self) -> Result<()> {
         self.rotate_to(0.0).await
     }
-    
+
     async fn set_origin(&mut self) -> Result<()> {
         self.angle = 0.0;
         tracing::info!("MockTurntable origin set");
         Ok(())
     }
-    
+
     fn get_rotation(&self) -> f32 {
         self.angle
     }

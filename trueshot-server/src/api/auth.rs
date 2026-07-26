@@ -1,18 +1,13 @@
+use actix_web::cookie::{time::Duration as CookieDuration, Cookie, SameSite};
 use actix_web::{delete, get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use actix_web::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::audit::AuditEvent;
 use crate::auth::{
-    require_admin,
-    AuthContext,
-    Role,
-    CSRF_HEADER_NAME,
-    CSRF_COOKIE_NAME,
-    REFRESH_COOKIE_NAME,
+    require_admin, AuthContext, Role, CSRF_COOKIE_NAME, CSRF_HEADER_NAME, REFRESH_COOKIE_NAME,
     SESSION_COOKIE_NAME,
 };
-use crate::audit::AuditEvent;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -40,25 +35,26 @@ pub struct GuestRequest {
     )
 )]
 #[post("/api/auth/guest")]
-pub async fn guest_token(req: HttpRequest, state: web::Data<AppState>, json: web::Json<GuestRequest>) -> impl Responder {
+pub async fn guest_token(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    json: web::Json<GuestRequest>,
+) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
 
     let subject = json.label.as_deref().unwrap_or("guest");
 
-    let token = match state
-        .auth
-        .issue_guest_token(
-            subject,
-            vec![
-                "stream:read".to_string(),
-                "system:read".to_string(),
-                "guest:connect".to_string(),
-                "phone:connect".to_string(),
-            ],
-        )
-    {
+    let token = match state.auth.issue_guest_token(
+        subject,
+        vec![
+            "stream:read".to_string(),
+            "system:read".to_string(),
+            "guest:connect".to_string(),
+            "phone:connect".to_string(),
+        ],
+    ) {
         Ok(token) => token,
         Err(_) => return HttpResponse::InternalServerError().body("Failed to issue token"),
     };
@@ -112,9 +108,15 @@ pub async fn create_session(req: HttpRequest, state: web::Data<AppState>) -> imp
             Ok(session) => session,
             Err(_) => return HttpResponse::InternalServerError().body("Failed to issue session"),
         };
-        let cookie = build_session_cookie(&session.access_token, session.access_ttl.as_secs(), &state);
-        let refresh_cookie = build_refresh_cookie(&session.refresh_token, session.refresh_ttl.as_secs(), &state);
-        let csrf_cookie = build_csrf_cookie(&session.csrf_token, session.refresh_ttl.as_secs(), &state);
+        let cookie =
+            build_session_cookie(&session.access_token, session.access_ttl.as_secs(), &state);
+        let refresh_cookie = build_refresh_cookie(
+            &session.refresh_token,
+            session.refresh_ttl.as_secs(),
+            &state,
+        );
+        let csrf_cookie =
+            build_csrf_cookie(&session.csrf_token, session.refresh_ttl.as_secs(), &state);
         log_audit(
             &req,
             &state,
@@ -153,9 +155,15 @@ pub async fn create_session(req: HttpRequest, state: web::Data<AppState>) -> imp
             Ok(session) => session,
             Err(_) => return HttpResponse::InternalServerError().body("Failed to issue session"),
         };
-        let cookie = build_session_cookie(&session.access_token, session.access_ttl.as_secs(), &state);
-        let refresh_cookie = build_refresh_cookie(&session.refresh_token, session.refresh_ttl.as_secs(), &state);
-        let csrf_cookie = build_csrf_cookie(&session.csrf_token, session.refresh_ttl.as_secs(), &state);
+        let cookie =
+            build_session_cookie(&session.access_token, session.access_ttl.as_secs(), &state);
+        let refresh_cookie = build_refresh_cookie(
+            &session.refresh_token,
+            session.refresh_ttl.as_secs(),
+            &state,
+        );
+        let csrf_cookie =
+            build_csrf_cookie(&session.csrf_token, session.refresh_ttl.as_secs(), &state);
         log_audit(
             &req,
             &state,
@@ -261,7 +269,11 @@ pub async fn refresh_session(req: HttpRequest, state: web::Data<AppState>) -> im
         Err(_) => return HttpResponse::Unauthorized().body("Invalid refresh token"),
     };
     let cookie = build_session_cookie(&session.access_token, session.access_ttl.as_secs(), &state);
-    let refresh_cookie = build_refresh_cookie(&session.refresh_token, session.refresh_ttl.as_secs(), &state);
+    let refresh_cookie = build_refresh_cookie(
+        &session.refresh_token,
+        session.refresh_ttl.as_secs(),
+        &state,
+    );
     let csrf_cookie = build_csrf_cookie(&session.csrf_token, session.refresh_ttl.as_secs(), &state);
 
     log_audit(
@@ -487,10 +499,7 @@ pub async fn bootstrap_admin(
     state: web::Data<AppState>,
     json: web::Json<BootstrapRequest>,
 ) -> impl Responder {
-    let required = match state.auth.bootstrap_required().await {
-        Ok(required) => required,
-        Err(_) => true,
-    };
+    let required = (state.auth.bootstrap_required().await).unwrap_or(true);
     if !required {
         return HttpResponse::Conflict().body("Bootstrap already completed");
     }
@@ -515,7 +524,11 @@ pub async fn bootstrap_admin(
         Err(_) => return HttpResponse::InternalServerError().body("Failed to issue session"),
     };
     let cookie = build_session_cookie(&session.access_token, session.access_ttl.as_secs(), &state);
-    let refresh_cookie = build_refresh_cookie(&session.refresh_token, session.refresh_ttl.as_secs(), &state);
+    let refresh_cookie = build_refresh_cookie(
+        &session.refresh_token,
+        session.refresh_ttl.as_secs(),
+        &state,
+    );
     let csrf_cookie = build_csrf_cookie(&session.csrf_token, session.refresh_ttl.as_secs(), &state);
     log_audit(
         &req,
@@ -566,7 +579,11 @@ pub async fn login(
         Ok(user) => user,
         Err(_) => return HttpResponse::Unauthorized().body("Invalid credentials"),
     };
-    let role = if user.role == "Admin" { Role::Admin } else { Role::Guest };
+    let role = if user.role == "Admin" {
+        Role::Admin
+    } else {
+        Role::Guest
+    };
     let session = match state
         .auth
         .issue_session_tokens(&user.id, role, vec!["*".to_string()])
@@ -576,7 +593,11 @@ pub async fn login(
         Err(_) => return HttpResponse::InternalServerError().body("Failed to issue session"),
     };
     let cookie = build_session_cookie(&session.access_token, session.access_ttl.as_secs(), &state);
-    let refresh_cookie = build_refresh_cookie(&session.refresh_token, session.refresh_ttl.as_secs(), &state);
+    let refresh_cookie = build_refresh_cookie(
+        &session.refresh_token,
+        session.refresh_ttl.as_secs(),
+        &state,
+    );
     let csrf_cookie = build_csrf_cookie(&session.csrf_token, session.refresh_ttl.as_secs(), &state);
     log_audit(
         &req,
@@ -630,15 +651,13 @@ pub async fn create_api_token(
         return HttpResponse::Forbidden().body("API key cannot mint tokens");
     }
     let scopes = json.scopes.clone().unwrap_or_else(|| vec!["*".to_string()]);
-    let expires_at = json
-        .expires_in_seconds
-        .map(|ttl| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            now + ttl as i64
-        });
+    let expires_at = json.expires_in_seconds.map(|ttl| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        now + ttl as i64
+    });
     let (raw, token) = match state
         .auth
         .create_api_token(&actor, &json.name, scopes.clone(), expires_at)
@@ -799,7 +818,12 @@ pub async fn pairing_claim(
 }
 
 fn sanitize_guest_scopes(requested: Option<Vec<String>>) -> Vec<String> {
-    let allowed = ["stream:read", "system:read", "guest:connect", "phone:connect"];
+    let allowed = [
+        "stream:read",
+        "system:read",
+        "guest:connect",
+        "phone:connect",
+    ];
     if let Some(scopes) = requested {
         let mut filtered: Vec<String> = scopes
             .into_iter()
@@ -831,12 +855,11 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state.audit.append_with_redaction(event, &state.config.privacy) {
-        tracing::warn!(
-            "audit log failed for {}: {}",
-            req.path(),
-            err
-        );
+    if let Err(err) = state
+        .audit
+        .append_with_redaction(event, &state.config.privacy)
+    {
+        tracing::warn!("audit log failed for {}: {}", req.path(), err);
     }
 }
 

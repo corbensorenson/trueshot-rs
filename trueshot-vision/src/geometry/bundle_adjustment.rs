@@ -1,16 +1,16 @@
 //! Bundle Adjustment - Camera and Point Optimization
-//! 
+//!
 //! High-accuracy camera pose and 3D point refinement using
 //! Levenberg-Marquardt optimization.
-//! 
+//!
 //! This is the gold standard for sub-pixel accurate reconstruction.
-//! 
+//!
 //! Reference: "Bundle Adjustment — A Modern Synthesis" (Triggs et al.)
 
+use crate::cv::DistortionModel;
 use anyhow::Result;
 use nalgebra as na;
 use std::collections::HashMap;
-use crate::cv::DistortionModel;
 
 /// Bundle adjustment configuration
 #[derive(Debug, Clone)]
@@ -81,7 +81,12 @@ pub struct BACamera {
 
 impl BACamera {
     /// Create from rotation matrix and translation
-    pub fn from_rt(id: u32, r: &na::Matrix3<f64>, t: &na::Vector3<f64>, k: &na::Matrix3<f64>) -> Self {
+    pub fn from_rt(
+        id: u32,
+        r: &na::Matrix3<f64>,
+        t: &na::Vector3<f64>,
+        k: &na::Matrix3<f64>,
+    ) -> Self {
         let rotation = na::Rotation3::from_matrix_unchecked(*r);
         let axis_angle = rotation.scaled_axis();
 
@@ -112,11 +117,7 @@ impl BACamera {
 
     /// Get intrinsics matrix
     pub fn intrinsics(&self) -> na::Matrix3<f64> {
-        na::Matrix3::new(
-            self.fx, 0.0, self.cx,
-            0.0, self.fy, self.cy,
-            0.0, 0.0, 1.0,
-        )
+        na::Matrix3::new(self.fx, 0.0, self.cx, 0.0, self.fy, self.cy, 0.0, 0.0, 1.0)
     }
 
     /// Project 3D point to 2D
@@ -137,15 +138,16 @@ impl BACamera {
             DistortionModel::Fisheye => distort_fisheye(self, x, y),
         };
 
-        na::Point2::new(
-            self.fx * xd + self.cx,
-            self.fy * yd + self.cy,
-        )
+        na::Point2::new(self.fx * xd + self.cx, self.fy * yd + self.cy)
     }
 
     /// Number of parameters
     pub fn num_params(&self, optimize_intrinsics: bool) -> usize {
-        if optimize_intrinsics { 10 } else { 6 }
+        if optimize_intrinsics {
+            10
+        } else {
+            6
+        }
     }
 }
 
@@ -156,7 +158,11 @@ fn distort_brown_conrady(camera: &BACamera, x: f64, y: f64) -> (f64, f64) {
 
     let radial_num = 1.0 + camera.k1 * r2 + camera.k2 * r4 + camera.k3 * r6;
     let radial_den = 1.0 + camera.k4 * r2 + camera.k5 * r4 + camera.k6 * r6;
-    let radial = if radial_den.abs() > 1e-12 { radial_num / radial_den } else { radial_num };
+    let radial = if radial_den.abs() > 1e-12 {
+        radial_num / radial_den
+    } else {
+        radial_num
+    };
 
     let x_tan = 2.0 * camera.p1 * x * y + camera.p2 * (r2 + 2.0 * x * x);
     let y_tan = camera.p1 * (r2 + 2.0 * y * y) + 2.0 * camera.p2 * x * y;
@@ -174,11 +180,8 @@ fn distort_fisheye(camera: &BACamera, x: f64, y: f64) -> (f64, f64) {
     let theta4 = theta2 * theta2;
     let theta6 = theta4 * theta2;
     let theta8 = theta4 * theta4;
-    let theta_d = theta * (1.0
-        + camera.k1 * theta2
-        + camera.k2 * theta4
-        + camera.k3 * theta6
-        + camera.k4 * theta8);
+    let theta_d = theta
+        * (1.0 + camera.k1 * theta2 + camera.k2 * theta4 + camera.k3 * theta6 + camera.k4 * theta8);
     let scale = theta_d / r;
     (x * scale, y * scale)
 }
@@ -213,7 +216,7 @@ pub struct BundleAdjustment {
     cameras: Vec<BACamera>,
     points: Vec<BAPoint3D>,
     observations: Vec<Observation>,
-    
+
     // Index maps
     camera_index: HashMap<u32, usize>,
     point_index: HashMap<u32, usize>,
@@ -257,13 +260,17 @@ impl BundleAdjustment {
 
         let mut lambda = self.config.initial_lambda;
         let mut prev_cost = self.compute_cost();
-        
+
         let mut iterations = 0;
         let mut converged = false;
 
         #[cfg(feature = "logging")]
-        eprintln!("🔧 Bundle Adjustment: {} cameras, {} points, {} observations",
-            self.cameras.len(), self.points.len(), self.observations.len());
+        eprintln!(
+            "🔧 Bundle Adjustment: {} cameras, {} points, {} observations",
+            self.cameras.len(),
+            self.points.len(),
+            self.observations.len()
+        );
 
         for iter in 0..self.config.max_iterations {
             iterations = iter + 1;
@@ -299,7 +306,7 @@ impl BundleAdjustment {
             if new_cost < prev_cost {
                 // Accept update
                 lambda *= self.config.lambda_down;
-                
+
                 let improvement = prev_cost - new_cost;
 
                 if improvement < self.config.tolerance {
@@ -341,38 +348,38 @@ impl BundleAdjustment {
     /// Compute total cost (sum of squared reprojection errors) - PARALLELIZED
     fn compute_cost(&self) -> f64 {
         use rayon::prelude::*;
-        
+
         let huber_delta = self.config.huber_delta;
         let use_robust = self.config.use_robust_loss;
-        
-        self.observations.par_iter()
+
+        self.observations
+            .par_iter()
             .filter_map(|obs| {
                 let camera_idx = *self.camera_index.get(&obs.camera_id)?;
                 let point_idx = *self.point_index.get(&obs.point_id)?;
-                
+
                 let camera = &self.cameras[camera_idx];
                 let point = &self.points[point_idx];
-                
+
                 let projected = camera.project(&point.position);
                 if projected.x.is_nan() {
                     return None;
                 }
-                
+
                 let error = obs.position - projected;
                 let error_sq = error.norm_squared();
-                
+
                 // Apply robust loss if configured
                 let loss = if use_robust {
                     huber_loss_static(error_sq.sqrt(), huber_delta)
                 } else {
                     error_sq
                 };
-                
+
                 Some(obs.weight * loss)
             })
             .sum()
     }
-
 }
 
 /// Standalone Huber loss function for parallel processing
@@ -385,10 +392,13 @@ fn huber_loss_static(e: f64, delta: f64) -> f64 {
 }
 
 impl BundleAdjustment {
-
     /// Compute Jacobian and residuals
     fn compute_jacobian_and_residuals(&self) -> (na::DMatrix<f64>, na::DVector<f64>) {
-        let num_camera_params = if self.config.optimize_intrinsics { 10 } else { 6 };
+        let num_camera_params = if self.config.optimize_intrinsics {
+            10
+        } else {
+            6
+        };
         let first_camera_start = if self.config.fix_first_camera { 1 } else { 0 };
         let num_camera_variables = (self.cameras.len() - first_camera_start) * num_camera_params;
         let num_point_variables = self.points.len() * 3;
@@ -497,7 +507,11 @@ impl BundleAdjustment {
 
     /// Apply parameter update
     fn apply_update(&mut self, delta: &na::DVector<f64>) {
-        let num_camera_params = if self.config.optimize_intrinsics { 10 } else { 6 };
+        let num_camera_params = if self.config.optimize_intrinsics {
+            10
+        } else {
+            6
+        };
         let first_camera_start = if self.config.fix_first_camera { 1 } else { 0 };
         let num_camera_variables = (self.cameras.len() - first_camera_start) * num_camera_params;
 

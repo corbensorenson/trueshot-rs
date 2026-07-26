@@ -13,7 +13,6 @@ use crate::hierarchical_collapse::{
 use crate::hierarchical_grading::{
     compute_grade_stats, compute_sharpness_map, grade_pixels, GradingParams,
 };
-use crate::joint_demosaic::demosaic_bayer_frame;
 use crate::types::AlignmentInfo;
 
 /// Process a stack of images using hierarchical grading and collapse
@@ -63,6 +62,46 @@ pub fn hierarchical_process(
             "Expected single-channel Bayer frames, got {} channels",
             channels
         );
+    }
+    if frames
+        .iter()
+        .any(|frame| frame.dim() != (height, width, channels))
+    {
+        anyhow::bail!("All frames must have identical dimensions");
+    }
+    if foreground_mask.dim() != (height, width) {
+        anyhow::bail!("Foreground mask dimensions must match the input frames");
+    }
+    if num_focus_planes == 0 || num_exposures == 0 {
+        anyhow::bail!("Focus-plane and exposure counts must be non-zero");
+    }
+    if num_focus_planes
+        .checked_mul(num_exposures)
+        .filter(|&expected| expected == num_images)
+        .is_none()
+    {
+        anyhow::bail!(
+            "Frame count {} does not match {} focus planes x {} exposures",
+            num_images,
+            num_focus_planes,
+            num_exposures
+        );
+    }
+    if exposures.len() != num_images {
+        anyhow::bail!(
+            "Exposure count {} does not match frame count {}",
+            exposures.len(),
+            num_images
+        );
+    }
+    if let Some(alignments) = alignments {
+        if alignments.len() != num_images {
+            anyhow::bail!(
+                "Alignment count {} does not match frame count {}",
+                alignments.len(),
+                num_images
+            );
+        }
     }
 
     tracing::info!(
@@ -216,30 +255,12 @@ pub fn hierarchical_process(
         merge_start.elapsed().as_secs_f64() * 1000.0
     );
 
-    // Step 5: Demosaic the final Bayer result
-    let demosaic_start = Instant::now();
-    let final_result = match merged {
-        CollapseResult::Bayer(bayer) => {
-            tracing::info!("Demosaicing final Bayer result");
-            let rgb = demosaic_bayer_frame(&bayer.insert_axis(ndarray::Axis(2)), wb_multipliers)?;
-            CollapseResult::Rgb(rgb.permuted_axes([2, 0, 1])) // Convert (H, W, 3) to (3, H, W)
-        }
-        CollapseResult::Rgb(rgb) => {
-            // Already RGB (from SR path)
-            CollapseResult::Rgb(rgb)
-        }
-    };
-    tracing::info!(
-        "Demosaic: {:.1}ms",
-        demosaic_start.elapsed().as_secs_f64() * 1000.0
-    );
-
     tracing::info!(
         "Hierarchical processing complete: {:.1}ms total",
         total_start.elapsed().as_secs_f64() * 1000.0
     );
 
-    Ok(final_result)
+    Ok(merged)
 }
 
 /// Compare hierarchical vs standard processing
@@ -563,13 +584,13 @@ mod tests {
         let mut output = Array2::<f64>::zeros((out_h, out_w));
 
         for y in 0..out_h {
-            let src_y = (y as f64 + 0.5) / factor as f64 - 0.5;
-            let y0 = src_y.floor().max(0.0) as isize;
+            let src_y = ((y as f64 + 0.5) / factor as f64 - 0.5).clamp(0.0, (h - 1) as f64);
+            let y0 = src_y.floor() as isize;
             let y1 = (y0 + 1).min(h as isize - 1);
             let wy = src_y - y0 as f64;
             for x in 0..out_w {
-                let src_x = (x as f64 + 0.5) / factor as f64 - 0.5;
-                let x0 = src_x.floor().max(0.0) as isize;
+                let src_x = ((x as f64 + 0.5) / factor as f64 - 0.5).clamp(0.0, (w - 1) as f64);
+                let x0 = src_x.floor() as isize;
                 let x1 = (x0 + 1).min(w as isize - 1);
                 let wx = src_x - x0 as f64;
 

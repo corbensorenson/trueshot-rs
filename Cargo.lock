@@ -10984,6 +10984,7 @@ dependencies = [
  "color_quant",
  "comfy-table",
  "config 0.13.4",
+ "criterion",
  "crossbeam-channel",
  "csv",
  "dashmap",

@@ -4,9 +4,9 @@ use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responde
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::auth::{require_admin, require_guest_or_admin, AuthContext};
 use crate::audit::AuditEvent;
-use crate::licensing::{bundle_catalog, tier_catalog, sync_trial_env, LicenseSnapshot};
+use crate::auth::{require_admin, require_guest_or_admin, AuthContext};
+use crate::licensing::{bundle_catalog, sync_trial_env, tier_catalog, LicenseSnapshot};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -157,7 +157,10 @@ pub async fn get_license_bundles(req: HttpRequest) -> impl Responder {
     )
 )]
 #[get("/api/license/entitlements")]
-pub async fn get_license_entitlements(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
+pub async fn get_license_entitlements(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> impl Responder {
     if let Err(resp) = require_guest_or_admin(&req) {
         return resp;
     }
@@ -573,7 +576,10 @@ pub async fn create_license_trial_self(
                 "subject": subject,
                 "bundles": bundles,
             });
-            let _ = state.auth.set_setting(&trial_key_subject, &payload.to_string()).await;
+            let _ = state
+                .auth
+                .set_setting(&trial_key_subject, &payload.to_string())
+                .await;
             if let Some(key) = trial_key_device {
                 let _ = state.auth.set_setting(&key, &payload.to_string()).await;
             }
@@ -676,7 +682,10 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state.audit.append_with_redaction(event, &state.config.privacy) {
+    if let Err(err) = state
+        .audit
+        .append_with_redaction(event, &state.config.privacy)
+    {
         tracing::warn!("audit log failed for {}: {}", req.path(), err);
     }
 }

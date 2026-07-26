@@ -49,7 +49,13 @@ fn parse_args() -> Result<(PathBuf, PathBuf, Option<PathBuf>, Option<usize>, boo
         }
     }
 
-    Ok((PathBuf::from(nef_dir), PathBuf::from(out_dir), seg_model, limit, overwrite))
+    Ok((
+        PathBuf::from(nef_dir),
+        PathBuf::from(out_dir),
+        seg_model,
+        limit,
+        overwrite,
+    ))
 }
 
 fn is_nef(path: &Path) -> bool {

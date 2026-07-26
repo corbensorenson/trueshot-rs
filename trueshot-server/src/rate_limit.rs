@@ -51,12 +51,7 @@ impl RateLimiter {
         ))
     }
 
-    pub fn new(
-        ip_per_minute: u32,
-        ip_burst: u32,
-        user_per_minute: u32,
-        user_burst: u32,
-    ) -> Self {
+    pub fn new(ip_per_minute: u32, ip_burst: u32, user_per_minute: u32, user_burst: u32) -> Self {
         let ip_limit = RateLimiter::limit_from_per_minute(ip_per_minute, ip_burst);
         let user_limit = RateLimiter::limit_from_per_minute(user_per_minute, user_burst);
         Self {

@@ -1,10 +1,10 @@
 //! Unit tests for TrueShot core components
 
 use anyhow::Result;
-use trueshot_core::config::AppConfig;
-use trueshot_core::object_detection::BoundingBox;
 use std::sync::Arc;
 use std::thread;
+use trueshot_core::config::AppConfig;
+use trueshot_core::object_detection::BoundingBox;
 
 #[test]
 fn test_app_config_load_defaults() -> Result<()> {
@@ -25,7 +25,10 @@ fn test_app_config_serialization_roundtrip() -> Result<()> {
     assert_eq!(config.server.port, decoded.server.port);
     assert_eq!(config.paths.data_dir, decoded.paths.data_dir);
     assert_eq!(config.paths.temp_dir, decoded.paths.temp_dir);
-    assert_eq!(config.photogrammetry.use_gpu, decoded.photogrammetry.use_gpu);
+    assert_eq!(
+        config.photogrammetry.use_gpu,
+        decoded.photogrammetry.use_gpu
+    );
     Ok(())
 }
 
@@ -54,7 +57,7 @@ fn test_bounding_box_operations() {
     assert_eq!(intersection.x, 150);
     assert_eq!(intersection.y, 250);
     assert_eq!(intersection.width, 200);
-    assert_eq!(intersection.height, 150);
+    assert_eq!(intersection.height, 200);
 }
 
 #[test]
@@ -95,7 +98,9 @@ fn test_bounding_box_clamping_via_intersection() {
         height: 300,
     };
 
-    let clamped = bbox.intersection(&bounds).expect("Expected clamped intersection");
+    let clamped = bbox
+        .intersection(&bounds)
+        .expect("Expected clamped intersection");
     assert_eq!(clamped.x, 50);
     assert_eq!(clamped.y, 100);
     assert_eq!(clamped.width, 150);

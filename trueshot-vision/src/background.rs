@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgb, Rgba};
 use nalgebra as na;
 #[cfg(feature = "opencv")]
@@ -6,20 +7,13 @@ use opencv::{
     imgproc,
     prelude::*,
 };
-use anyhow::{Result, Context};
 
 /// Background subtraction methods
 pub enum BackgroundMethod {
     /// Simple color difference with a clean plate
-    DifferenceKeying {
-        threshold: u8,
-        blur_radius: i32,
-    },
+    DifferenceKeying { threshold: u8, blur_radius: i32 },
     /// Chakra Keying (Green/Blue screen)
-    ChromaKey {
-        key_color: [u8; 3],
-        tolerance: f32,
-    },
+    ChromaKey { key_color: [u8; 3], tolerance: f32 },
     /// MOG2 (Gaussian Mixture-based Background/Foreground Segmentation)
     MOG2 {
         history: i32,
@@ -55,15 +49,19 @@ impl BackgroundRemover {
         method: BackgroundMethod,
     ) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
         match method {
-            BackgroundMethod::DifferenceKeying { threshold, blur_radius } => {
-                self.difference_keying(image, threshold, blur_radius)
-            }
-            BackgroundMethod::ChromaKey { key_color, tolerance } => {
-                self.chroma_key(image, key_color, tolerance)
-            }
-            BackgroundMethod::MOG2 { history, var_threshold, detect_shadows } => {
-                self.mog2_subtraction(image, history, var_threshold, detect_shadows)
-            }
+            BackgroundMethod::DifferenceKeying {
+                threshold,
+                blur_radius,
+            } => self.difference_keying(image, threshold, blur_radius),
+            BackgroundMethod::ChromaKey {
+                key_color,
+                tolerance,
+            } => self.chroma_key(image, key_color, tolerance),
+            BackgroundMethod::MOG2 {
+                history,
+                var_threshold,
+                detect_shadows,
+            } => self.mog2_subtraction(image, history, var_threshold, detect_shadows),
         }
     }
 
@@ -75,7 +73,7 @@ impl BackgroundRemover {
         blur_radius: i32,
     ) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
         let clean = self.clean_plate.as_ref().context("Clean plate not set")?;
-        
+
         if image.dimensions() != clean.dimensions() {
             anyhow::bail!("Image dimensions mismatch with clean plate");
         }
@@ -91,21 +89,21 @@ impl BackgroundRemover {
 
         let (width, height) = image.dimensions();
         let mut mask = ImageBuffer::new(width, height);
-        
+
         for (x, y, pixel) in image_ref.enumerate_pixels() {
             let clean_pixel = clean_ref.get_pixel(x, y);
-            
-            let diff = (pixel[0] as i16 - clean_pixel[0] as i16).abs() +
-                       (pixel[1] as i16 - clean_pixel[1] as i16).abs() +
-                       (pixel[2] as i16 - clean_pixel[2] as i16).abs();
-            
+
+            let diff = (pixel[0] as i16 - clean_pixel[0] as i16).abs()
+                + (pixel[1] as i16 - clean_pixel[1] as i16).abs()
+                + (pixel[2] as i16 - clean_pixel[2] as i16).abs();
+
             if diff > threshold as i16 {
                 mask.put_pixel(x, y, image::Luma([255])); // Foreground
             } else {
                 mask.put_pixel(x, y, image::Luma([0])); // Background
             }
         }
-        
+
         Ok(mask)
     }
 
@@ -118,21 +116,25 @@ impl BackgroundRemover {
     ) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
         let (width, height) = image.dimensions();
         let mut mask = ImageBuffer::new(width, height);
-        
-        let target = na::Vector3::new(key_color[0] as f32, key_color[1] as f32, key_color[2] as f32);
+
+        let target = na::Vector3::new(
+            key_color[0] as f32,
+            key_color[1] as f32,
+            key_color[2] as f32,
+        );
         let dist_threshold = tolerance * 441.6; // Max distance in RGB
-        
+
         for (x, y, pixel) in image.enumerate_pixels() {
             let color = na::Vector3::new(pixel[0] as f32, pixel[1] as f32, pixel[2] as f32);
             let dist = (color - target).norm();
-            
+
             if dist > dist_threshold {
                 mask.put_pixel(x, y, image::Luma([255]));
             } else {
                 mask.put_pixel(x, y, image::Luma([0]));
             }
         }
-        
+
         Ok(mask)
     }
 
@@ -145,27 +147,31 @@ impl BackgroundRemover {
         detect_shadows: bool,
     ) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
         if self.bg_subtractor.is_none() {
-             self.bg_subtractor = Some(
-                opencv::video::create_background_subtractor_mog2(history, var_threshold, detect_shadows)?
-            );
+            self.bg_subtractor = Some(opencv::video::create_background_subtractor_mog2(
+                history,
+                var_threshold,
+                detect_shadows,
+            )?);
         }
-        
+
         let (width, height) = image.dimensions();
         let mat = Mat::from_slice(image.as_raw())?;
         let mat = mat.reshape(3, height as i32)?; // 3 channels
-        
+
         let mut fg_mask = Mat::default();
         if let Some(ref mut bg) = self.bg_subtractor {
             bg.apply(&mat, &mut fg_mask, -1.0)?;
         }
-        
+
         // Convert back to ImageBuffer
         let size = fg_mask.size()?;
         let mut buffer = vec![0u8; (size.width * size.height) as usize];
         fg_mask.copy_to(&mut Mat::from_slice_mut(&mut buffer)?)?;
-        
-        Ok(ImageBuffer::from_raw(size.width as u32, size.height as u32, buffer)
-           .context("Failed to create mask buffer")?)
+
+        Ok(
+            ImageBuffer::from_raw(size.width as u32, size.height as u32, buffer)
+                .context("Failed to create mask buffer")?,
+        )
     }
 
     #[cfg(not(feature = "opencv"))]
@@ -227,9 +233,11 @@ fn gaussian_blur_rgb(
             out.put_pixel(
                 x as u32,
                 y as u32,
-                Rgb([acc[0].round().clamp(0.0, 255.0) as u8,
-                     acc[1].round().clamp(0.0, 255.0) as u8,
-                     acc[2].round().clamp(0.0, 255.0) as u8]),
+                Rgb([
+                    acc[0].round().clamp(0.0, 255.0) as u8,
+                    acc[1].round().clamp(0.0, 255.0) as u8,
+                    acc[2].round().clamp(0.0, 255.0) as u8,
+                ]),
             );
         }
     }

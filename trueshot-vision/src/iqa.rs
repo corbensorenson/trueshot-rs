@@ -1,7 +1,6 @@
 use image::{DynamicImage, GrayImage};
 /// Image Quality Assurance (IQA)
 /// Real-time rejection of bad frames
-
 pub struct IQAChecker {
     thresholds: IqaThresholds,
 }
@@ -14,13 +13,15 @@ impl Default for IQAChecker {
 
 impl IQAChecker {
     pub fn new() -> Self {
-        Self { thresholds: IqaThresholds::from_env() }
+        Self {
+            thresholds: IqaThresholds::from_env(),
+        }
     }
 
     pub fn from_thresholds(thresholds: IqaThresholds) -> Self {
         Self { thresholds }
     }
-    
+
     pub fn check(&self, img: &DynamicImage) -> IQAResult {
         let sharpness = crate::metrics::compute_sharpness(img);
         if sharpness < self.thresholds.min_sharpness {
@@ -29,12 +30,14 @@ impl IQAChecker {
                 sharpness, self.thresholds.min_sharpness
             ));
         }
-        
+
         let gray = img.to_luma8();
         let mut sum = 0u64;
-        for p in gray.pixels() { sum += p[0] as u64; }
+        for p in gray.pixels() {
+            sum += p[0] as u64;
+        }
         let mean = sum as f32 / (gray.width() * gray.height()) as f32;
-        
+
         if mean < self.thresholds.min_brightness {
             return IQAResult::Reject("Underexposed".into());
         }
@@ -49,7 +52,7 @@ impl IQAChecker {
                 piqe_score, self.thresholds.max_piqe_score
             ));
         }
-        
+
         IQAResult::Pass
     }
 }

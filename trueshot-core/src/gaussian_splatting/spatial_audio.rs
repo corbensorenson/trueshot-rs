@@ -151,9 +151,11 @@ impl SoundSource {
             return 0.0;
         }
 
-        // Inverse distance with rolloff
-        let d = (distance - self.min_distance) / (self.max_distance - self.min_distance);
-        1.0 / (1.0 + self.rolloff_factor * d * d)
+        // Web Audio/OpenAL-style inverse distance. Normalizing distance into
+        // [0, 1] made even very distant sources remain near half volume.
+        let min_distance = self.min_distance.max(f32::EPSILON);
+        let rolloff = self.rolloff_factor.max(0.0);
+        min_distance / (min_distance + rolloff * (distance - min_distance))
     }
 
     /// Calculate directional cone attenuation
@@ -667,7 +669,7 @@ mod tests {
 
         // Add source to the right
         let samples = vec![0.5; 1000];
-        let mut source = SoundSource::new_point_source(
+        let source = SoundSource::new_point_source(
             "right",
             "Right Speaker",
             na::Point3::new(2.0, 0.0, 0.0),

@@ -1,9 +1,9 @@
 //! Native Feature Matching - TrueShot's Own Implementation
-//! 
+//!
 //! Provides feature matching without OpenCV dependency.
 //! Implements brute-force matching with ratio test validation.
 
-use crate::features::{NativeFeature, brief::hamming_distance};
+use crate::features::{brief::hamming_distance, NativeFeature};
 
 /// A matched pair of features
 #[derive(Debug, Clone)]
@@ -63,11 +63,12 @@ impl NativeMatcher {
         features2: &[NativeFeature],
     ) -> Vec<Match> {
         use rayon::prelude::*;
-        
+
         let ratio_threshold = self.ratio_threshold;
-        
+
         // Parallel iteration over features1 - 8-16x speedup on modern CPUs!
-        features1.par_iter()
+        features1
+            .par_iter()
             .enumerate()
             .filter_map(|(idx1, f1)| {
                 let mut best_dist = u32::MAX;
@@ -105,7 +106,7 @@ impl NativeMatcher {
                         distance: best_dist,
                     });
                 }
-                
+
                 None
             })
             .collect()
@@ -142,7 +143,8 @@ impl NativeMatcher {
         }
 
         // Compute motion vectors
-        let motions: Vec<(f32, f32)> = matches.iter()
+        let motions: Vec<(f32, f32)> = matches
+            .iter()
             .map(|m| {
                 let f1 = &features1[m.idx1];
                 let f2 = &features2[m.idx2];
@@ -155,15 +157,16 @@ impl NativeMatcher {
         let mut dy_values: Vec<f32> = motions.iter().map(|(_, dy)| *dy).collect();
         dx_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         dy_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         let median_dx = dx_values[dx_values.len() / 2];
         let median_dy = dy_values[dy_values.len() / 2];
 
         // Filter outliers (motion differs too much from median)
         let threshold = 50.0; // pixels
-        
+
         // Pre-compute which indices to keep
-        let keep: Vec<bool> = matches.iter()
+        let keep: Vec<bool> = matches
+            .iter()
             .enumerate()
             .map(|(i, _m)| {
                 let (dx, dy) = motions[i];
@@ -171,7 +174,7 @@ impl NativeMatcher {
                 error < threshold
             })
             .collect();
-        
+
         let mut i = 0;
         matches.retain(|_| {
             let result = keep[i];
