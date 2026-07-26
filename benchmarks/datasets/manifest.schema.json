@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TrueShot Benchmark Dataset Manifest",
+  "type": "object",
+  "required": ["datasets"],
+  "properties": {
+    "datasets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "version",
+          "modality",
+          "capture_protocol",
+          "license",
+          "checksum_sha256",
+          "size_bytes",
+          "download_url"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "modality": { "type": "string", "enum": ["video", "image", "pointcloud", "hybrid"] },
+          "capture_protocol": { "type": "string" },
+          "license": { "type": "string" },
+          "checksum_sha256": { "type": "string" },
+          "size_bytes": { "type": "integer", "minimum": 1 },
+          "download_url": { "type": "string" },
+          "mirrors": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "expected_metrics": {
+            "type": "object",
+            "additionalProperties": { "type": "number" }
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}

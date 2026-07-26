@@ -1,0 +1,3342 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "TrueShot API",
+    "description": "Intelligent 3D scanning and photogrammetry API",
+    "license": {
+      "name": ""
+    },
+    "version": "6.8.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local development"
+    }
+  ],
+  "paths": {
+    "/api/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "operationId": "get_audit",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0
+            }
+          },
+          {
+            "name": "verify",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "boolean",
+              "nullable": true
+            }
+          },
+          {
+            "name": "verify_anchor",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "boolean",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit records",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/auth/bootstrap": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "bootstrap_admin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BootstrapRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Bootstrap complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already initialized"
+          }
+        }
+      }
+    },
+    "/api/auth/bootstrap/status": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "bootstrap_status",
+        "responses": {
+          "200": {
+            "description": "Bootstrap status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BootstrapStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/guest": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "guest_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Guest token issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Login success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/auth/logout_all": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "logout_all",
+        "responses": {
+          "200": {
+            "description": "All sessions revoked",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/pairing/claim": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "pairing_claim",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingClaimRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing claimed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid pairing code"
+          },
+          "429": {
+            "description": "Rate limited"
+          }
+        }
+      }
+    },
+    "/api/auth/pairing/start": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "pairing_start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing code issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingStartResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/api/auth/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "refresh_session",
+        "responses": {
+          "200": {
+            "description": "Session refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/api/auth/session": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "create_session",
+        "responses": {
+          "200": {
+            "description": "Session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "clear_session",
+        "responses": {
+          "200": {
+            "description": "Session cleared",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/auth/tokens": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "list_api_tokens",
+        "responses": {
+          "200": {
+            "description": "API tokens",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiTokenSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "create_api_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "API token created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/auth/tokens/{token_id}": {
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "revoke_api_token",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "description": "Token id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token revoked",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/calibration": {
+      "get": {
+        "tags": [
+          "calibration"
+        ],
+        "operationId": "list_calibrations",
+        "responses": {
+          "200": {
+            "description": "Calibration list",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/calibration/capture": {
+      "post": {
+        "tags": [
+          "calibration"
+        ],
+        "operationId": "capture_calibration_frame",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
+            "name": "camera_index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calibration frame captured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/calibration/compute": {
+      "post": {
+        "tags": [
+          "calibration"
+        ],
+        "operationId": "compute_calibration",
+        "parameters": [
+          {
+            "name": "rows",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "nullable": true
+            }
+          },
+          {
+            "name": "cols",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "nullable": true
+            }
+          },
+          {
+            "name": "square_size_mm",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "format": "float",
+              "nullable": true
+            }
+          },
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calibration result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/calibration/session": {
+      "delete": {
+        "tags": [
+          "calibration"
+        ],
+        "operationId": "clear_calibration_session_delete",
+        "responses": {
+          "200": {
+            "description": "Calibration session cleared",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/calibration/session/clear": {
+      "post": {
+        "tags": [
+          "calibration"
+        ],
+        "operationId": "clear_calibration_session",
+        "responses": {
+          "200": {
+            "description": "Calibration session cleared",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/calibration/{camera_id}": {
+      "get": {
+        "tags": [
+          "calibration"
+        ],
+        "operationId": "get_calibration",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calibration data",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/cameras": {
+      "get": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "get_cameras",
+        "responses": {
+          "200": {
+            "description": "Camera list",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}/autofocus": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "camera_autofocus",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Autofocus triggered",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}/capture": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "capture_photo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Capture complete",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}/config": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "set_camera_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Config updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}/enabled": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "set_camera_enabled",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnabledRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Camera enabled",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}/focus/drive": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "camera_drive_focus",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DriveFocusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Focus drive applied",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}/focus_point": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "camera_focus_point",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FocusPointRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Focus point set",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}/nickname": {
+      "patch": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "update_camera_nickname",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NicknameUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Camera updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}/ptz": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "camera_ptz",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PtzRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "PTZ applied",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/devices": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "Get all devices from all sources",
+        "operationId": "get_all_devices",
+        "responses": {
+          "200": {
+            "description": "Device list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UnifiedDevice"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/devices/batch": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "Batch action on all devices of a type",
+        "operationId": "batch_device_action",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Batch action result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/devices/stats": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "Get device statistics summary",
+        "operationId": "get_device_stats",
+        "responses": {
+          "200": {
+            "description": "Device stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceStats"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/devices/{id}/action": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "device_action",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Action result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/docs": {
+      "get": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Get OpenAPI specification as JSON",
+        "operationId": "get_api_docs",
+        "responses": {
+          "200": {
+            "description": "OpenAPI spec",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/guest/events": {
+      "get": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "List all events",
+        "operationId": "list_events",
+        "responses": {
+          "200": {
+            "description": "Event list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Event"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Create a new event",
+        "operationId": "create_event",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEventRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Event created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/guest/events/{event_id}": {
+      "get": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Get single event",
+        "operationId": "get_event",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Update event",
+        "operationId": "update_event",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEventRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Event updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Delete event",
+        "operationId": "delete_event",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event deleted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/guest/events/{event_id}/activate": {
+      "post": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Activate event",
+        "operationId": "activate_event",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event activated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/guest/events/{event_id}/connect": {
+      "post": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Guest connect",
+        "operationId": "guest_connect",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GuestConnectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Guest connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuestConnectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/guest/events/{event_id}/guests": {
+      "get": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "List guests for event",
+        "operationId": "list_guests",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Guest list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GuestSession"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/guest/events/{event_id}/recording/start": {
+      "post": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Start all recording",
+        "operationId": "start_all_recording",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recording started",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/guest/events/{event_id}/recording/stop": {
+      "post": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Stop all recording",
+        "operationId": "stop_all_recording",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recording stopped",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/guest/events/{event_id}/recordings": {
+      "get": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "List recordings",
+        "operationId": "list_recordings",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recordings list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Recording"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/guest/events/{event_id}/sync": {
+      "get": {
+        "tags": [
+          "guest"
+        ],
+        "summary": "Time sync",
+        "operationId": "time_sync",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Time sync",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimeSyncResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/hardware/scan": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "scan_hardware",
+        "responses": {
+          "200": {
+            "description": "Hardware scan report",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "general"
+        ],
+        "summary": "Health check endpoint",
+        "operationId": "health_check",
+        "responses": {
+          "200": {
+            "description": "Service healthy",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "list_jobs",
+        "responses": {
+          "200": {
+            "description": "Job list",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "submit_job",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Job submitted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/jobs/{id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job detail",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/logs": {
+      "get": {
+        "tags": [
+          "general"
+        ],
+        "summary": "Get recent log entries",
+        "operationId": "get_logs",
+        "responses": {
+          "200": {
+            "description": "Recent log lines",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/logs/export": {
+      "get": {
+        "tags": [
+          "general"
+        ],
+        "operationId": "export_logs",
+        "responses": {
+          "200": {
+            "description": "Log export",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/models": {
+      "get": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "get_projects_legacy",
+        "responses": {
+          "200": {
+            "description": "Project list (legacy)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/phones": {
+      "get": {
+        "tags": [
+          "phones"
+        ],
+        "summary": "List all connected slave phones",
+        "operationId": "list_phones",
+        "responses": {
+          "200": {
+            "description": "Phone list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PhoneSession"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/phones/capture-all": {
+      "post": {
+        "tags": [
+          "phones"
+        ],
+        "summary": "Trigger capture on ALL ready phones",
+        "operationId": "capture_all_phones",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Capture broadcast",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/phones/captures/{capture_id}": {
+      "get": {
+        "tags": [
+          "phones"
+        ],
+        "summary": "Get capture results",
+        "operationId": "get_capture_results",
+        "parameters": [
+          {
+            "name": "capture_id",
+            "in": "path",
+            "description": "Capture id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Capture results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CaptureResult"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/phones/ws": {
+      "get": {
+        "tags": [
+          "phones"
+        ],
+        "summary": "WebSocket endpoint for slave phones",
+        "operationId": "phone_websocket",
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/phones/{phone_id}": {
+      "get": {
+        "tags": [
+          "phones"
+        ],
+        "summary": "Get phone by ID",
+        "operationId": "get_phone",
+        "parameters": [
+          {
+            "name": "phone_id",
+            "in": "path",
+            "description": "Phone id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Phone detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhoneSession"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/phones/{phone_id}/capture": {
+      "post": {
+        "tags": [
+          "phones"
+        ],
+        "summary": "Trigger capture on single phone",
+        "operationId": "capture_phone",
+        "parameters": [
+          {
+            "name": "phone_id",
+            "in": "path",
+            "description": "Phone id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Capture sent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/phones/{phone_id}/resolution": {
+      "post": {
+        "tags": [
+          "phones"
+        ],
+        "summary": "Set resolution for phone",
+        "operationId": "set_phone_resolution",
+        "parameters": [
+          {
+            "name": "phone_id",
+            "in": "path",
+            "description": "Phone id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Resolution set",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "get_projects",
+        "responses": {
+          "200": {
+            "description": "Project list",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "create_project",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Project created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Conflict"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/decrypt": {
+      "post": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "decrypt_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Project decrypted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/encrypt": {
+      "post": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "encrypt_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Project encrypted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/import": {
+      "post": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "import_model",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Import result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/open": {
+      "post": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "open_project_fs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Open project result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/output/{tail}": {
+      "get": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "download_output_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tail",
+            "in": "path",
+            "description": "Output path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Output asset"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/processed/{tail}": {
+      "get": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "download_processed_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tail",
+            "in": "path",
+            "description": "Processed path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Processed asset"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/raw": {
+      "delete": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "purge_project_raw",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw data purged",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/raw/{tail}": {
+      "get": {
+        "tags": [
+          "project"
+        ],
+        "operationId": "download_raw_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tail",
+            "in": "path",
+            "description": "Raw path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw asset"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/scan/capture": {
+      "post": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Trigger single capture at current position",
+        "operationId": "trigger_capture",
+        "responses": {
+          "200": {
+            "description": "Capture triggered",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/scan/execute-step": {
+      "post": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Execute a specific step (for manual progression)",
+        "operationId": "execute_step",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteStepRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Step executed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/scan/progress": {
+      "get": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Get current scan progress",
+        "operationId": "get_scan_progress",
+        "responses": {
+          "200": {
+            "description": "Scan progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanProgress"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/scan/sdcard/import": {
+      "post": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Import images from SD card",
+        "operationId": "import_from_sdcard",
+        "responses": {
+          "200": {
+            "description": "SD card import complete",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/scan/sdcard/status": {
+      "get": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Check for SD card",
+        "operationId": "get_sdcard_status",
+        "responses": {
+          "200": {
+            "description": "SD card status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SDCardStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/scan/start": {
+      "post": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Start scan execution",
+        "operationId": "start_scan",
+        "responses": {
+          "200": {
+            "description": "Scan started",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Conflict"
+          }
+        }
+      }
+    },
+    "/api/scan/stop": {
+      "post": {
+        "tags": [
+          "scan"
+        ],
+        "summary": "Stop/cancel scan",
+        "operationId": "stop_scan",
+        "responses": {
+          "200": {
+            "description": "Scan stopped",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/storage": {
+      "get": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "List connected storage accounts",
+        "operationId": "list_storage",
+        "responses": {
+          "200": {
+            "description": "Storage connections",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StorageConnection"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "storage"
+        ],
+        "operationId": "add_storage",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Storage added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageConnection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/storage/oauth/{provider}/callback": {
+      "get": {
+        "tags": [
+          "storage"
+        ],
+        "operationId": "oauth_callback",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "Provider name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
+            "name": "state",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
+            "name": "error",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OAuth callback processed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        }
+      }
+    },
+    "/api/storage/oauth/{provider}/url": {
+      "get": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "Get OAuth authorization URL",
+        "operationId": "get_oauth_url",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "Provider name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OAuth URL",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        }
+      }
+    },
+    "/api/storage/providers": {
+      "get": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "List available storage providers",
+        "operationId": "list_providers",
+        "responses": {
+          "200": {
+            "description": "Provider list",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/storage/{id}": {
+      "get": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "Get storage connection by ID",
+        "operationId": "get_storage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Storage id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Storage connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageConnection"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "Remove storage connection",
+        "operationId": "remove_storage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Storage id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Storage removed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/storage/{id}/sync": {
+      "post": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "Trigger sync on storage",
+        "operationId": "sync_storage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Storage id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Storage sync started",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/stream/{id}": {
+      "get": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "camera_stream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Camera stream"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/system/stats": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Get system resource statistics",
+        "operationId": "get_system_stats",
+        "responses": {
+          "200": {
+            "description": "System stats",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/turntable/home": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "turntable_home",
+        "responses": {
+          "200": {
+            "description": "Turntable homed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/turntable/rotate": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "turntable_rotate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Rotation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Turntable rotated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/turntable/status": {
+      "get": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "get_turntable_status",
+        "responses": {
+          "200": {
+            "description": "Turntable status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wizard/analyze": {
+      "post": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Trigger AI analysis of detected object",
+        "operationId": "analyze_object",
+        "responses": {
+          "200": {
+            "description": "Object analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectAnalysis"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wizard/background/capture": {
+      "post": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Capture background (360° rotation of empty turntable)",
+        "operationId": "capture_background",
+        "responses": {
+          "200": {
+            "description": "Background capture complete",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wizard/background/status": {
+      "get": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Check if background has been captured",
+        "operationId": "get_background_status",
+        "responses": {
+          "200": {
+            "description": "Background status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackgroundStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wizard/detection/status": {
+      "get": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Get current object detection status (polling endpoint)",
+        "operationId": "get_detection_status",
+        "responses": {
+          "200": {
+            "description": "Detection status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectDetection"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wizard/plan/compute": {
+      "post": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Compute optimal scan plan from analysis + quality level",
+        "operationId": "compute_scan_plan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputePlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Scan plan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanPlan"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wizard/quality": {
+      "get": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Get current quality assessment (polling endpoint)",
+        "operationId": "get_quality_status",
+        "responses": {
+          "200": {
+            "description": "Quality assessment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QualityAssessment"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wizard/quality/history": {
+      "get": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Get recent quality history (polling endpoint)",
+        "operationId": "get_quality_history",
+        "responses": {
+          "200": {
+            "description": "Quality history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/QualityHistoryEntry"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wizard/quality/uncertainty": {
+      "get": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Get latest uncertainty map (PNG)",
+        "operationId": "get_uncertainty_map",
+        "responses": {
+          "200": {
+            "description": "Uncertainty map (PNG)"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/ws": {
+      "get": {
+        "tags": [
+          "websocket"
+        ],
+        "operationId": "ws_index",
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "GET /health - Basic liveness check",
+        "description": "Returns 200 if server is running",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Health response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "GET /ready - Readiness check for load balancers",
+        "description": "Returns 200 only if all subsystems are operational",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "Ready"
+          },
+          "503": {
+            "description": "Not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "general",
+      "description": "General service endpoints"
+    },
+    {
+      "name": "system",
+      "description": "System stats"
+    },
+    {
+      "name": "health",
+      "description": "Health and readiness"
+    },
+    {
+      "name": "audit",
+      "description": "Audit log access"
+    },
+    {
+      "name": "auth",
+      "description": "Authentication and sessions"
+    },
+    {
+      "name": "wizard",
+      "description": "Scan wizard endpoints"
+    },
+    {
+      "name": "scan",
+      "description": "Scan execution"
+    },
+    {
+      "name": "calibration",
+      "description": "Camera calibration"
+    },
+    {
+      "name": "hardware",
+      "description": "Camera/turntable control"
+    },
+    {
+      "name": "devices",
+      "description": "Unified device manager"
+    },
+    {
+      "name": "storage",
+      "description": "Storage providers"
+    },
+    {
+      "name": "project",
+      "description": "Project management"
+    },
+    {
+      "name": "jobs",
+      "description": "Background job queue"
+    },
+    {
+      "name": "guest",
+      "description": "Guest portal events"
+    },
+    {
+      "name": "phones",
+      "description": "Slave phone control"
+    },
+    {
+      "name": "websocket",
+      "description": "Realtime websocket"
+    },
+    {
+      "name": "docs",
+      "description": "API documentation"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=TrueShot
+Comment=High-performance RAW preprocessing pipeline for photogrammetry
+Exec=/path/to/trueshot-rs/TrueShot.sh
+Icon=/path/to/trueshot-rs/assets/trueshot-icon.svg
+Terminal=false
+Categories=Graphics;Photography;
+MimeType=image/x-nikon-nef;image/x-canon-cr2;image/x-canon-cr3;image/x-sony-arw;
+StartupNotify=true
+StartupWMClass=trueshot-gui

@@ -1,0 +1,48 @@
+# TrueShot Docker Compose Configuration
+# Usage: docker compose up -d
+
+services:
+  # Backend API Server
+  api:
+    build:
+      context: .
+      target: runtime
+    container_name: trueshot-api
+    ports:
+      - "3000:3000"
+    environment:
+      - RUST_LOG=info
+      - HOST=0.0.0.0
+      - PORT=3000
+    volumes:
+      - ./data:/app/data
+      - ./captures:/app/captures
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Frontend Development Server (optional)
+  dashboard:
+    image: node:20-bookworm
+    container_name: trueshot-dashboard
+    working_dir: /app
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./trueshot-dashboard:/app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    depends_on:
+      - api
+    profiles:
+      - dev
+
+# Volumes for persistent data
+volumes:
+  data:
+  captures:
+  logs:

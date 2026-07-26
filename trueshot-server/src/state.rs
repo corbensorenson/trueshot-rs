@@ -1,0 +1,49 @@
+use trueshot_device_manager::{Turntable, CameraManager};
+use trueshot_core::events::EventBus;
+use trueshot_core::scheduler::Scheduler;
+use trueshot_core::inventory::Inventory;
+use crate::audit::AuditLog;
+use crate::config::AppConfig;
+use crate::auth::AuthManager;
+use crate::guest::SlavePhoneState;
+use crate::scan_wizard::ScanWizardState;
+use crate::queue::JobQueue;
+use crate::intervalometer::IntervalometerState;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
+use std::path::PathBuf;
+
+pub struct SystemStats {
+    pub cpu_usage: f32,
+    pub memory_used_mb: u64,
+    pub memory_total_mb: u64,
+    pub disk_free_gb: u64,
+}
+
+#[derive(Default)]
+pub struct CalibrationSession {
+    pub captured_frames: Vec<PathBuf>,
+    pub camera_id: Option<String>,
+}
+
+pub struct AppState {
+    pub config: AppConfig,
+    pub auth: Arc<AuthManager>,
+    pub event_bus: Arc<EventBus>,
+    pub scheduler: Arc<Scheduler>,
+    pub job_queue: Arc<JobQueue>,
+    pub camera_manager: Arc<AsyncMutex<CameraManager>>,
+    pub inventory: Arc<Inventory>,
+    pub turntable: Arc<AsyncMutex<Option<Box<dyn Turntable>>>>,
+    pub turntable_status: Arc<Mutex<String>>,
+    pub turntable_moving: Arc<Mutex<bool>>,
+    pub system_stats: Arc<Mutex<SystemStats>>,
+    pub scan_wizard: Arc<AsyncMutex<ScanWizardState>>,
+    pub intervalometer: Arc<AsyncMutex<IntervalometerState>>,
+    pub calibration_session: Arc<AsyncMutex<CalibrationSession>>,
+    pub audit: Arc<AuditLog>,
+    pub license_gate: Arc<Mutex<crate::licensing::LicenseGate>>,
+    pub redis_client: Option<redis::Client>,
+    /// Phone state for guest/slave phone management
+    pub phone_state: Option<Arc<SlavePhoneState>>,
+}

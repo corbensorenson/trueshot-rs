@@ -1,0 +1,99 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+# api_key = "set-a-strong-admin-key"
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+cookie_secure = false
+public_base_url = "http://localhost:3000"
+frontend_base_url = "http://localhost:5173"
+tls_proxy = false
+# hsts_max_age_seconds = 31536000
+# hsts_include_subdomains = true
+# hsts_preload = false
+# telemetry_enabled = false
+# telemetry_otlp_endpoint = "http://localhost:4317"
+# telemetry_sample_ratio = 1.0
+# telemetry_service_name = "trueshot-server"
+# telemetry_service_version = "6.8.0"
+# metrics_enabled = false
+# metrics_path = "/api/metrics"
+# refresh_token_ttl_seconds = 2592000
+# csrf_required = true
+# rate_limit_enabled = true
+# rate_limit_ip_per_minute = 600
+# rate_limit_ip_burst = 120
+# rate_limit_user_per_minute = 1200
+# rate_limit_user_burst = 240
+# job_max_attempts = 3
+# job_retry_interval_seconds = 30
+admin_token_ttl_seconds = 3600
+guest_token_ttl_seconds = 900
+max_upload_bytes = 10737418240
+max_phone_upload_bytes = 26214400
+max_phone_upload_rate_bytes_per_minute = 209715200
+max_project_bytes = 107374182400
+min_free_bytes = 2147483648
+# antivirus_command = "clamscan"
+# antivirus_args = ["--no-summary", "{path}"]
+# redis_url = "redis://127.0.0.1:6379"
+
+[server.tls]
+# cert_path = "./certs/server.crt"
+# key_path = "./certs/server.key"
+
+[paths]
+projects_dir = "./projects"
+inventory_db = "./inventory.redb"
+jobs_db = "./jobs.sqlite"
+auth_db = "./auth.sqlite"
+
+[hardware]
+camera_indices = [0]
+turntable_type = "auto" # options: "mock", "serial", "foldio"
+serial_port = "/dev/tty.usbserial-10" # only for serial
+mock_devices = false
+turntable_diameter_cm = 30.0
+
+[hardware.turntable_feedback]
+# Optional query to read back angle from serial turntables.
+# query_command = "ANGLE?\n"
+# query_timeout_ms = 800
+# max_angle_error_deg = 2.0
+# auto_correct = false
+
+[privacy]
+# Retention controls (set to null to disable)
+retention_raw_days = 30
+retention_processed_days = 180
+retention_output_days = 3650
+audit_log_days = 365
+
+# Optional audit anchoring
+# audit_anchor_url = "https://your-anchor-endpoint.example.com/anchor"
+# audit_anchor_required = false
+# audit_anchor_timeout_seconds = 3
+
+# Audit redaction controls
+# audit_redact_actor = false
+# audit_redact_ip = true
+# audit_redact_resource = false
+# audit_redact_details = true
+# audit_redact_keys = ["token", "access_token", "refresh_token", "api_key", "secret", "password", "authorization"]
+
+# Selective redaction controls
+redact_device_id = false
+redact_operator_id = false
+redact_session_id = false
+redact_capture_hashes = false
+
+# Optional provenance signing key path
+# provenance_key_path = "./projects/_security/provenance.key"
+
+# Encryption master key (32 bytes). Prefer env TRUESHOT_MASTER_KEY (base64).
+# encryption_master_key_path = "/secure/path/trueshot_master.key"
+
+[legal]
+# license_title = "TrueShot Standard License"
+# license_url = "https://example.com/license"
+# data_ownership = "Customer owns captured data and derivatives."
+# export_rights = "Commercial use permitted for exported assets."

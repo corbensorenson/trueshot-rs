@@ -1,0 +1,163 @@
+# Rust build artifacts
+/target/
+**/target/
+Cargo.lock
+
+# Debug builds
+debug/
+release/
+
+# Rust-specific
+**/*.rs.bk
+*.pdb
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# macOS Thumbnails
+._*
+
+# macOS Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.tmp
+*.temp
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Test data and outputs
+/realTest/*
+/test_output/*
+/output/*
+/temp/*
+/tmp/*
+
+# Log files
+*.log
+logs/
+
+# Python cache (if any Python scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Temporary files
+*.tmp
+*.temp
+
+# Application-specific
+*.tiff
+*.tif
+*.jpg
+*.jpeg
+*.png
+*.raw
+*.nef
+*.cr2
+*.arw
+*.dng
+*.orf
+*.rw2
+*.pef
+*.srw
+*.raf
+*.3fr
+*.ari
+*.bay
+*.crw
+*.dcr
+*.dcs
+*.erf
+*.fff
+*.iiq
+*.k25
+*.kdc
+*.mdc
+*.mef
+*.mos
+*.mrw
+*.nrw
+*.ptx
+*.r3d
+*.rwl
+*.rwz
+*.sr2
+*.srf
+*.x3f
+
+# Exclude sample images but allow specific test files if needed
+# Add specific exceptions like:
+# !/test_images/sample.nef
+
+# Build outputs
+*.exe
+*.dll
+*.dylib
+*.so
+
+# Profiling data
+*.prof
+perf.data*
+
+# Coverage reports
+tarpaulin-report.html
+cobertura.xml
+lcov.info

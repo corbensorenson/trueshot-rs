@@ -1,0 +1,62 @@
+{
+  "baseline": {
+    "datasetPath": null,
+    "seqCount": 0,
+    "totalFrames": 0,
+    "bboxCoveragePct": null,
+    "psnrDb": null,
+    "ssim": null,
+    "chamfer": null,
+    "segIou": null,
+    "segDice": null,
+    "gtMatches": null,
+    "meshMatches": null,
+    "segMatches": null,
+    "meanLoadMs": 0,
+    "minLoadMs": 0,
+    "maxLoadMs": 0,
+    "sumLoadMs": 0,
+    "timings": {}
+  },
+  "current": {
+    "datasetPath": "realTest",
+    "seqCount": 1,
+    "totalFrames": 21,
+    "bboxCoveragePct": 3.737485122173213,
+    "psnrDb": null,
+    "ssim": null,
+    "chamfer": null,
+    "segIou": null,
+    "segDice": null,
+    "gtMatches": 0,
+    "meshMatches": 0,
+    "segMatches": 0,
+    "meanLoadMs": 24560.116833,
+    "minLoadMs": 24560.116833,
+    "maxLoadMs": 24560.116833,
+    "sumLoadMs": 24560.116833,
+    "timings": {}
+  },
+  "comparison": {
+    "baseline": "benchmarks/results/realtest_compare_20260207T235223Z.json",
+    "current": "benchmarks/results/realtest_20260208T082507Z.json",
+    "deltas": {
+      "seqCount": 1,
+      "totalFrames": 21,
+      "bboxCoveragePct": null,
+      "psnrDb": null,
+      "ssim": null,
+      "chamfer": null,
+      "segIou": null,
+      "segDice": null,
+      "gtMatches": null,
+      "meshMatches": null,
+      "segMatches": null,
+      "meanLoadMs": 24560.116833,
+      "minLoadMs": 24560.116833,
+      "maxLoadMs": 24560.116833,
+      "sumLoadMs": 24560.116833
+    },
+    "timingDeltas": {}
+  }
+}

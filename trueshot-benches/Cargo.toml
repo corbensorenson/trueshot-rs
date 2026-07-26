@@ -1,0 +1,27 @@
+[package]
+name = "trueshot-benches"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+criterion = "0.5"
+trueshot-core = { path = "../trueshot-core" }
+nalgebra = "0.32"
+uuid = { version = "1.4", features = ["v4"] }
+
+[[bench]]
+name = "heatmap_benchmark"
+harness = false
+
+[[bench]]
+name = "pipeline_bench"
+harness = false
+
+[[bench]]
+name = "gaussian_splatting_bench"
+harness = false
+
+[[bench]]
+name = "unified_bench"
+harness = false

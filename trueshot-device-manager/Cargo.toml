@@ -1,0 +1,44 @@
+[package]
+name = "trueshot-device-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Common
+anyhow = "1.0"
+tracing = "0.1"
+tokio = { version = "1.0", features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6.0.0" 
+cpal = "0.15"
+
+# Camera (nokhwa, gphoto2, usb)
+nokhwa = { version = "0.10.10", features = ["input-avfoundation"] } # macOS primary
+image = "0.25"
+gphoto2 = { version = "3", optional = true }
+
+# Turntable (BLE, Serial)
+async-trait = "0.1"
+serialport = "4.2"
+btleplug = "0.10"
+uuid = { version = "1.0", features = ["v4"] }
+futures = "0.3"
+
+# Calibration
+opencv = { version = "0.94.2", optional = true } 
+nalgebra = "0.32"
+parking_lot = "0.12"
+sysinfo = "0.37.2"
+walkdir = "2.5"
+rust-s3 = "0.33"
+
+[features]
+default = []
+opencv = ["dep:opencv"]
+real_cam = ["gphoto2"]
+calibration = ["opencv"]
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

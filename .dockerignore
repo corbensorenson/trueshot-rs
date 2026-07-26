@@ -1,0 +1,49 @@
+# Docker ignore file for faster builds
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Node modules
+node_modules/
+**/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Tests
+**/tests/
+**/test/
+**/__tests__/
+
+# Development files
+*.log
+.env.local
+.env.development
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Examples
+examples/
+realTest/
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+venv/

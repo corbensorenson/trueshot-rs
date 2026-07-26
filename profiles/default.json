@@ -1,0 +1,33 @@
+{
+  "name": "Default",
+  "description": "Profile updated from GUI",
+  "config": {
+    "pre_cropping": true,
+    "background_removal": false,
+    "early_burst_collapse": true,
+    "inner_focus_group_alignment": false,
+    "gpu_acceleration": false,
+    "create_depth_map": false,
+    "fusion_mode": "qif",
+    "alignment_method": "phase_correlation",
+    "burst_selection_method": "sharpness",
+    "focus_fusion_method": "laplacian",
+    "hdr_fusion_method": "mertens",
+    "demosaic_algorithm": "amaze",
+    "warp_interpolation": "bilinear",
+    "tone_mapping": "none",
+    "white_balance": "none",
+    "noise_reduction": false,
+    "sharpening": false,
+    "output_format": "tiff16",
+    "compression": "lzw",
+    "preserve_metadata": true,
+    "crop_margin": 0.05,
+    "alignment_tolerance": 0.1,
+    "max_warp_displacement": 50,
+    "quality_threshold": 0.8,
+    "parallel_workers": 0,
+    "memory_limit_gb": 8,
+    "temp_directory": "output/temp"
+  }
+}

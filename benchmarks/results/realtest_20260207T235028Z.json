@@ -1,0 +1,28 @@
+{
+  "dataset_path": "realTest",
+  "timestamp_utc": "2026-02-07T23:51:12.135983+00:00",
+  "nef_count": 21,
+  "sequence_count": 1,
+  "total_frames_loaded": 21,
+  "bbox_coverage_pct": 3.737485122173213,
+  "full_width": 8280,
+  "full_height": 5520,
+  "psnr_db": null,
+  "ssim": null,
+  "chamfer": 0.011499875028892432,
+  "gt_matches": 0,
+  "mesh_matches": 1,
+  "sequences": [
+    {
+      "id": "_Z9Z5338",
+      "frame_count": 21,
+      "load_total_ms": 27682.138875,
+      "timings": {},
+      "psnr_db": null,
+      "ssim": null,
+      "chamfer": 0.011499875028892432,
+      "gt_matches": 0,
+      "mesh_matches": 1
+    }
+  ]
+}

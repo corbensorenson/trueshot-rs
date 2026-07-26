@@ -1,0 +1,14 @@
+# Clippy configuration for stricter linting
+# Run: cargo clippy --workspace -- -D warnings
+
+# Allow common patterns
+allow-unwrap-in-tests = true
+
+# Linting toggles
+avoid-breaking-exported-api = true
+msrv = "1.70"
+
+# Complexity thresholds
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250

@@ -1,0 +1,41 @@
+{
+  "datasets": [
+    {
+      "id": "ts-studio-objects",
+      "name": "Studio Objects v1",
+      "version": "1.0.0",
+      "modality": "image",
+      "capture_protocol": "turntable_36x4_lightingA",
+      "license": "CC-BY-4.0",
+      "checksum_sha256": "REPLACE_WITH_SHA256",
+      "size_bytes": 1234567890,
+      "download_url": "https://example.com/trueshot/datasets/studio-objects-v1.tar.zst",
+      "mirrors": [
+        "https://mirror.example.com/trueshot/studio-objects-v1.tar.zst"
+      ],
+      "expected_metrics": {
+        "chamfer_distance_mm": 1.2,
+        "psnr_db": 34.0,
+        "ssim": 0.92
+      },
+      "notes": "Standard studio capture set for fidelity baselines."
+    },
+    {
+      "id": "ts-event-multi-view",
+      "name": "Event Multi-View v1",
+      "version": "1.0.0",
+      "modality": "video",
+      "capture_protocol": "crowd_phones_12_views_30fps",
+      "license": "CC-BY-NC-4.0",
+      "checksum_sha256": "REPLACE_WITH_SHA256",
+      "size_bytes": 9876543210,
+      "download_url": "https://example.com/trueshot/datasets/event-multiview-v1.tar.zst",
+      "expected_metrics": {
+        "point_drift_mm_per_min": 2.5,
+        "frame_to_frame_jitter_mm": 1.1,
+        "pipeline_failure_rate_pct": 1.0
+      },
+      "notes": "Crowd-sourced capture for temporal stability and robustness."
+    }
+  ]
+}

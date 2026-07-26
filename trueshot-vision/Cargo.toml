@@ -1,0 +1,33 @@
+[package]
+name = "trueshot-vision"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Enable OpenCV for legacy modules (cv, sfm, pose, tracker, background)
+opencv = ["dep:opencv"]
+# Enable verbose logging in geometry modules
+logging = []
+# Enable all features including OpenCV
+full = ["opencv", "logging"]
+
+[dependencies]
+image = "0.25"
+nalgebra = "0.32"
+rayon = "1.7"
+anyhow = "1.0"
+log = "0.4"
+rand = "0.8"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+rxing = "0.4"
+
+# OpenCV is now optional - native implementations don't need it
+opencv = { version = "0.96", features = ["imgproc", "highgui", "videoio", "calib3d", "features2d", "objdetect", "video", "dnn"], optional = true }
+
+[dev-dependencies]
+trueshot-core = { path = "../trueshot-core" }

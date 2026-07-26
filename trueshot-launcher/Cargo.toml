@@ -1,0 +1,12 @@
+[package]
+name = "trueshot-launcher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+webbrowser = "0.8"
+colored = "2.0"
+indicatif = "0.17"
+fs_extra = "1.3"
+which = "4.4"

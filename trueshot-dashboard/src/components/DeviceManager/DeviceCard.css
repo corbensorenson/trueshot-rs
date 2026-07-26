@@ -1,0 +1,106 @@
+.device-card {
+    background: var(--ts-surface-elevated);
+    border: 1px solid var(--ts-border);
+    border-radius: 12px;
+    padding: 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.device-card:hover {
+    background: color-mix(in srgb, var(--ts-surface) 92%, transparent);
+    border-color: var(--ts-border-strong);
+    transform: translateY(-2px);
+}
+
+.device-card.selected {
+    border-color: var(--ts-accent-blue);
+    background: color-mix(in srgb, var(--ts-accent-blue) 16%, transparent);
+}
+
+.device-card.disabled {
+    opacity: 0.5;
+}
+
+.device-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.device-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.device-connection {
+    color: var(--ts-muted);
+}
+
+.device-card-body {
+    flex: 1;
+}
+
+.device-name {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ts-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.device-model {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: var(--ts-muted);
+}
+
+.device-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+.status-label {
+    font-size: 12px;
+    color: color-mix(in srgb, var(--ts-text) 72%, transparent);
+}
+
+.device-card-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.device-toggle,
+.device-capture {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    border: none;
+    background: var(--ts-surface-muted);
+    color: var(--ts-text);
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.device-toggle:hover,
+.device-capture:hover {
+    background: color-mix(in srgb, var(--ts-text) 16%, transparent);
+}

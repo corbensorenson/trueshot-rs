@@ -1,0 +1,50 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+cookie_secure = true
+allowed_origins = ["https://dashboard.example.com"]
+public_base_url = "https://api.example.com"
+frontend_base_url = "https://dashboard.example.com"
+tls_proxy = true
+csrf_required = true
+rate_limit_enabled = true
+rate_limit_ip_per_minute = 600
+rate_limit_ip_burst = 120
+rate_limit_user_per_minute = 1200
+rate_limit_user_burst = 240
+metrics_enabled = true
+metrics_path = "/api/metrics"
+admin_token_ttl_seconds = 3600
+guest_token_ttl_seconds = 900
+max_upload_bytes = 10737418240
+max_phone_upload_bytes = 26214400
+max_phone_upload_rate_bytes_per_minute = 209715200
+max_project_bytes = 107374182400
+min_free_bytes = 2147483648
+redis_url = "redis://127.0.0.1:6379"
+
+[server.tls]
+# cert_path = "/etc/trueshot/tls/server.crt"
+# key_path = "/etc/trueshot/tls/server.key"
+
+[paths]
+projects_dir = "./projects"
+inventory_db = "./inventory.redb"
+jobs_db = "./jobs.sqlite"
+auth_db = "./auth.sqlite"
+
+[privacy]
+audit_anchor_url = "https://anchor.example.com/anchor"
+audit_anchor_required = true
+audit_anchor_timeout_seconds = 3
+encrypt_at_rest = true
+encrypt_scopes = ["raw", "processed", "output"]
+encrypt_min_age_seconds = 60
+encrypt_sweep_interval_seconds = 300
+# encryption_master_key_path = "/etc/trueshot/master.key"
+
+[legal]
+license_title = "TrueShot Enterprise License"
+license_url = "https://example.com/license"
+data_ownership = "Customer owns captured data and derivatives."
+export_rights = "Commercial use permitted for exported assets."
