@@ -32,7 +32,9 @@ impl SegmentationEngine {
     pub fn new(model_path: &str) -> anyhow::Result<Self> {
         let path = model_path.trim();
         if path.is_empty() {
-            return Ok(Self { backend: SegmentationBackend::Heuristic });
+            return Ok(Self {
+                backend: SegmentationBackend::Heuristic,
+            });
         }
 
         let model_path = Path::new(path);
@@ -85,10 +87,7 @@ impl SegmentationEngine {
                 }
             })?;
 
-        let input = session
-            .inputs
-            .get(0)
-            .context("ONNX model has no inputs")?;
+        let input = session.inputs.get(0).context("ONNX model has no inputs")?;
         let input_name = input.name.clone();
         let layout = infer_layout(&input.input_type);
         let (target_width, target_height) = infer_target_dimensions(&input.input_type, layout);
@@ -183,7 +182,8 @@ fn run_onnx_segmentation(
     let mut mask = build_mask_from_output(shape, data)?;
 
     if mask.dimensions() != (orig_w, orig_h) {
-        mask = image::imageops::resize(&mask, orig_w, orig_h, image::imageops::FilterType::Lanczos3);
+        mask =
+            image::imageops::resize(&mask, orig_w, orig_h, image::imageops::FilterType::Lanczos3);
     }
 
     Ok(mask)
@@ -305,7 +305,11 @@ fn build_mask_from_output(shape: &ort::tensor::Shape, data: &[f32]) -> anyhow::R
     let mut values = vec![0.0f32; height * width];
     for idx in 0..values.len() {
         let raw = data.get(idx).copied().unwrap_or(0.0);
-        values[idx] = if use_sigmoid { 1.0 / (1.0 + (-raw).exp()) } else { raw };
+        values[idx] = if use_sigmoid {
+            1.0 / (1.0 + (-raw).exp())
+        } else {
+            raw
+        };
     }
 
     let threshold = otsu_threshold(&values);
@@ -338,7 +342,10 @@ fn infer_layout(value_type: &ValueType) -> ModelLayout {
     }
 }
 
-fn infer_target_dimensions(value_type: &ValueType, layout: ModelLayout) -> (Option<u32>, Option<u32>) {
+fn infer_target_dimensions(
+    value_type: &ValueType,
+    layout: ModelLayout,
+) -> (Option<u32>, Option<u32>) {
     if let ValueType::Tensor { shape, .. } = value_type {
         if shape.len() == 4 {
             let (h, w) = match layout {
@@ -417,8 +424,7 @@ fn sobel_magnitude(luma: &[f32], width: usize, height: usize) -> Vec<f32> {
     let idx = |x: usize, y: usize| y * width + x;
     for y in 1..height - 1 {
         for x in 1..width - 1 {
-            let gx = -1.0 * luma[idx(x - 1, y - 1)]
-                + 1.0 * luma[idx(x + 1, y - 1)]
+            let gx = -1.0 * luma[idx(x - 1, y - 1)] + 1.0 * luma[idx(x + 1, y - 1)]
                 - 2.0 * luma[idx(x - 1, y)]
                 + 2.0 * luma[idx(x + 1, y)]
                 - 1.0 * luma[idx(x - 1, y + 1)]

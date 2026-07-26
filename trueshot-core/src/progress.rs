@@ -1,26 +1,26 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 /// Progress tracking and runtime prediction system
 ///
 /// This module provides centralized progress tracking that can be used by both
 /// GUI and CLI interfaces, along with runtime prediction based on system resources.
-/// 
+///
 /// Also provides `CancellationToken` for cancelling long-running operations.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use sysinfo::{Disks, DiskKind, MemoryRefreshKind, RefreshKind, System};
+use sysinfo::{DiskKind, Disks, MemoryRefreshKind, RefreshKind, System};
 
 // ============================================================================
 // Cancellation Token
 // ============================================================================
 
 /// A token for cancelling long-running operations
-/// 
+///
 /// # Example
 /// ```ignore
 /// let token = CancellationToken::new();
-/// 
+///
 /// // Start long operation in background
 /// let token_clone = token.clone();
 /// std::thread::spawn(move || {
@@ -31,7 +31,7 @@ use sysinfo::{Disks, DiskKind, MemoryRefreshKind, RefreshKind, System};
 ///         // Do work...
 ///     }
 /// });
-/// 
+///
 /// // Cancel from main thread
 /// token.cancel();
 /// ```
@@ -47,29 +47,29 @@ impl CancellationToken {
             cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
-    
+
     /// Cancel the operation
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
-    
+
     /// Check if cancellation has been requested
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
-    
+
     /// Reset the token (for reuse)
     pub fn reset(&self) {
         self.cancelled.store(false, Ordering::SeqCst);
     }
-    
+
     /// Create a child token that shares cancellation state
     pub fn child(&self) -> CancellationToken {
         Self {
             cancelled: Arc::clone(&self.cancelled),
         }
     }
-    
+
     /// Check cancellation and return error if cancelled
     pub fn check(&self) -> Result<(), crate::error::TrueShotError> {
         if self.is_cancelled() {
@@ -239,7 +239,8 @@ impl RuntimePredictor {
         }
 
         // Find stats with similar system resources
-        let similar_stats: Vec<_> = stats.iter()
+        let similar_stats: Vec<_> = stats
+            .iter()
             .filter(|s| self.is_similar_system(&s.system_resources))
             .collect();
 
@@ -263,12 +264,13 @@ impl RuntimePredictor {
         // Consider systems similar if they have similar specs
         let cpu_diff = (self.current_resources.cpu_cores as f32 - other.cpu_cores as f32).abs();
         let memory_diff = (self.current_resources.memory_gb - other.memory_gb).abs();
-        
+
         cpu_diff <= 2.0 && memory_diff <= 4.0
     }
 
     fn detect_system_resources() -> SystemResources {
-        let mut sys = System::new_with_specifics(RefreshKind::new().with_memory(MemoryRefreshKind::new()));
+        let mut sys =
+            System::new_with_specifics(RefreshKind::new().with_memory(MemoryRefreshKind::new()));
         sys.refresh_memory();
 
         let total_memory_kb = sys.total_memory() as f32;
@@ -302,7 +304,11 @@ fn detect_storage_type() -> StorageType {
         if let Some(dir) = cwd.as_ref() {
             if dir.starts_with(mount) {
                 let len = mount_str.len();
-                if best_match.as_ref().map(|(best_len, _)| len > *best_len).unwrap_or(true) {
+                if best_match
+                    .as_ref()
+                    .map(|(best_len, _)| len > *best_len)
+                    .unwrap_or(true)
+                {
                     best_match = Some((len, disk.kind()));
                 }
             }
@@ -311,7 +317,11 @@ fn detect_storage_type() -> StorageType {
 
     let kind = match best_match {
         Some((_, kind)) => kind,
-        None => disks.list().first().map(|d| d.kind()).unwrap_or(DiskKind::Unknown(0)),
+        None => disks
+            .list()
+            .first()
+            .map(|d| d.kind())
+            .unwrap_or(DiskKind::Unknown(0)),
     };
 
     match kind {
@@ -342,7 +352,7 @@ impl ProgressTracker {
 
     pub fn start_phase(&self, phase: ProcessingPhase, total: u64, message: String) {
         let progress = PhaseProgress::new(phase, total, message);
-        
+
         // Update current phase
         {
             let mut current = self.current_phase.lock().unwrap();
@@ -352,7 +362,11 @@ impl ProgressTracker {
         // Notify callbacks
         self.notify_callbacks(&progress);
 
-        tracing::info!("=== PHASE {}: {} ===", progress.phase.phase_number(), progress.phase.name());
+        tracing::info!(
+            "=== PHASE {}: {} ===",
+            progress.phase.phase_number(),
+            progress.phase.name()
+        );
         tracing::info!("{}", progress.message);
     }
 
@@ -397,14 +411,16 @@ impl ProgressTracker {
                     phase: progress.phase.clone(),
                     duration: progress.elapsed(),
                     items_processed: progress.total,
-                    memory_peak_mb: 0.0, // Would be tracked during processing
+                    memory_peak_mb: 0.0,    // Would be tracked during processing
                     cpu_usage_percent: 0.0, // Would be tracked during processing
                     system_resources: RuntimePredictor::detect_system_resources(),
                 };
 
-                tracing::info!("Phase {} completed in {:.2}s", 
-                          progress.phase.name(), 
-                          stats.duration.as_secs_f32());
+                tracing::info!(
+                    "Phase {} completed in {:.2}s",
+                    progress.phase.name(),
+                    stats.duration.as_secs_f32()
+                );
 
                 Some(stats)
             } else {
@@ -422,9 +438,9 @@ impl ProgressTracker {
         self.current_phase.lock().unwrap().clone()
     }
 
-    pub fn add_callback<F>(&self, callback: F) 
-    where 
-        F: Fn(&PhaseProgress) + Send + Sync + 'static 
+    pub fn add_callback<F>(&self, callback: F)
+    where
+        F: Fn(&PhaseProgress) + Send + Sync + 'static,
     {
         let mut callbacks = self.callbacks.lock().unwrap();
         callbacks.push(Box::new(callback));
@@ -470,9 +486,9 @@ pub fn get_current_progress() -> Option<PhaseProgress> {
     PROGRESS_TRACKER.get_current_progress()
 }
 
-pub fn add_progress_callback<F>(callback: F) 
-where 
-    F: Fn(&PhaseProgress) + Send + Sync + 'static 
+pub fn add_progress_callback<F>(callback: F)
+where
+    F: Fn(&PhaseProgress) + Send + Sync + 'static,
 {
     PROGRESS_TRACKER.add_callback(callback);
 }
@@ -514,7 +530,7 @@ impl OperationPreview {
             format!("{:.1} hours", hours)
         }
     }
-    
+
     /// Format memory as human-readable string
     pub fn format_memory(&self) -> String {
         if self.estimated_memory_mb < 1024.0 {
@@ -523,7 +539,7 @@ impl OperationPreview {
             format!("{:.1} GB", self.estimated_memory_mb / 1024.0)
         }
     }
-    
+
     /// Format disk space as human-readable string
     pub fn format_disk(&self) -> String {
         if self.estimated_disk_mb < 1024.0 {
@@ -532,7 +548,7 @@ impl OperationPreview {
             format!("{:.1} GB", self.estimated_disk_mb / 1024.0)
         }
     }
-    
+
     /// Get a summary suitable for display
     pub fn summary(&self) -> String {
         format!(
@@ -550,7 +566,7 @@ impl OperationPreview {
 pub trait ProgressAware {
     /// Get an estimate of what this operation will do before running it
     fn estimate(&self) -> OperationPreview;
-    
+
     /// Get a cancellation token for this operation
     fn cancellation_token(&self) -> Option<CancellationToken> {
         None
@@ -565,19 +581,19 @@ impl OperationEstimator {
     pub fn estimate_burst_collapse(num_frames: usize, resolution: (u32, u32)) -> OperationPreview {
         let pixels = resolution.0 as f64 * resolution.1 as f64;
         let megapixels = pixels / 1_000_000.0;
-        
+
         // Empirical: ~0.5s per frame per megapixel on modern CPU
         let seconds_per_frame = megapixels * 0.5;
         let total_seconds = seconds_per_frame * num_frames as f64;
-        
+
         // Memory: ~16 bytes per pixel per frame in memory
         let memory_mb = (pixels * num_frames as f64 * 16.0) / (1024.0 * 1024.0);
-        
+
         OperationPreview {
             name: "Burst Collapse".to_string(),
             estimated_seconds: total_seconds,
             estimated_memory_mb: memory_mb.min(16384.0), // Cap at 16GB estimate
-            estimated_disk_mb: megapixels * 3.0, // Output size
+            estimated_disk_mb: megapixels * 3.0,         // Output size
             item_count: num_frames,
             uses_gpu: false,
             phases: vec![
@@ -588,17 +604,20 @@ impl OperationEstimator {
             ],
         }
     }
-    
+
     /// Estimate time for 3D Gaussian Splatting training
-    pub fn estimate_gaussian_splatting(num_images: usize, target_gaussians: usize) -> OperationPreview {
+    pub fn estimate_gaussian_splatting(
+        num_images: usize,
+        target_gaussians: usize,
+    ) -> OperationPreview {
         // Empirical: ~30s per 1000 images + ~0.001s per gaussian per iteration
         let base_time = num_images as f64 * 0.03;
         let training_time = target_gaussians as f64 * 0.001 * 30000.0; // 30k iterations
         let total_seconds = base_time + training_time;
-        
+
         // Memory: ~24 bytes per gaussian
         let memory_mb = (target_gaussians as f64 * 24.0) / (1024.0 * 1024.0) + 2048.0; // + base GPU memory
-        
+
         OperationPreview {
             name: "3D Gaussian Splatting".to_string(),
             estimated_seconds: total_seconds,
@@ -615,15 +634,18 @@ impl OperationEstimator {
             ],
         }
     }
-    
+
     /// Estimate time for mesh generation from gaussians
-    pub fn estimate_mesh_extraction(num_gaussians: usize, grid_resolution: usize) -> OperationPreview {
+    pub fn estimate_mesh_extraction(
+        num_gaussians: usize,
+        grid_resolution: usize,
+    ) -> OperationPreview {
         // Empirical: marching cubes is O(n^3) for grid size
         let voxels = (grid_resolution * grid_resolution * grid_resolution) as f64;
         let seconds = voxels * 0.0000001 + num_gaussians as f64 * 0.00001;
-        
+
         let memory_mb = (voxels * 4.0) / (1024.0 * 1024.0) + 512.0;
-        
+
         OperationPreview {
             name: "Mesh Extraction".to_string(),
             estimated_seconds: seconds,
@@ -639,20 +661,20 @@ impl OperationEstimator {
             ],
         }
     }
-    
+
     /// Estimate time for avatar capture
     pub fn estimate_avatar_capture(num_frames: usize, resolution: (u32, u32)) -> OperationPreview {
         let megapixels = (resolution.0 * resolution.1) as f64 / 1_000_000.0;
-        
+
         // Empirical: ~0.1s per frame for pose estimation + landmark detection
         let per_frame = 0.1 + megapixels * 0.05;
         let total_seconds = per_frame * num_frames as f64 + 30.0; // + rigging time
-        
+
         OperationPreview {
             name: "Avatar Capture".to_string(),
             estimated_seconds: total_seconds,
             estimated_memory_mb: 4096.0, // Neural networks
-            estimated_disk_mb: 50.0, // VRM file
+            estimated_disk_mb: 50.0,     // VRM file
             item_count: num_frames,
             uses_gpu: true,
             phases: vec![
@@ -664,7 +686,7 @@ impl OperationEstimator {
             ],
         }
     }
-    
+
     /// Estimate time for photogrammetry
     pub fn estimate_photogrammetry(num_images: usize, quality: &str) -> OperationPreview {
         let quality_multiplier = match quality {
@@ -674,15 +696,15 @@ impl OperationEstimator {
             "ultra" => 4.0,
             _ => 1.0,
         };
-        
+
         // Empirical: ~2s per image for feature extraction + O(n^2) matching
         let feature_time = num_images as f64 * 2.0 * quality_multiplier;
         let matching_time = (num_images * num_images) as f64 * 0.01 * quality_multiplier;
         let sfm_time = num_images as f64 * 5.0;
         let mvs_time = num_images as f64 * 30.0 * quality_multiplier;
-        
+
         let total_seconds = feature_time + matching_time + sfm_time + mvs_time;
-        
+
         OperationPreview {
             name: format!("Photogrammetry ({})", quality),
             estimated_seconds: total_seconds,
@@ -705,20 +727,20 @@ impl OperationEstimator {
 #[cfg(test)]
 mod estimation_tests {
     use super::*;
-    
+
     #[test]
     fn test_operation_preview_formatting() {
         let preview = OperationEstimator::estimate_burst_collapse(10, (4000, 3000));
-        
+
         assert!(!preview.format_duration().is_empty());
         assert!(!preview.format_memory().is_empty());
         assert!(!preview.summary().is_empty());
     }
-    
+
     #[test]
     fn test_gaussian_splatting_estimate() {
         let preview = OperationEstimator::estimate_gaussian_splatting(100, 100_000);
-        
+
         assert!(preview.estimated_seconds > 0.0);
         assert!(preview.uses_gpu);
         assert_eq!(preview.item_count, 100);

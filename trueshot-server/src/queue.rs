@@ -320,7 +320,6 @@ impl QueueObserver {
         }
     }
 }
-}
 
 impl SchedulerObserver for QueueObserver {
     fn on_job_update(&self, job: JobInfo) {

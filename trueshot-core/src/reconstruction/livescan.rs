@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use nalgebra as na;
-use std::path::Path;
-use anyhow::Result;
 use crate::reconstruction::multicam_sfm::{CameraIntrinsics as SfmIntrinsics, CameraPose};
+use anyhow::Result;
+use nalgebra as na;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use trueshot_sfm::{CameraMotion, RollingShutterModel};
 
 /// Data format captured during a "Live Scan" session.
@@ -157,7 +157,7 @@ impl LiveScanData {
 
         for (i, frame) in self.frames.iter().enumerate() {
             let mat = na::Matrix4::from_fn(|r, c| frame.transform_matrix[r][c] as f64);
-            
+
             let pose_mat = match self.transform_convention {
                 TransformConvention::CameraToWorld => mat,
                 TransformConvention::WorldToCamera => match mat.try_inverse() {
@@ -173,7 +173,8 @@ impl LiveScanData {
             let translation = pose_mat.fixed_view::<3, 1>(0, 3);
             let rotation_64 = na::Matrix3::from_fn(|r, c| rotation[(r, c)] as f64);
             let translation_64 = na::Vector3::from_fn(|r, c| translation[(r, c)] as f64);
-            let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_matrix(&rotation_64));
+            let q =
+                na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_matrix(&rotation_64));
 
             let camera_motion = self.imu_motion_for_timestamp(frame.timestamp);
             frames.push(PosePriorFrame {
@@ -221,7 +222,10 @@ impl LiveScanData {
             sum_gyro / count as f64
         } else {
             let nearest = self.imu_samples.iter().min_by(|a, b| {
-                (a.timestamp - timestamp).abs().partial_cmp(&(b.timestamp - timestamp).abs()).unwrap()
+                (a.timestamp - timestamp)
+                    .abs()
+                    .partial_cmp(&(b.timestamp - timestamp).abs())
+                    .unwrap()
             })?;
             na::Vector3::new(nearest.gyro[0], nearest.gyro[1], nearest.gyro[2])
         };

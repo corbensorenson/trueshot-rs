@@ -1,28 +1,29 @@
 //! License Manager
-//! 
+//!
 //! Handles license loading, verification, activation, and feature checking.
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use chrono::DateTime;
+use chrono::Utc;
+use ed25519_dalek::VerifyingKey;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::{env, fs};
-use chrono::Utc;
 use tracing::{info, warn};
-use ed25519_dalek::VerifyingKey;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use sha2::{Digest, Sha256};
-use chrono::DateTime;
 
 use super::{
-    DeviceFingerprint, License, LicenseTier, LicenseFeatures, ActivatedDevice,
-    LicenseError, Feature,
-    license::LicensePayload,
     integrity::{IntegrityChecker, IntegrityStatus},
+    license::LicensePayload,
+    ActivatedDevice, DeviceFingerprint, Feature, License, LicenseError, LicenseFeatures,
+    LicenseTier,
 };
 
 /// Embedded public key for license verification
-/// 
+///
 /// This key is used to verify license signatures offline.
 /// The corresponding private key is kept secure on the license server.
-/// 
+///
 /// NOTE: Generate a real key pair for production using:
 /// ```ignore
 /// use ed25519_dalek::SigningKey;
@@ -33,10 +34,8 @@ use super::{
 const PUBLIC_KEY_BYTES: [u8; 32] = [
     // Embed a production public key for offline verification.
     // In release builds, missing keys are rejected; use env overrides for staging.
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
 /// License manager handles all licensing operations
@@ -61,17 +60,29 @@ pub struct TrialInfo {
     pub days_remaining: Option<i64>,
 }
 
+#[derive(Debug, Serialize)]
+struct ActivationRequest {
+    license_key: String,
+    device_hash: String,
+    device_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivationResponse {
+    license_json: String,
+    device_name: Option<String>,
+}
+
 impl LicenseManager {
     /// Create a new license manager
     pub fn new() -> Result<Self, LicenseError> {
-        let public_key = load_public_key_override()?
-            .or_else(|| {
-                if PUBLIC_KEY_BYTES == [0u8; 32] {
-                    None
-                } else {
-                    VerifyingKey::from_bytes(&PUBLIC_KEY_BYTES).ok()
-                }
-            });
+        let public_key = load_public_key_override()?.or_else(|| {
+            if PUBLIC_KEY_BYTES == [0u8; 32] {
+                None
+            } else {
+                VerifyingKey::from_bytes(&PUBLIC_KEY_BYTES).ok()
+            }
+        });
 
         let dev_mode = dev_mode_enabled();
         if dev_mode {
@@ -80,10 +91,10 @@ impl LicenseManager {
         if public_key.is_none() && !dev_mode {
             return Err(LicenseError::MissingPublicKey);
         }
-        
+
         let device = DeviceFingerprint::generate();
         let cache_path = Self::default_cache_path();
-        
+
         let mut manager = Self {
             public_key,
             current_license: None,
@@ -91,13 +102,13 @@ impl LicenseManager {
             cache_path,
             dev_mode,
         };
-        
+
         // Try to load cached license
         let _ = manager.load_cached_license();
-        
+
         Ok(manager)
     }
-    
+
     /// Create license manager with custom cache path
     pub fn with_cache_path(cache_path: PathBuf) -> Result<Self, LicenseError> {
         let mut manager = Self::new()?;
@@ -105,7 +116,7 @@ impl LicenseManager {
         let _ = manager.load_cached_license();
         Ok(manager)
     }
-    
+
     /// Get default cache path for license file
     fn default_cache_path() -> PathBuf {
         dirs::data_local_dir()
@@ -113,48 +124,50 @@ impl LicenseManager {
             .join("TrueShot")
             .join("license.json")
     }
-    
+
     /// Load license from cache
     fn load_cached_license(&mut self) -> Result<(), LicenseError> {
         if !self.cache_path.exists() {
             return Err(LicenseError::FileNotFound(
-                self.cache_path.display().to_string()
+                self.cache_path.display().to_string(),
             ));
         }
-        
+
         let content = std::fs::read_to_string(&self.cache_path)?;
         let license: License = serde_json::from_str(&content)
             .map_err(|e| LicenseError::SerializationError(e.to_string()))?;
-        
+
         // Verify if we have a public key
         if let Some(ref pk) = self.public_key {
             license.verify_signature(pk)?;
         }
-        
+
         self.current_license = Some(license);
         Ok(())
     }
-    
+
     /// Save license to cache
     fn save_license_cache(&self, license: &License) -> Result<(), LicenseError> {
         // Ensure parent directory exists
         if let Some(parent) = self.cache_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         let content = serde_json::to_string_pretty(license)
             .map_err(|e| LicenseError::SerializationError(e.to_string()))?;
-        
+
         std::fs::write(&self.cache_path, content)?;
         Ok(())
     }
-    
+
     /// Verify the current license
     pub fn verify(&self) -> Result<(), LicenseError> {
         let integrity_status = IntegrityChecker::new().verify();
         if !matches!(integrity_status, IntegrityStatus::Valid) {
             warn!(?integrity_status, "License integrity check failed");
-            return Err(LicenseError::IntegrityFailure(format!("{integrity_status:?}")));
+            return Err(LicenseError::IntegrityFailure(format!(
+                "{integrity_status:?}"
+            )));
         }
 
         // Development mode - always valid
@@ -162,28 +175,30 @@ impl LicenseManager {
             info!("License verification bypassed in explicit dev mode");
             return Ok(());
         }
-        
-        let license = self.current_license.as_ref()
+
+        let license = self
+            .current_license
+            .as_ref()
             .ok_or(LicenseError::NoLicense)?;
-        
+
         // Check signature
         if let Some(ref pk) = self.public_key {
             license.verify_signature(pk)?;
         } else {
             return Err(LicenseError::MissingPublicKey);
         }
-        
+
         // Check expiration
         if license.is_expired() {
             return Err(LicenseError::Expired);
         }
-        
+
         // Check device activation
         let my_hash = self.device.fingerprint_hash();
         if !license.is_device_activated(&my_hash) {
             return Err(LicenseError::DeviceNotActivated);
         }
-        
+
         // Check grace period for offline operation
         if !license.is_within_grace_period(&my_hash) {
             return Err(LicenseError::GracePeriodExpired);
@@ -194,23 +209,23 @@ impl LicenseManager {
             expires_at = ?license.payload.expires_at,
             "License verified"
         );
-        
+
         Ok(())
     }
-    
+
     /// Check if a feature is enabled
     pub fn is_feature_enabled(&self, feature: Feature) -> bool {
         // Development mode - all features enabled
         if self.dev_mode {
             return true;
         }
-        
+
         self.current_license
             .as_ref()
             .map(|l| l.is_feature_enabled(feature))
             .unwrap_or(false)
     }
-    
+
     /// Require a feature, returning error if not available
     pub fn require_feature(&self, feature: Feature) -> Result<(), LicenseError> {
         if self.is_feature_enabled(feature) {
@@ -219,7 +234,7 @@ impl LicenseManager {
             Err(LicenseError::FeatureNotAvailable(format!("{:?}", feature)))
         }
     }
-    
+
     /// Get current license tier
     pub fn tier(&self) -> Option<&LicenseTier> {
         self.current_license.as_ref().map(|l| &l.payload.tier)
@@ -250,7 +265,12 @@ impl LicenseManager {
         if self.dev_mode {
             return None;
         }
-        let key = self.current_license.as_ref()?.payload.license_key.as_bytes();
+        let key = self
+            .current_license
+            .as_ref()?
+            .payload
+            .license_key
+            .as_bytes();
         let mut hasher = Sha256::new();
         hasher.update(key);
         let digest = hasher.finalize();
@@ -277,13 +297,13 @@ impl LicenseManager {
             days_remaining,
         })
     }
-    
+
     /// Get license status summary
     pub fn status(&self) -> LicenseStatus {
         if self.dev_mode {
             return LicenseStatus::Development;
         }
-        
+
         match &self.current_license {
             None => LicenseStatus::Unlicensed,
             Some(license) => {
@@ -305,47 +325,94 @@ impl LicenseManager {
             }
         }
     }
-    
+
     /// Load license from a key (requires network for activation)
-    pub fn load_license_key(&mut self, license_key: &str) -> Result<(), LicenseError> {
+    pub fn load_license_key(
+        &mut self,
+        license_key: &str,
+        device_name_override: Option<String>,
+    ) -> Result<(), LicenseError> {
         // Validate key format (XXXX-XXXX-XXXX-XXXX)
         if !Self::is_valid_key_format(license_key) {
             return Err(LicenseError::InvalidKeyFormat);
         }
-        
-        // For now, we'd need to call the license server
-        // This would be an async operation in practice
-        Err(LicenseError::ActivationFailed(
-            "Network activation not yet implemented - use import_license".to_string()
-        ))
+
+        let activation_url = env::var("TRUESHOT_LICENSE_ACTIVATION_URL")
+            .map_err(|_| {
+                LicenseError::ActivationFailed(
+                    "License activation not configured. Set TRUESHOT_LICENSE_ACTIVATION_URL or import a license JSON payload.".to_string(),
+                )
+            })?;
+
+        let device_hash = self.device.fingerprint_hash();
+        let device_name = device_name_override.unwrap_or_else(|| self.device.device_name());
+        let request = ActivationRequest {
+            license_key: license_key.to_string(),
+            device_hash,
+            device_name,
+        };
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|err| {
+                LicenseError::ActivationFailed(format!("Activation client setup failed: {err}"))
+            })?;
+
+        let mut builder = client.post(activation_url).json(&request);
+        if let Ok(token) = env::var("TRUESHOT_LICENSE_ACTIVATION_TOKEN") {
+            if !token.trim().is_empty() {
+                builder = builder.bearer_auth(token);
+            }
+        }
+
+        let response = builder.send().map_err(|err| {
+            LicenseError::ActivationFailed(format!("Activation request failed: {err}"))
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(LicenseError::ActivationFailed(format!(
+                "Activation failed ({status}): {body}"
+            )));
+        }
+
+        let activation: ActivationResponse = response.json().map_err(|err| {
+            LicenseError::ActivationFailed(format!("Invalid activation response: {err}"))
+        })?;
+
+        self.import_license_with_activation(&activation.license_json, activation.device_name)
     }
-    
+
     /// Import a license file directly
     pub fn import_license(&mut self, license_json: &str) -> Result<(), LicenseError> {
         let license: License = serde_json::from_str(license_json)
             .map_err(|e| LicenseError::SerializationError(e.to_string()))?;
-        
+
         // Verify signature if we have a key
         if let Some(ref pk) = self.public_key {
             license.verify_signature(pk)?;
         }
-        
+
         // Check if this device is activated
         let my_hash = self.device.fingerprint_hash();
         if !license.is_device_activated(&my_hash) {
             // Check if we can add this device
             if !license.can_activate_device() {
-                return Err(LicenseError::DeviceLimitReached(license.payload.max_devices));
+                return Err(LicenseError::DeviceLimitReached(
+                    license.payload.max_devices,
+                ));
             }
-            
+
             // Would need server to add device - for now, error
             return Err(LicenseError::DeviceNotActivated);
         }
-        
+
         // Save to cache
         self.save_license_cache(&license)?;
         self.current_license = Some(license);
-        
+
         Ok(())
     }
 
@@ -380,7 +447,9 @@ impl LicenseManager {
             }
         } else {
             if !license.can_activate_device() {
-                return Err(LicenseError::DeviceLimitReached(license.payload.max_devices));
+                return Err(LicenseError::DeviceLimitReached(
+                    license.payload.max_devices,
+                ));
             }
             license.activated_devices.push(ActivatedDevice {
                 fingerprint_hash: my_hash,
@@ -430,7 +499,9 @@ impl LicenseManager {
             }
         } else {
             if !license.can_activate_device() {
-                return Err(LicenseError::DeviceLimitReached(license.payload.max_devices));
+                return Err(LicenseError::DeviceLimitReached(
+                    license.payload.max_devices,
+                ));
             }
             license.activated_devices.push(ActivatedDevice {
                 fingerprint_hash: my_hash,
@@ -440,7 +511,8 @@ impl LicenseManager {
             });
         }
 
-        self.save_license_cache(license)?;
+        let license_snapshot = license.clone();
+        self.save_license_cache(&license_snapshot)?;
         Ok(())
     }
 
@@ -461,7 +533,8 @@ impl LicenseManager {
             ));
         }
 
-        self.save_license_cache(license)?;
+        let license_snapshot = license.clone();
+        self.save_license_cache(&license_snapshot)?;
         Ok(())
     }
 
@@ -473,42 +546,48 @@ impl LicenseManager {
             .ok_or(LicenseError::NoLicense)?;
         Ok(license.activated_devices.clone())
     }
-    
+
     /// Validate license key format
     fn is_valid_key_format(key: &str) -> bool {
         let parts: Vec<&str> = key.split('-').collect();
         if parts.len() != 4 {
             return false;
         }
-        parts.iter().all(|p| p.len() == 4 && p.chars().all(|c| c.is_ascii_alphanumeric()))
+        parts
+            .iter()
+            .all(|p| p.len() == 4 && p.chars().all(|c| c.is_ascii_alphanumeric()))
     }
-    
+
     /// Get this device's fingerprint hash
     pub fn device_hash(&self) -> String {
         self.device.fingerprint_hash()
     }
-    
+
     /// Get device info
     pub fn device_name(&self) -> String {
         self.device.device_name()
     }
-    
+
     /// Check if running in development mode
     pub fn is_dev_mode(&self) -> bool {
         self.dev_mode
     }
 
     fn is_trial_license(license: &License) -> bool {
-        license.payload.license_key.to_uppercase().starts_with("TRIAL-")
+        license
+            .payload
+            .license_key
+            .to_uppercase()
+            .starts_with("TRIAL-")
             || license.signature.is_empty()
     }
-    
+
     /// Enable development mode (for testing)
     #[cfg(debug_assertions)]
     pub fn enable_dev_mode(&mut self) {
         self.dev_mode = true;
     }
-    
+
     /// Create a trial license for evaluation using baseline features.
     pub fn create_trial(&mut self) -> Result<License, LicenseError> {
         self.create_trial_with_features(14, &[])
@@ -536,7 +615,7 @@ impl LicenseManager {
         }
         let payload = LicensePayload {
             license_key: "TRIAL-MODE-0000-0000".to_string(),
-            tier: LicenseTier::Education,  // Trial gets Education features
+            tier: LicenseTier::Education, // Trial gets Education features
             max_devices: 1,
             issued_at: now,
             expires_at: Some(now + chrono::Duration::days(duration_days)),
@@ -544,38 +623,38 @@ impl LicenseManager {
             customer_email: "trial@localhost".to_string(),
             has_4dgs_addon: false,
         };
-        
+
         let activated = ActivatedDevice {
             fingerprint_hash: self.device.fingerprint_hash(),
             device_name: self.device.device_name(),
             activated_at: now,
             last_seen: now,
         };
-        
+
         let license = License {
             payload,
             activated_devices: vec![activated],
-            signature: String::new(),  // Trial has no signature
+            signature: String::new(), // Trial has no signature
         };
-        
+
         self.current_license = Some(license.clone());
         let _ = self.save_license_cache(&license);
-        
+
         Ok(license)
     }
 }
 
 fn load_public_key_override() -> Result<Option<VerifyingKey>, LicenseError> {
     if let Ok(path) = env::var("TRUESHOT_LICENSE_PUBLIC_KEY_PATH") {
-        let bytes = fs::read(&path)
-            .map_err(|e| LicenseError::FileNotFound(format!("{path}: {e}")))?;
+        let bytes =
+            fs::read(&path).map_err(|e| LicenseError::FileNotFound(format!("{path}: {e}")))?;
         return decode_public_key_bytes(&bytes).map(Some);
     }
 
     if let Ok(b64) = env::var("TRUESHOT_LICENSE_PUBLIC_KEY_B64") {
-        let decoded = B64
-            .decode(b64.as_bytes())
-            .map_err(|e| LicenseError::InvalidSignature(format!("Invalid base64 public key: {e}")))?;
+        let decoded = B64.decode(b64.as_bytes()).map_err(|e| {
+            LicenseError::InvalidSignature(format!("Invalid base64 public key: {e}"))
+        })?;
         return decode_public_key_bytes(&decoded).map(Some);
     }
 
@@ -632,8 +711,7 @@ fn decode_public_key_bytes(bytes: &[u8]) -> Result<VerifyingKey, LicenseError> {
             out
         }
     };
-    VerifyingKey::from_bytes(&key_bytes)
-        .map_err(|e| LicenseError::InvalidSignature(e.to_string()))
+    VerifyingKey::from_bytes(&key_bytes).map_err(|e| LicenseError::InvalidSignature(e.to_string()))
 }
 
 fn decode_hex_key(hex: &str) -> Result<Vec<u8>, LicenseError> {
@@ -698,7 +776,10 @@ pub enum LicenseStatus {
 impl LicenseStatus {
     /// Check if status allows using the software
     pub fn is_usable(&self) -> bool {
-        matches!(self, LicenseStatus::Development | LicenseStatus::Valid { .. })
+        matches!(
+            self,
+            LicenseStatus::Development | LicenseStatus::Valid { .. }
+        )
     }
 }
 
@@ -708,7 +789,7 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    
+
     #[test]
     fn test_license_manager_creation() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -716,7 +797,7 @@ mod tests {
         let err = LicenseManager::new().unwrap_err();
         assert!(matches!(err, LicenseError::MissingPublicKey));
     }
-    
+
     #[test]
     fn test_dev_mode_features() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -728,7 +809,7 @@ mod tests {
         assert!(manager.is_feature_enabled(Feature::CommercialUse));
         env::remove_var("TRUESHOT_LICENSE_DEV_MODE");
     }
-    
+
     #[test]
     fn test_key_format_validation() {
         assert!(LicenseManager::is_valid_key_format("ABCD-1234-EFGH-5678"));
@@ -736,20 +817,20 @@ mod tests {
         assert!(!LicenseManager::is_valid_key_format("ABC-1234-EFGH-5678"));
         assert!(!LicenseManager::is_valid_key_format("ABCD-1234-EFGH-567"));
     }
-    
+
     #[test]
     fn test_trial_creation() {
         let _guard = ENV_LOCK.lock().unwrap();
         env::set_var("TRUESHOT_LICENSE_DEV_MODE", "1");
         let mut manager = LicenseManager::new().unwrap();
         let trial = manager.create_trial().unwrap();
-        
+
         assert_eq!(trial.payload.tier, LicenseTier::Education);
         assert!(trial.payload.expires_at.is_some());
         assert_eq!(trial.activated_devices.len(), 1);
         env::remove_var("TRUESHOT_LICENSE_DEV_MODE");
     }
-    
+
     #[test]
     fn test_license_status() {
         let _guard = ENV_LOCK.lock().unwrap();

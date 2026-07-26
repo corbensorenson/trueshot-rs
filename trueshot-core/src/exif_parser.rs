@@ -3,8 +3,8 @@
 //! Groups NEF files into sequences based on TIME-BASED grouping (30s window)
 //! and exposure/focus pattern detection (F1E1, F1E2, F1E3, F2E1, ...).
 
-use crate::types::{Meta, Sequence};
 use crate::nef::parser::Z9NefParser;
+use crate::types::{Meta, Sequence};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -38,11 +38,16 @@ pub fn group_sequences(paths: &[PathBuf]) -> Result<Vec<Sequence>> {
     file_metas.sort_by_key(|m| m.timestamp_ms);
 
     tracing::debug!("Sorted {} files by timestamp", file_metas.len());
-    tracing::debug!("First file: {:?} at {}ms",
-                   file_metas[0].path.file_name(), file_metas[0].timestamp_ms);
-    tracing::debug!("Last file: {:?} at {}ms",
-                   file_metas.last().unwrap().path.file_name(),
-                   file_metas.last().unwrap().timestamp_ms);
+    tracing::debug!(
+        "First file: {:?} at {}ms",
+        file_metas[0].path.file_name(),
+        file_metas[0].timestamp_ms
+    );
+    tracing::debug!(
+        "Last file: {:?} at {}ms",
+        file_metas.last().unwrap().path.file_name(),
+        file_metas.last().unwrap().timestamp_ms
+    );
 
     // Step 3: Group by 30-second time windows
     let time_groups = group_by_time_window(&file_metas, 30_000); // 30 seconds in ms
@@ -68,25 +73,28 @@ pub fn group_sequences(paths: &[PathBuf]) -> Result<Vec<Sequence>> {
 #[derive(Debug, Clone)]
 pub struct FileMeta {
     pub path: PathBuf,
-    pub timestamp_ms: u64,      // Milliseconds since epoch
-    pub exposure_time: f64,     // Seconds (shutter speed)
-    pub aperture: f64,          // F-number
+    pub timestamp_ms: u64,  // Milliseconds since epoch
+    pub exposure_time: f64, // Seconds (shutter speed)
+    pub aperture: f64,      // F-number
     pub iso: u32,
-    pub exposure_ev: f64,       // Calculated EV
-    pub cam_mul: [f32; 4],      // Camera white balance multipliers
+    pub exposure_ev: f64,  // Calculated EV
+    pub cam_mul: [f32; 4], // Camera white balance multipliers
 }
 
 /// Extract metadata using Z9NefParser (fast, no image decode)
 pub fn extract_z9_metadata(path: &Path) -> Result<FileMeta> {
     let mut parser = Z9NefParser::new(path);
-    parser.parse()
+    parser
+        .parse()
         .with_context(|| format!("Failed to parse NEF: {:?}", path))?;
 
-    let metadata = parser.get_metadata()
+    let metadata = parser
+        .get_metadata()
         .with_context(|| format!("Failed to get metadata: {:?}", path))?;
 
     // Extract timestamp (milliseconds since epoch)
-    let timestamp_ms = metadata.timestamp
+    let timestamp_ms = metadata
+        .timestamp
         .map(|t| t.timestamp_millis() as u64)
         .unwrap_or(0);
 
@@ -95,8 +103,7 @@ pub fn extract_z9_metadata(path: &Path) -> Result<FileMeta> {
     let iso = metadata.iso.unwrap_or(100);
 
     // Calculate EV (relative to 1/125s, f/5.6, ISO 100)
-    let exposure_ev = (exposure_time / (1.0 / 125.0)).log2()
-        + (aperture / 5.6).powi(2).log2()
+    let exposure_ev = (exposure_time / (1.0 / 125.0)).log2() + (aperture / 5.6).powi(2).log2()
         - (iso as f64 / 100.0).log2();
 
     Ok(FileMeta {
@@ -153,13 +160,15 @@ fn create_sequence_from_group(group: Vec<FileMeta>, group_idx: usize) -> Result<
         anyhow::bail!("Empty group");
     }
 
-    tracing::debug!("Creating sequence from group {} with {} files", group_idx, group.len());
+    tracing::debug!(
+        "Creating sequence from group {} with {} files",
+        group_idx,
+        group.len()
+    );
 
     // Detect unique SHUTTER SPEEDS (exposure_time in seconds)
     // This is the key - we group by shutter speed, not EV!
-    let mut unique_shutter_speeds: Vec<f64> = group.iter()
-        .map(|m| m.exposure_time)
-        .collect();
+    let mut unique_shutter_speeds: Vec<f64> = group.iter().map(|m| m.exposure_time).collect();
     unique_shutter_speeds.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     // Deduplicate with tolerance (0.0001 seconds = 0.1ms)
@@ -168,44 +177,58 @@ fn create_sequence_from_group(group: Vec<FileMeta>, group_idx: usize) -> Result<
     let num_exposures = unique_shutter_speeds.len();
     let total_images = group.len();
 
-    tracing::debug!("Unique shutter speeds: {:?}",
-                   unique_shutter_speeds.iter()
-                       .map(|t| format!("1/{:.0}", 1.0/t))
-                       .collect::<Vec<_>>());
+    tracing::debug!(
+        "Unique shutter speeds: {:?}",
+        unique_shutter_speeds
+            .iter()
+            .map(|t| format!("1/{:.0}", 1.0 / t))
+            .collect::<Vec<_>>()
+    );
 
     // Calculate focus steps: total_images / num_exposures
     // Pattern: F1E1, F1E2, F1E3, F2E1, F2E2, F2E3, ..., F7E1, F7E2, F7E3
-    let (focus_steps, exposures, shutter_speeds) = if num_exposures > 0 && total_images % num_exposures == 0 {
-        // Perfect pattern detected
-        let focus_steps = total_images / num_exposures;
+    let (focus_steps, exposures, shutter_speeds) =
+        if num_exposures > 0 && total_images % num_exposures == 0 {
+            // Perfect pattern detected
+            let focus_steps = total_images / num_exposures;
 
-        // Convert shutter speeds to EV values for Meta (DEPRECATED - kept for compatibility)
-        let evs: Vec<f64> = unique_shutter_speeds.iter()
-            .map(|&exp_time| {
-                // Calculate EV relative to reference (1/125s, f/5.6, ISO 100)
-                (exp_time / (1.0 / 125.0)).log2()
-            })
-            .collect();
+            // Convert shutter speeds to EV values for Meta (DEPRECATED - kept for compatibility)
+            let evs: Vec<f64> = unique_shutter_speeds
+                .iter()
+                .map(|&exp_time| {
+                    // Calculate EV relative to reference (1/125s, f/5.6, ISO 100)
+                    (exp_time / (1.0 / 125.0)).log2()
+                })
+                .collect();
 
-        (focus_steps, evs, unique_shutter_speeds.clone())
-    } else {
-        // Fallback: assume all focus stacking, no exposure bracketing
-        tracing::warn!("No clear pattern detected, assuming {} focus steps × 1 exposure", total_images);
-        (total_images, vec![0.0], vec![1.0 / 125.0])
-    };
+            (focus_steps, evs, unique_shutter_speeds.clone())
+        } else {
+            // Fallback: assume all focus stacking, no exposure bracketing
+            tracing::warn!(
+                "No clear pattern detected, assuming {} focus steps × 1 exposure",
+                total_images
+            );
+            (total_images, vec![0.0], vec![1.0 / 125.0])
+        };
 
-    tracing::info!("Detected: {} focus steps × {} exposures = {} images",
-                  focus_steps, num_exposures, total_images);
+    tracing::info!(
+        "Detected: {} focus steps × {} exposures = {} images",
+        focus_steps,
+        num_exposures,
+        total_images
+    );
 
     // Parse filename for metadata (from first file)
     let first_path = &group[0].path;
-    let filename = first_path.file_stem()
+    let filename = first_path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("");
     let (rotation_deg, vantage, bone_id) = parse_filename(filename);
 
     // Extract camera white balance from first file
-    let cam_mul = group.first()
+    let cam_mul = group
+        .first()
         .map(|m| m.cam_mul)
         .unwrap_or([1.0, 1.0, 1.0, 1.0]);
 
@@ -215,7 +238,7 @@ fn create_sequence_from_group(group: Vec<FileMeta>, group_idx: usize) -> Result<
         exposures,
         shutter_speeds,
         ref_focus: (focus_steps / 2) as u8, // Middle focus
-        ref_exp: 0.0, // Middle exposure (closest to 0 EV)
+        ref_exp: 0.0,                       // Middle exposure (closest to 0 EV)
         rot_deg: rotation_deg,
         vantage,
         burst_factor: 1,
@@ -289,7 +312,7 @@ mod tests {
         assert_eq!(rot, 0.0);
         assert_eq!(vantage, "low");
         assert_eq!(bone_id, "bone1");
-        
+
         let (rot, vantage, bone_id) = parse_filename("bone2_high_036");
         assert_eq!(rot, 360.0);
         assert_eq!(vantage, "high");
@@ -304,4 +327,3 @@ mod tests {
         assert_eq!(bone_id, "_Z9Z5232");
     }
 }
-

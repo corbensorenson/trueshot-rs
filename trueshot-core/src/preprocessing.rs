@@ -47,38 +47,53 @@ pub fn preprocess_stack_with_options(
 ) -> Result<PreprocessedStack> {
     use std::time::Instant;
 
-    tracing::info!("Preprocessing {} frames (skip_physical_alignment={}, skip_sharpness_masks={})",
-                   frames.len(), skip_physical_alignment, skip_sharpness_masks);
+    tracing::info!(
+        "Preprocessing {} frames (skip_physical_alignment={}, skip_sharpness_masks={})",
+        frames.len(),
+        skip_physical_alignment,
+        skip_sharpness_masks
+    );
 
     // 1. Skip bbox computation - frames are already cropped from selective loading!
     let ref_idx = compute_ref_index(meta);
     let (h, w, _) = frames[0].data.dim();
-    let bbox = Rect { x: 0.0, y: 0.0, width: w as f64, height: h as f64 };
+    let bbox = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: w as f64,
+        height: h as f64,
+    };
     tracing::debug!("Using full frame bbox (already cropped): {}x{}", w, h);
 
     // 2. Extract metadata FIRST before consuming frames
     let t0 = Instant::now();
-    let frame_metadata: Vec<crate::types::FrameMeta> = frames
-        .iter()
-        .map(|f| f.meta.clone())
-        .collect();
-    tracing::info!("⏱️  Metadata extraction: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+    let frame_metadata: Vec<crate::types::FrameMeta> =
+        frames.iter().map(|f| f.meta.clone()).collect();
+    tracing::info!(
+        "⏱️  Metadata extraction: {:.1}ms",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
 
     // 3. Extract frame data by consuming frames (no clone!)
     let t1 = Instant::now();
-    let mut frame_data: Vec<Array3<f64>> = frames
-        .into_iter()
-        .map(|f| f.data)
-        .collect();
-    tracing::info!("⏱️  Frame data extraction (zero-copy): {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
+    let mut frame_data: Vec<Array3<f64>> = frames.into_iter().map(|f| f.data).collect();
+    tracing::info!(
+        "⏱️  Frame data extraction (zero-copy): {:.1}ms",
+        t1.elapsed().as_secs_f64() * 1000.0
+    );
 
     // 3.5. Apply white balance to Bayer data BEFORE HDR fusion
     // This is critical! If we apply WB after fusion, the per-pixel HDR weights
     // will be computed on raw Bayer values, causing R/G/B to be weighted differently
     let t1b = Instant::now();
     let cam_mul = frame_metadata[0].cam_mul;
-    tracing::info!("Applying white balance to input frames: R={:.3}, G={:.3}, B={:.3}, G2={:.3}",
-        cam_mul[0], cam_mul[1], cam_mul[2], cam_mul[3]);
+    tracing::info!(
+        "Applying white balance to input frames: R={:.3}, G={:.3}, B={:.3}, G2={:.3}",
+        cam_mul[0],
+        cam_mul[1],
+        cam_mul[2],
+        cam_mul[3]
+    );
 
     // Normalize by green channel
     let green_mul = cam_mul[1].max(cam_mul[3]);
@@ -86,7 +101,12 @@ pub fn preprocess_stack_with_options(
     let wb_g = ((cam_mul[1] + cam_mul[3]) / (2.0 * green_mul)) as f64;
     let wb_b = (cam_mul[2] / green_mul) as f64;
 
-    tracing::info!("Normalized WB multipliers: R={:.3}, G={:.3}, B={:.3}", wb_r, wb_g, wb_b);
+    tracing::info!(
+        "Normalized WB multipliers: R={:.3}, G={:.3}, B={:.3}",
+        wb_r,
+        wb_g,
+        wb_b
+    );
 
     // Apply WB to each frame
     for frame in &mut frame_data {
@@ -97,16 +117,19 @@ pub fn preprocess_stack_with_options(
                 let col_even = x % 2 == 0;
 
                 let multiplier = match (row_even, col_even) {
-                    (true, true) => wb_r,   // R
-                    (true, false) | (false, true) => wb_g,  // G
-                    (false, false) => wb_b, // B
+                    (true, true) => wb_r,                  // R
+                    (true, false) | (false, true) => wb_g, // G
+                    (false, false) => wb_b,                // B
                 };
 
                 frame[[y, x, 0]] *= multiplier;
             }
         }
     }
-    tracing::info!("⏱️  White balance: {:.1}ms", t1b.elapsed().as_secs_f64() * 1000.0);
+    tracing::info!(
+        "⏱️  White balance: {:.1}ms",
+        t1b.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Debug: Check frame values after WB
     if !frame_data.is_empty() {
@@ -142,24 +165,36 @@ pub fn preprocess_stack_with_options(
         (aligned, per_exposure_shifts)
     } else {
         // Traditional mode: Compute shifts and warp frames (per-focus-plane)
-        tracing::info!("Aligning {} frames to reference frame {} (optimized per-focus-plane)",
-                       frame_data.len(), ref_idx);
+        tracing::info!(
+            "Aligning {} frames to reference frame {} (optimized per-focus-plane)",
+            frame_data.len(),
+            ref_idx
+        );
         let (aligned, alignments) = align_frames_optimized(&frame_data, meta, ref_idx)?;
         tracing::info!("Frame alignment complete");
         (aligned, alignments)
     };
-    tracing::info!("⏱️  Alignment: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
+    tracing::info!(
+        "⏱️  Alignment: {:.1}ms",
+        t2.elapsed().as_secs_f64() * 1000.0
+    );
 
     // 5. Compute background mask from REFERENCE frame only (like original pixelcollapse)
     let t3 = Instant::now();
     let fg_mask = compute_background_mask_from_reference(&aligned[ref_idx])?;
-    tracing::info!("⏱️  Background mask: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
+    tracing::info!(
+        "⏱️  Background mask: {:.1}ms",
+        t3.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Debug: Check mask
     let mask_true_count = fg_mask.iter().filter(|&&b| b).count();
-    tracing::info!("Foreground mask: {} / {} pixels ({:.1}%)",
-                   mask_true_count, fg_mask.len(),
-                   100.0 * mask_true_count as f64 / fg_mask.len() as f64);
+    tracing::info!(
+        "Foreground mask: {} / {} pixels ({:.1}%)",
+        mask_true_count,
+        fg_mask.len(),
+        100.0 * mask_true_count as f64 / fg_mask.len() as f64
+    );
 
     // 6. DON'T apply mask to frames - keep all data for fusion
     // Mask will be used for output only
@@ -176,11 +211,12 @@ pub fn preprocess_stack_with_options(
 
 /// Compute reference frame index
 fn compute_ref_index(meta: &Meta) -> usize {
-    let exp_idx = meta.exposures
+    let exp_idx = meta
+        .exposures
         .iter()
         .position(|&e| (e - meta.ref_exp).abs() < 0.01)
         .unwrap_or(meta.exposures.len() / 2);
-    
+
     meta.ref_focus as usize * meta.exposures.len() + exp_idx
 }
 
@@ -194,23 +230,40 @@ fn compute_ref_index(meta: &Meta) -> usize {
 /// For example, with 7 focus planes × 3 exposures = 21 frames:
 /// - Old: 20 alignment computations
 /// - New: 6 alignment computations (one per non-reference focus plane)
-fn align_frames_optimized(frames: &[Array3<f64>], meta: &Meta, ref_idx: usize) -> Result<(Vec<Array3<f64>>, Vec<(f64, f64, f64)>)> {
+fn align_frames_optimized(
+    frames: &[Array3<f64>],
+    meta: &Meta,
+    ref_idx: usize,
+) -> Result<(Vec<Array3<f64>>, Vec<(f64, f64, f64)>)> {
     let num_focus_steps = meta.focus_steps as usize;
     let num_exposures = meta.exposures.len();
     let total_frames = frames.len();
 
-    tracing::info!("Optimized alignment: {} focus planes × {} exposures = {} frames",
-                   num_focus_steps, num_exposures, total_frames);
+    tracing::info!(
+        "Optimized alignment: {} focus planes × {} exposures = {} frames",
+        num_focus_steps,
+        num_exposures,
+        total_frames
+    );
 
     if total_frames != num_focus_steps * num_exposures {
-        tracing::warn!("Frame count mismatch: expected {}×{}={}, got {}",
-                      num_focus_steps, num_exposures, num_focus_steps * num_exposures, total_frames);
+        tracing::warn!(
+            "Frame count mismatch: expected {}×{}={}, got {}",
+            num_focus_steps,
+            num_exposures,
+            num_focus_steps * num_exposures,
+            total_frames
+        );
     }
 
     let reference = &frames[ref_idx];
     let ref_focus_step = ref_idx / num_exposures;
 
-    tracing::info!("Reference frame {} is in focus plane {}", ref_idx, ref_focus_step);
+    tracing::info!(
+        "Reference frame {} is in focus plane {}",
+        ref_idx,
+        ref_focus_step
+    );
 
     // Step 1: Compute one shift+scale per focus plane (using first exposure of each plane)
     // Pattern: F0E0, F0E1, F0E2, F1E0, F1E1, F1E2, ..., F6E0, F6E1, F6E2
@@ -220,18 +273,31 @@ fn align_frames_optimized(frames: &[Array3<f64>], meta: &Meta, ref_idx: usize) -
         if focus_step == ref_focus_step {
             // Reference focus plane - no shift, no scale change
             focus_plane_shifts.push((0.0, 0.0, 1.0));
-            tracing::debug!("Focus plane {}: reference (no shift, scale=1.0)", focus_step);
+            tracing::debug!(
+                "Focus plane {}: reference (no shift, scale=1.0)",
+                focus_step
+            );
         } else {
             // Compute shift AND scale using first exposure (E0) of this focus plane
             let frame_idx = focus_step * num_exposures; // First exposure of this focus plane
             if frame_idx < total_frames {
                 let (dx, dy, scale) = compute_phase_correlation(reference, &frames[frame_idx]);
                 focus_plane_shifts.push((dx, dy, scale));
-                tracing::info!("Focus plane {}: shift=({:.3}, {:.3}), scale={:.4} (frame {})",
-                              focus_step, dx, dy, scale, frame_idx);
+                tracing::info!(
+                    "Focus plane {}: shift=({:.3}, {:.3}), scale={:.4} (frame {})",
+                    focus_step,
+                    dx,
+                    dy,
+                    scale,
+                    frame_idx
+                );
             } else {
                 focus_plane_shifts.push((0.0, 0.0, 1.0));
-                tracing::warn!("Focus plane {}: frame index {} out of bounds", focus_step, frame_idx);
+                tracing::warn!(
+                    "Focus plane {}: frame index {} out of bounds",
+                    focus_step,
+                    frame_idx
+                );
             }
         }
     }
@@ -246,7 +312,10 @@ fn align_frames_optimized(frames: &[Array3<f64>], meta: &Meta, ref_idx: usize) -
     // Step 3: DON'T apply scale correction here - let the pipeline handle it
     // The pipeline will apply focus breathing compensation during collapse
     // This avoids double-compensation and allows per-pixel focus plane selection to work correctly
-    tracing::info!("Computed scale for {} frames (will be applied in pipeline)", total_frames);
+    tracing::info!(
+        "Computed scale for {} frames (will be applied in pipeline)",
+        total_frames
+    );
 
     // Return frames as-is (no rescaling in preprocessing)
     let aligned = frames.to_vec();
@@ -268,25 +337,42 @@ fn align_frames_optimized(frames: &[Array3<f64>], meta: &Meta, ref_idx: usize) -
 /// - Compute 21 per-exposure shifts (relative to first exposure in each plane)
 /// - Apply focus-plane shifts to frames
 /// - Return per-exposure shifts for SR
-fn align_frames_for_sr(frames: &[Array3<f64>], meta: &Meta, ref_idx: usize) -> Result<(Vec<Array3<f64>>, Vec<(f64, f64, f64)>)> {
+fn align_frames_for_sr(
+    frames: &[Array3<f64>],
+    meta: &Meta,
+    ref_idx: usize,
+) -> Result<(Vec<Array3<f64>>, Vec<(f64, f64, f64)>)> {
     let num_focus_steps = meta.focus_steps as usize;
     let num_exposures = meta.exposures.len();
     let total_frames = frames.len();
 
-    tracing::info!("SR-aware alignment: {} focus planes × {} exposures = {} frames",
-                   num_focus_steps, num_exposures, total_frames);
+    tracing::info!(
+        "SR-aware alignment: {} focus planes × {} exposures = {} frames",
+        num_focus_steps,
+        num_exposures,
+        total_frames
+    );
 
     if total_frames != num_focus_steps * num_exposures {
-        tracing::warn!("Frame count mismatch: expected {}×{}={}, got {}",
-                      num_focus_steps, num_exposures, num_focus_steps * num_exposures, total_frames);
+        tracing::warn!(
+            "Frame count mismatch: expected {}×{}={}, got {}",
+            num_focus_steps,
+            num_exposures,
+            num_focus_steps * num_exposures,
+            total_frames
+        );
     }
 
     let reference = &frames[ref_idx];
     let ref_focus_step = ref_idx / num_exposures;
     let ref_exposure_idx = ref_idx % num_exposures;
 
-    tracing::info!("Reference frame {} is in focus plane {}, exposure {}",
-                   ref_idx, ref_focus_step, ref_exposure_idx);
+    tracing::info!(
+        "Reference frame {} is in focus plane {}, exposure {}",
+        ref_idx,
+        ref_focus_step,
+        ref_exposure_idx
+    );
 
     // Step 1: Compute focus-plane shifts (large shifts for alignment) + scale
     let mut focus_plane_shifts: Vec<(f64, f64, f64)> = Vec::with_capacity(num_focus_steps);
@@ -294,17 +380,30 @@ fn align_frames_for_sr(frames: &[Array3<f64>], meta: &Meta, ref_idx: usize) -> R
     for focus_step in 0..num_focus_steps {
         if focus_step == ref_focus_step {
             focus_plane_shifts.push((0.0, 0.0, 1.0));
-            tracing::debug!("Focus plane {}: reference (no shift, scale=1.0)", focus_step);
+            tracing::debug!(
+                "Focus plane {}: reference (no shift, scale=1.0)",
+                focus_step
+            );
         } else {
             let frame_idx = focus_step * num_exposures;
             if frame_idx < total_frames {
                 let (dx, dy, scale) = compute_phase_correlation(reference, &frames[frame_idx]);
                 focus_plane_shifts.push((dx, dy, scale));
-                tracing::info!("Focus plane {}: shift=({:.3}, {:.3}), scale={:.4} (frame {})",
-                              focus_step, dx, dy, scale, frame_idx);
+                tracing::info!(
+                    "Focus plane {}: shift=({:.3}, {:.3}), scale={:.4} (frame {})",
+                    focus_step,
+                    dx,
+                    dy,
+                    scale,
+                    frame_idx
+                );
             } else {
                 focus_plane_shifts.push((0.0, 0.0, 1.0));
-                tracing::warn!("Focus plane {}: frame index {} out of bounds", focus_step, frame_idx);
+                tracing::warn!(
+                    "Focus plane {}: frame index {} out of bounds",
+                    focus_step,
+                    frame_idx
+                );
             }
         }
     }
@@ -356,17 +455,31 @@ fn align_frames_for_sr(frames: &[Array3<f64>], meta: &Meta, ref_idx: usize) -> R
                 per_exposure_shifts.push((0.0, 0.0, 1.0));
             } else {
                 // Compute subpixel shift + scale relative to first exposure in this plane
-                let (dx, dy, scale) = compute_phase_correlation(plane_reference, &aligned[frame_idx]);
+                let (dx, dy, scale) =
+                    compute_phase_correlation(plane_reference, &aligned[frame_idx]);
                 per_exposure_shifts.push((dx, dy, scale));
-                tracing::debug!("Frame {} (F{}E{}): shift=({:.3}, {:.3}), scale={:.4}",
-                               frame_idx, focus_step, exposure_idx, dx, dy, scale);
+                tracing::debug!(
+                    "Frame {} (F{}E{}): shift=({:.3}, {:.3}), scale={:.4}",
+                    frame_idx,
+                    focus_step,
+                    exposure_idx,
+                    dx,
+                    dy,
+                    scale
+                );
             }
         }
     }
 
     // Log statistics on per-exposure shifts
-    let mut dx_values: Vec<f64> = per_exposure_shifts.iter().map(|(dx, _, _)| dx.abs()).collect();
-    let mut dy_values: Vec<f64> = per_exposure_shifts.iter().map(|(_, dy, _)| dy.abs()).collect();
+    let mut dx_values: Vec<f64> = per_exposure_shifts
+        .iter()
+        .map(|(dx, _, _)| dx.abs())
+        .collect();
+    let mut dy_values: Vec<f64> = per_exposure_shifts
+        .iter()
+        .map(|(_, dy, _)| dy.abs())
+        .collect();
     dx_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
     dy_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -375,8 +488,13 @@ fn align_frames_for_sr(frames: &[Array3<f64>], meta: &Meta, ref_idx: usize) -> R
     let dx_max = dx_values[dx_values.len() - 1];
     let dy_max = dy_values[dy_values.len() - 1];
 
-    tracing::info!("Per-exposure subpixel shifts: dx median={:.3}, max={:.3}; dy median={:.3}, max={:.3}",
-                   dx_median, dx_max, dy_median, dy_max);
+    tracing::info!(
+        "Per-exposure subpixel shifts: dx median={:.3}, max={:.3}; dy median={:.3}, max={:.3}",
+        dx_median,
+        dx_max,
+        dy_median,
+        dy_max
+    );
 
     Ok((aligned, per_exposure_shifts))
 }
@@ -399,7 +517,12 @@ fn align_frames(frames: &[Array3<f64>], ref_idx: usize) -> Result<Vec<Array3<f64
                 // Compute shift via phase correlation
                 let shift = compute_phase_correlation(reference, frame);
 
-                tracing::info!("Frame {}: shift = ({:.3}, {:.3}) pixels", i, shift.0, shift.1);
+                tracing::info!(
+                    "Frame {}: shift = ({:.3}, {:.3}) pixels",
+                    i,
+                    shift.0,
+                    shift.1
+                );
 
                 // Apply shift
                 shift_frame(frame, shift.0, shift.1)
@@ -430,7 +553,12 @@ fn compute_phase_correlation(ref_frame: &Array3<f64>, frame: &Array3<f64>) -> (f
     // Use 3-level pyramid for speed + scale estimation
     let (dx, dy, scale) = crate::align_raw::align_phasecorr_bayer_with_scale(&ref_2d, &frame_2d, 3);
 
-    tracing::debug!("Phase correlation: shift=({:.2}, {:.2}), scale={:.4}", dx, dy, scale);
+    tracing::debug!(
+        "Phase correlation: shift=({:.2}, {:.2}), scale={:.4}",
+        dx,
+        dy,
+        scale
+    );
 
     (dx, dy, scale)
 }
@@ -502,16 +630,16 @@ fn sample_bayer_channel(
     // For B (1,1): grid is (1,1), (1,3), (3,1), (3,3), ...
 
     let (y_offset, x_offset) = match target_color {
-        0 => (0, 0),  // R at (even, even)
+        0 => (0, 0), // R at (even, even)
         1 => {
             // G at (even, odd) or (odd, even) - pick closest
             if (y_src as usize) % 2 == 0 {
-                (0, 1)  // (even, odd)
+                (0, 1) // (even, odd)
             } else {
-                (1, 0)  // (odd, even)
+                (1, 0) // (odd, even)
             }
-        },
-        2 => (1, 1),  // B at (odd, odd)
+        }
+        2 => (1, 1), // B at (odd, odd)
         _ => unreachable!(),
     };
 
@@ -545,20 +673,17 @@ fn sample_bayer_channel(
     let v11 = frame[[y1, x1, 0]];
 
     // Bilinear interpolation
-    (1.0 - fx) * (1.0 - fy) * v00
-        + fx * (1.0 - fy) * v01
-        + (1.0 - fx) * fy * v10
-        + fx * fy * v11
+    (1.0 - fx) * (1.0 - fy) * v00 + fx * (1.0 - fy) * v01 + (1.0 - fx) * fy * v10 + fx * fy * v11
 }
 
 /// Get Bayer color at position (y, x)
 /// Returns: 0=R, 1=G, 2=B
 fn get_bayer_color_local(y: usize, x: usize) -> usize {
     match (y % 2, x % 2) {
-        (0, 0) => 0,  // R
-        (0, 1) => 1,  // G
-        (1, 0) => 1,  // G
-        (1, 1) => 2,  // B
+        (0, 0) => 0, // R
+        (0, 1) => 1, // G
+        (1, 0) => 1, // G
+        (1, 1) => 2, // B
         _ => unreachable!(),
     }
 }
@@ -597,7 +722,11 @@ fn shift_and_scale_frame(frame: &Array3<f64>, dx: f64, dy: f64, scale: f64) -> A
             let src_y = (dest_y - center_y - dy) / scale + center_y;
 
             // Bounds check
-            if src_x < 0.0 || src_y < 0.0 || src_x >= (width - 1) as f64 || src_y >= (height - 1) as f64 {
+            if src_x < 0.0
+                || src_y < 0.0
+                || src_x >= (width - 1) as f64
+                || src_y >= (height - 1) as f64
+            {
                 // Out of bounds - set to 0
                 transformed[[y, x, 0]] = 0.0;
                 continue;
@@ -650,7 +779,11 @@ fn shift_frame(frame: &Array3<f64>, dx: f64, dy: f64) -> Array3<f64> {
             let src_y = y as f64 - dy;
 
             // Bounds check with margin for interpolation
-            if src_x < 1.0 || src_y < 1.0 || src_x >= (width - 2) as f64 || src_y >= (height - 2) as f64 {
+            if src_x < 1.0
+                || src_y < 1.0
+                || src_x >= (width - 2) as f64
+                || src_y >= (height - 2) as f64
+            {
                 // Out of bounds - set to 0
                 shifted[[y, x, 0]] = 0.0;
                 continue;
@@ -658,9 +791,9 @@ fn shift_frame(frame: &Array3<f64>, dx: f64, dy: f64) -> Array3<f64> {
 
             // Determine color of destination pixel
             let dest_color = match (y % 2, x % 2) {
-                (0, 0) => 0,  // R
-                (0, 1) | (1, 0) => 1,  // G
-                (1, 1) => 2,  // B
+                (0, 0) => 0,          // R
+                (0, 1) | (1, 0) => 1, // G
+                (1, 1) => 2,          // B
                 _ => unreachable!(),
             };
 
@@ -752,7 +885,11 @@ fn compute_background_mask_from_reference(frame: &Array3<f64>) -> Result<Array2<
 
     // Use 2% threshold (more lenient than 5%)
     let threshold = max_luma * 0.02;
-    tracing::info!("Background threshold: {:.6} (2% of max {:.6})", threshold, max_luma);
+    tracing::info!(
+        "Background threshold: {:.6} (2% of max {:.6})",
+        threshold,
+        max_luma
+    );
 
     // Create binary mask
     let mut mask = Array2::<bool>::from_elem((height, width), false);
@@ -767,7 +904,11 @@ fn compute_background_mask_from_reference(frame: &Array3<f64>) -> Result<Array2<
     }
 
     let threshold_pct = (above_threshold as f64 / (width * height) as f64) * 100.0;
-    tracing::info!("Pixels above threshold: {} ({:.1}%)", above_threshold, threshold_pct);
+    tracing::info!(
+        "Pixels above threshold: {} ({:.1}%)",
+        above_threshold,
+        threshold_pct
+    );
 
     // Find connected components
     let components = find_connected_components_2d(&mask);
@@ -780,12 +921,14 @@ fn compute_background_mask_from_reference(frame: &Array3<f64>) -> Result<Array2<
     }
 
     // Find largest component (the object)
-    let largest = components.iter()
-        .max_by_key(|c| c.len())
-        .unwrap();  // Safe because we checked components.is_empty()
+    let largest = components.iter().max_by_key(|c| c.len()).unwrap(); // Safe because we checked components.is_empty()
 
     let object_pct = (largest.len() as f64 / (width * height) as f64) * 100.0;
-    tracing::info!("Largest component: {} pixels ({:.1}%)", largest.len(), object_pct);
+    tracing::info!(
+        "Largest component: {} pixels ({:.1}%)",
+        largest.len(),
+        object_pct
+    );
 
     // Create new mask with only largest component
     mask.fill(false);
@@ -795,22 +938,31 @@ fn compute_background_mask_from_reference(frame: &Array3<f64>) -> Result<Array2<
 
     // Fill holes (e.g., nasal cavity) - these are part of the bone, not background
     let filled_mask = fill_holes(&mask);
-    let filled_pct = (filled_mask.iter().filter(|&&b| b).count() as f64 / (width * height) as f64) * 100.0;
+    let filled_pct =
+        (filled_mask.iter().filter(|&&b| b).count() as f64 / (width * height) as f64) * 100.0;
     tracing::info!("After hole filling: {:.1}% object pixels", filled_pct);
 
     // Remove small isolated regions near borders BEFORE morphological operations
     // This prevents them from being connected to the main object
     let cleaned_mask = remove_border_artifacts(&filled_mask, 50, 1000);
 
-    let cleaned_pct = (cleaned_mask.iter().filter(|&&b| b).count() as f64 / (width * height) as f64) * 100.0;
-    tracing::info!("After removing border artifacts: {:.1}% object pixels", cleaned_pct);
+    let cleaned_pct =
+        (cleaned_mask.iter().filter(|&&b| b).count() as f64 / (width * height) as f64) * 100.0;
+    tracing::info!(
+        "After removing border artifacts: {:.1}% object pixels",
+        cleaned_pct
+    );
 
     // Morphological smoothing to clean up jagged edges
     // Increased radius from 1 to 2 for smoother edges
-    let smoothed = morphology_close(&cleaned_mask, 2);  // Close = dilate then erode
+    let smoothed = morphology_close(&cleaned_mask, 2); // Close = dilate then erode
 
-    let final_pct = (smoothed.iter().filter(|&&b| b).count() as f64 / (width * height) as f64) * 100.0;
-    tracing::info!("Final mask: {:.1}% object pixels after morphology", final_pct);
+    let final_pct =
+        (smoothed.iter().filter(|&&b| b).count() as f64 / (width * height) as f64) * 100.0;
+    tracing::info!(
+        "Final mask: {:.1}% object pixels after morphology",
+        final_pct
+    );
 
     Ok(smoothed)
 }
@@ -851,7 +1003,8 @@ fn find_connected_components_2d(mask: &Array2<bool>) -> Vec<Vec<(usize, usize)>>
                     }
                 }
 
-                if component.len() > 100 {  // Filter out tiny noise components
+                if component.len() > 100 {
+                    // Filter out tiny noise components
                     components.push(component);
                 }
             }
@@ -922,7 +1075,11 @@ fn morphology_close(mask: &Array2<bool>, radius: usize) -> Array2<bool> {
 /// Remove small isolated regions near image borders
 /// These are likely background artifacts that shouldn't be part of the object
 /// Strategy: Erode to disconnect thin border connections, remove small components, then restore
-fn remove_border_artifacts(mask: &Array2<bool>, _border_width: usize, _min_size: usize) -> Array2<bool> {
+fn remove_border_artifacts(
+    mask: &Array2<bool>,
+    _border_width: usize,
+    _min_size: usize,
+) -> Array2<bool> {
     let (height, width) = mask.dim();
 
     // Step 1: Very light erosion to disconnect thin border connections (reduced from 2 to 1)
@@ -932,7 +1089,8 @@ fn remove_border_artifacts(mask: &Array2<bool>, _border_width: usize, _min_size:
     let components = find_connected_components_2d(&eroded);
 
     // Step 3: Identify the largest component (main object)
-    let largest_component = components.iter()
+    let largest_component = components
+        .iter()
         .max_by_key(|c| c.len())
         .cloned()
         .unwrap_or_default();
@@ -1000,11 +1158,10 @@ fn fill_holes(mask: &Array2<bool>) -> Array2<bool> {
     for y in 0..height {
         for x in 0..width {
             if !mask[[y, x]] && !visited[[y, x]] {
-                result[[y, x]] = true;  // Fill the hole
+                result[[y, x]] = true; // Fill the hole
             }
         }
     }
 
     result
 }
-

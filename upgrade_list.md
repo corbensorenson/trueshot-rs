@@ -1855,7 +1855,7 @@ Scope: local-first product architecture + monetization operations reconciliation
 - Acceptance criteria:
   - A CI report proves no customer workload endpoints depend on vendor compute services.
   - Docs and deployment defaults match the local-first boundary.
-- Status: Open
+- Status: Done (2026-02-09) — added local-first policy doc, endpoint classification manifest, and CI enforcement (`scripts/check_local_first_boundary.py`); feature matrix now advertises the local-first boundary.
 
 137. License activation flow remains inconsistent across code paths
 - Evidence:
@@ -1869,7 +1869,7 @@ Scope: local-first product architecture + monetization operations reconciliation
 - Acceptance criteria:
   - No production code path returns placeholder activation errors.
   - Activation flows are deterministic across dashboard, CLI, and server.
-- Status: Open
+- Status: Done (2026-02-09) — added `/api/license/activate-key` with device-aware activation, updated dashboard License Console with key activation, and enabled CLI activation via `TRUESHOT_LICENSE_KEY`/`TRUESHOT_LICENSE_DEVICE_NAME`.
 
 138. Per-license full-build packaging model is undefined and high-risk
 - Evidence:
@@ -1954,7 +1954,7 @@ Scope: local-first product architecture + monetization operations reconciliation
 - Acceptance criteria:
   - Shipping/planned states remain synchronized with test-verified behavior.
   - No "done" roadmap item can remain without passing parity checks.
-- Status: Open
+- Status: Done (2026-02-09) — added CI parity checks for key shipping capabilities and updated `docs/FEATURE_MATRIX.md` to include activation + local-first boundary; OpenAPI spec remains CI-verified.
 
 ## P2: Beyond State-Of-The-Art Product Value
 
@@ -1981,3 +1981,70 @@ Scope: local-first product architecture + monetization operations reconciliation
 - Acceptance criteria:
   - Users can build, save, and run end-to-end workflows with GUI/Python parity and consistent license gating.
 - Status: Open
+
+146. Nikon NEF ROI loading did full-stream work or required uneconomic per-image indexes
+- Evidence:
+  - Nikon compression `34713` is a monolithic variable-length predictive stream; arbitrary byte seeking is not exact without prior entropy and predictor state.
+  - A persistent index measured 2.8 MB for one 45 MB Z9 NEF, which would consume roughly 2.8 TB for one million unique files before filesystem overhead.
+  - The former selective path decoded every row and pixel even when only a small ROI was returned.
+- Upgrade actions:
+  - Make a sidecar-free, forward entropy scan the default for one-pass ingestion.
+  - Reconstruct only predictors required to reach the ROI, stop after its final pixel, and decode directly into the final native `u16` crop buffer.
+  - Decode the embedded JPEG with IDCT scaling rather than expanding its full-resolution RGB image.
+  - Reuse one preview-derived Bayer-aligned crop across each `F1E1..FnEm` HDR/focus group, selecting `FnEm` as the furthest-focus, longest-exposure reference.
+  - Keep persistent entropy checkpoints behind explicit `TRUESHOT_NEF_ACCESS_MODE=indexed` opt-in for repeated interactive access only.
+- Acceptance criteria:
+  - Default mode creates no index or sidecar files.
+  - ROI pixels are bit-exact against a full decode at top, center, detected-object, and bottom image positions.
+  - Crop time scales with the ROI's final row and native allocation scales with ROI area.
+  - Exactly one preview detection runs per HDR/focus group.
+- Status: Done (2026-07-26) - release-mode tests on five `realTest` Nikon Z9 NEFs were pixel-exact. On the local arm64 test host, a 1024x1024 center crop fell from the prior 311 ms baseline to 149-177 ms; the detected 1310x1304 group crop measured 202-240 ms versus 296-329 ms full decode. Default mode created zero sidecars. Explicit indexed mode remained exact and measured 16.7-37 ms warm access after a one-time 2.8 MB index.
+
+## P1: Launch Readiness
+
+147. Million-file ingestion orchestration is not bounded or resumable
+- Evidence:
+  - `trueshot-core/src/exif_parser.rs` materializes every path and metadata record before grouping.
+  - `trueshot-core/src/smart_loader.rs` collects every decoded frame in a sequence into memory.
+  - `BayerFrame` converts native `u16` CFA pixels to `f64`, multiplying resident memory when downstream work does not require that precision.
+- Risk: very large collections can exhaust memory, lose hours of progress after interruption, and oversubscribe storage even though individual NEF crops are efficient.
+- Upgrade actions:
+  - Add a streaming directory/manifest reader and incremental HDR-focus group assembler.
+  - Execute immutable `SequenceCropPlan` groups through a bounded worker pool sized from storage throughput, CPU, and an explicit memory budget.
+  - Keep frames as native `u16` or normalized `f32` until an algorithm explicitly requires `f64`.
+  - Add idempotent output naming, per-group checkpoints, retry/dead-letter manifests, cancellation, progress/ETA, and crash-safe resume.
+  - Add adaptive concurrency based on page faults, disk queue depth, decode latency, and destination backpressure.
+- Acceptance criteria:
+  - A one-million-entry manifest dry run has bounded RSS independent of collection size.
+  - A stress run proves only one preview decode per capture group and zero default NEF sidecars.
+  - Killing and resuming a run neither repeats committed work nor loses failed-file diagnostics.
+  - Throughput and p50/p95/p99 latency are reported by camera/compression mode and storage class.
+- Status: Done (2026-07-26)
+  - Verified: every quality preset now keeps exact ROI decoding enabled; `--full-frame` is the explicit opt-out.
+  - Verified: `Z9NefParser::load_roi_into` fills caller-owned storage and `SmartLoader::load_sequence_native_into` fills ordered slots in one reusable contiguous `u16` arena through a bounded worker pool.
+  - Verified: decode failures now fail the group with frame index/path instead of silently removing a frame.
+  - Verified: native `u16` frames flow directly through tiled `f32` lazy-calibrated HDR/focus fusion; compact alignment alone uses `f64`, accepted transforms are sampled lazily, and depth/confidence are retained without cropped-file intermediates.
+  - Verified: incremental bounded capture manifests carry explicit frame/focus/exposure/burst order, one reference frame, stable content IDs and the shared crop plan. The million-group benchmark streamed a 609,361,230-byte manifest with 0.6 MiB RSS growth.
+  - Verified: memory-credit admission includes retained asynchronous export buffers. Automatic decoder workers respond to normalized throughput, writer backpressure, available memory and major page faults; explicit `--jobs` remains deterministic.
+  - Verified: stable names, atomic strip-streamed TIFF/PNG writes with in-flight SHA-256, a durable REDB journal, retry diagnostics, cancellation-safe boundaries and metadata/sampled/full artifact verification provide crash-safe resume.
+  - Verified: fused focus stacks can enter SfM/MVS as shared in-memory image buffers; intermediate persistence is optional.
+  - Verified: all 21 `realTest` Z9 crops were pixel-exact against full decode. The 1310x1304 group occupied 68.42 MiB and decoded in 974.72 ms with eight workers in the final parity run; full native decode/fusion/demosaic/export completed in approximately 2.12 seconds.
+  - Verified: latency reporting is partitioned by camera/model/compression/bit depth/strip count/storage class and includes p50/p95/p99.
+
+148. NEF compatibility and corruption testing is too narrow for a commercial RAW loader
+- Evidence:
+  - Exactness benchmarks currently cover a small Nikon Z9 `realTest` corpus using lossless compression `34713`.
+  - Packed 12/14-bit, multi-strip, firmware variation, truncated files, malformed MakerNotes, and other Nikon bodies lack a versioned differential corpus.
+- Risk: camera or firmware variants can silently produce incorrect crops, crashes, or expensive full-decode fallbacks.
+- Upgrade actions:
+  - Build a legally redistributable metadata/synthetic corpus plus customer-supplied local corpus runner.
+  - Differential-test full and ROI pixels against LibRaw/RawSpeed across supported camera, firmware, compression, strip/tile, and bit-depth combinations.
+  - Fuzz TIFF/IFD, MakerNote, Huffman, ROI arithmetic, seek-index loading, and truncated entropy streams.
+  - Publish a support matrix and fail closed on unverified layouts rather than returning plausible but wrong pixels.
+- Acceptance criteria:
+  - Every advertised camera/layout passes differential crop tests at boundaries and randomized ROIs.
+  - Fuzzing finds no panic, out-of-bounds access, unbounded allocation, or silent partial output.
+  - CI blocks releases on pixel mismatch or selective-decode performance regression.
+- Status: In Progress (2026-07-26)
+  - Verified: the local corruption runner catches panics, exercises descending truncations and mutates every critical TIFF header byte. The Z9 run completed 14 probes with zero panics, rejected all eight header mutations and accepted only two near-end truncations whose requested ROI data remained intact.
+  - Remaining: legally redistributable multi-body/multi-firmware Nikon corpus, LibRaw/RawSpeed differential coverage, sustained parser fuzzing, published support matrix and CI performance thresholds.

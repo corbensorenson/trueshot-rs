@@ -650,6 +650,7 @@ async fn main() -> std::io::Result<()> {
             .service(api::license::import_license)
             .service(api::license::get_license_devices)
             .service(api::license::activate_license_device)
+            .service(api::license::activate_license_key)
             .service(api::license::deactivate_license_device)
             // Projects
             .service(api::project::get_projects)

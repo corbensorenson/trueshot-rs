@@ -11,6 +11,7 @@ trueshot-ai = { path = "../trueshot-ai" }
 trueshot-storage = { path = "../trueshot-storage" }
 trueshot-device-manager = { path = "../trueshot-device-manager" }
 image = "0.25"
+jpeg-decoder = "0.3"
 nalgebra = { version = "0.32", features = ["serde-serialize"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -56,7 +57,7 @@ lazy_static = "1.4"
 sentry = "0.31"
 tracing-log = "0.2"
 walkdir = "2.4"
-reqwest = { version = "0.11", features = ["json", "multipart", "stream"] }
+reqwest = { version = "0.11", features = ["json", "multipart", "stream", "blocking"] }
 hostname = "0.3"
 num_cpus = "1.16"
 human-panic = "1.2"
@@ -69,6 +70,7 @@ sha2 = { version = "0.10", features = ["oid"] }
 rsa = { version = "0.9", features = ["pem"] }
 mac_address = "1.1"
 dirs = "5.0"
+memmap2 = "0.9"
 base64 = "0.21"
 utoipa = { version = "4.2", optional = true, features = ["chrono", "uuid"] }
 aes-gcm = "0.10"

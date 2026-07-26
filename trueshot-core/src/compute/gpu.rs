@@ -11,14 +11,18 @@ pub struct GpuCompute {
 impl GpuCompute {
     pub async fn new() -> Result<Self> {
         let instance = wgpu::Instance::default();
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
             .ok_or_else(|| anyhow::anyhow!("No GPU Adapter found"))?;
-            
-        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
-        
+
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .await?;
+
         // Load Shader
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/heatmap.wgsl"));
-        
+
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Heatmap Pipeline"),
             layout: None,
@@ -26,13 +30,23 @@ impl GpuCompute {
             entry_point: "main",
         });
 
-        Ok(Self { device, queue, pipeline })
+        Ok(Self {
+            device,
+            queue,
+            pipeline,
+        })
     }
 
-    pub async fn compute_density(&self, points: &[ColoredPoint], voxel_size: f32) -> Result<Vec<u32>> {
+    pub async fn compute_density(
+        &self,
+        points: &[ColoredPoint],
+        voxel_size: f32,
+    ) -> Result<Vec<u32>> {
         use wgpu::util::DeviceExt;
 
-        if points.is_empty() { return Ok(vec![]); }
+        if points.is_empty() {
+            return Ok(vec![]);
+        }
 
         // 1. Calculate Bounds & Grid
         let mut min = points[0].position.coords;
@@ -52,12 +66,17 @@ impl GpuCompute {
 
         // 2. Prepare Buffers
         // Input Points: vec4 (x, y, z, padding)
-        let raw_points: Vec<f32> = points.iter().flat_map(|p| vec![p.position.x, p.position.y, p.position.z, 0.0]).collect();
-        let point_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Point Buffer"),
-            contents: bytemuck::cast_slice(&raw_points),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let raw_points: Vec<f32> = points
+            .iter()
+            .flat_map(|p| vec![p.position.x, p.position.y, p.position.z, 0.0])
+            .collect();
+        let point_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Point Buffer"),
+                contents: bytemuck::cast_slice(&raw_points),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
 
         // Output Density: u32 per voxel
         let density_buffer_size = (total_voxels * 4) as wgpu::BufferAddress;
@@ -70,9 +89,18 @@ impl GpuCompute {
 
         // Uniforms
         let uniforms = [
-            min.x, min.y, min.z, 0.0, // min_bound + pad
-            max.x, max.y, max.z, 0.0, // max_bound + pad (unused but kept for align)
-            grid_size_x as f32, grid_size_y as f32, grid_size_z as f32, 0.0, // sizes cast to f32 for easier padding, shader expects u32 though. Let's send u32
+            min.x,
+            min.y,
+            min.z,
+            0.0, // min_bound + pad
+            max.x,
+            max.y,
+            max.z,
+            0.0, // max_bound + pad (unused but kept for align)
+            grid_size_x as f32,
+            grid_size_y as f32,
+            grid_size_z as f32,
+            0.0, // sizes cast to f32 for easier padding, shader expects u32 though. Let's send u32
         ];
         // Correction: Shader expects:
         // vec3<f32> min;
@@ -83,23 +111,41 @@ impl GpuCompute {
         #[repr(C)]
         #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
         struct Uniforms {
-            min_x: f32, min_y: f32, min_z: f32, pad1: f32,
-            max_x: f32, max_y: f32, max_z: f32, pad2: f32,
-            grid_x: u32, grid_y: u32, grid_z: u32,
+            min_x: f32,
+            min_y: f32,
+            min_z: f32,
+            pad1: f32,
+            max_x: f32,
+            max_y: f32,
+            max_z: f32,
+            pad2: f32,
+            grid_x: u32,
+            grid_y: u32,
+            grid_z: u32,
             voxel_size: f32,
         }
         let uniform_data = Uniforms {
-            min_x: min.x, min_y: min.y, min_z: min.z, pad1: 0.0,
-            max_x: max.x, max_y: max.y, max_z: max.z, pad2: 0.0,
-            grid_x: grid_size_x, grid_y: grid_size_y, grid_z: grid_size_z,
+            min_x: min.x,
+            min_y: min.y,
+            min_z: min.z,
+            pad1: 0.0,
+            max_x: max.x,
+            max_y: max.y,
+            max_z: max.z,
+            pad2: 0.0,
+            grid_x: grid_size_x,
+            grid_y: grid_size_y,
+            grid_z: grid_size_z,
             voxel_size,
         };
-        
-        let uniform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Uniform Buffer"),
-            contents: bytemuck::bytes_of(&uniform_data),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Uniform Buffer"),
+                contents: bytemuck::bytes_of(&uniform_data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         // 3. Bind Group
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
@@ -107,16 +153,32 @@ impl GpuCompute {
             label: Some("Heatmap Bind Group"),
             layout: &bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: point_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: density_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: point_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: density_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
             ],
         });
 
         // 4. Dispatch
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Compute Encoder") });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Compute Encoder"),
+            });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Compute Pass"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             let workgroups = (points.len() as u32 + 63) / 64;
@@ -137,7 +199,7 @@ impl GpuCompute {
         let slice = staging_buffer.slice(..);
         let (sender, receiver) = tokio::sync::oneshot::channel();
         slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-        
+
         self.device.poll(wgpu::Maintain::Wait);
         receiver.await.unwrap().unwrap();
 

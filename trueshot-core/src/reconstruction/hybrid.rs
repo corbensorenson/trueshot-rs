@@ -1,24 +1,23 @@
 //! Hybrid 3DGS + Photogrammetry Pipeline
-//! 
+//!
 //! State-of-the-art pipeline that combines the best of both worlds:
 //! - Real-time processing DURING scanning (low-res webcam)
 //! - High-quality refinement AFTER scanning (DSLR SD card)
-//! 
+//!
 //! This is TrueShot's flagship reconstruction method.
 
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use exif::{In, Tag, Value};
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use nalgebra as na;
 use std::fs::File;
 use std::io::BufReader;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::gaussian_splatting::{
-    GaussianSplatTrainer, GaussianCloud, Camera as GSCamera, 
-    TrainingConfig,
+    Camera as GSCamera, GaussianCloud, GaussianSplatTrainer, TrainingConfig,
 };
 
 /// Hybrid pipeline phases
@@ -161,7 +160,7 @@ impl Default for LiveReconState {
 }
 
 /// The main Hybrid Pipeline
-/// 
+///
 /// Architecture:
 /// ```text
 /// ┌─────────────────────────────────────────────────────────────────────┐
@@ -253,7 +252,7 @@ impl HybridPipeline {
     /// Add a live frame with pre-extracted 3D points
     /// This is called by the scanning system which handles feature extraction
     pub async fn add_live_frame_with_points(
-        &mut self, 
+        &mut self,
         frame: LiveFrame,
         new_points: Vec<SparsePoint3D>,
     ) -> Result<()> {
@@ -288,18 +287,20 @@ impl HybridPipeline {
         }
 
         // Create preview Gaussians from sparse points
-        let points: Vec<(na::Point3<f32>, [u8; 3])> = state.sparse_points
+        let points: Vec<(na::Point3<f32>, [u8; 3])> = state
+            .sparse_points
             .iter()
             .map(|p| (p.position, p.color))
             .collect();
 
         let cloud = GaussianCloud::from_points(&points);
-        
-        tracing::info!("📊 Preview: {} Gaussians from {} points", 
+
+        tracing::info!(
+            "📊 Preview: {} Gaussians from {} points",
             cloud.num_gaussians(),
             state.sparse_points.len()
         );
-        
+
         state.preview_gaussians = Some(cloud);
 
         Ok(())
@@ -308,8 +309,10 @@ impl HybridPipeline {
     /// Notify scanning is complete
     pub fn complete_scanning(&mut self) {
         self.phase = PipelinePhase::HighResIngestion;
-        tracing::info!("✅ Scanning complete: {} frames, moving to SD card ingestion", 
-            self.live_frames.len());
+        tracing::info!(
+            "✅ Scanning complete: {} frames, moving to SD card ingestion",
+            self.live_frames.len()
+        );
     }
 
     // =========================================================================
@@ -342,7 +345,7 @@ impl HybridPipeline {
         for image_path in images {
             // Extract EXIF timestamp (simplified)
             let timestamp = self.extract_timestamp(&image_path)?;
-            
+
             // Find closest live frame
             let matched_idx = self.find_closest_live_frame(timestamp);
 
@@ -362,8 +365,12 @@ impl HybridPipeline {
             self.high_res_images.push(high_res);
         }
 
-        tracing::info!("📸 Matched {} high-res images to live frames", 
-            self.high_res_images.iter().filter(|i| i.matched_live_frame_idx.is_some()).count()
+        tracing::info!(
+            "📸 Matched {} high-res images to live frames",
+            self.high_res_images
+                .iter()
+                .filter(|i| i.matched_live_frame_idx.is_some())
+                .count()
         );
 
         self.phase = PipelinePhase::Refinement;
@@ -389,7 +396,8 @@ impl HybridPipeline {
 
         for (idx, frame) in self.live_frames.iter().enumerate() {
             let diff = (frame.timestamp - timestamp).abs();
-            if diff < best_diff && diff < 5.0 { // Within 5 seconds
+            if diff < best_diff && diff < 5.0 {
+                // Within 5 seconds
                 best_diff = diff;
                 best_idx = Some(idx);
             }
@@ -400,13 +408,12 @@ impl HybridPipeline {
 
     fn detect_camera_index(&self, path: &PathBuf) -> usize {
         // Detect camera index from filename (e.g., CAM1_0001.jpg -> 0)
-        let filename = path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if filename.contains("CAM2") || filename.contains("cam2") || filename.contains("_2_") {
             1
-        } else if filename.contains("CAM3") || filename.contains("cam3") || filename.contains("_3_") {
+        } else if filename.contains("CAM3") || filename.contains("cam3") || filename.contains("_3_")
+        {
             2
         } else {
             0 // Default to first camera
@@ -416,12 +423,10 @@ impl HybridPipeline {
     fn read_exif_timestamp(path: &PathBuf) -> Option<f64> {
         let file = File::open(path).ok()?;
         let mut bufreader = BufReader::new(file);
-        let exif = exif::Reader::new().read_from_container(&mut bufreader).ok()?;
-        let candidates = [
-            Tag::DateTimeOriginal,
-            Tag::DateTimeDigitized,
-            Tag::DateTime,
-        ];
+        let exif = exif::Reader::new()
+            .read_from_container(&mut bufreader)
+            .ok()?;
+        let candidates = [Tag::DateTimeOriginal, Tag::DateTimeDigitized, Tag::DateTime];
         for tag in candidates {
             if let Some(field) = exif.get_field(tag, In::PRIMARY) {
                 if let Value::Ascii(ref vec) = field.value {
@@ -497,7 +502,8 @@ impl HybridPipeline {
 
         // 2. Get initial points from live scan
         let state = self.state.read().await;
-        let initial_points: Vec<(na::Point3<f32>, [u8; 3])> = state.sparse_points
+        let initial_points: Vec<(na::Point3<f32>, [u8; 3])> = state
+            .sparse_points
             .iter()
             .map(|p| (p.position, p.color))
             .collect();
@@ -527,17 +533,25 @@ impl HybridPipeline {
         };
 
         // 4. Train 3DGS
-        tracing::info!("🎯 Training 3DGS with {} initial points, {} cameras", 
-            initial_points.len(), cameras.len());
+        tracing::info!(
+            "🎯 Training 3DGS with {} initial points, {} cameras",
+            initial_points.len(),
+            cameras.len()
+        );
 
         let mut trainer = GaussianSplatTrainer::new(&initial_points, cameras, config.clone());
 
         for i in 0..config.iterations {
             let loss = trainer.step()?;
-            
+
             if i % 1000 == 0 {
-                tracing::info!("  Iteration {}/{}: loss={:.4}, gaussians={}", 
-                    i, config.iterations, loss, trainer.num_gaussians());
+                tracing::info!(
+                    "  Iteration {}/{}: loss={:.4}, gaussians={}",
+                    i,
+                    config.iterations,
+                    loss,
+                    trainer.num_gaussians()
+                );
             }
         }
 
@@ -552,7 +566,10 @@ impl HybridPipeline {
         let spz_path = output_dir.join("model.spz");
         trainer.export_spz(&spz_path)?;
 
-        tracing::info!("✅ 3DGS training complete: {} Gaussians", trainer.num_gaussians());
+        tracing::info!(
+            "✅ 3DGS training complete: {} Gaussians",
+            trainer.num_gaussians()
+        );
         tracing::info!("📁 Output saved to: {:?}", output_dir);
 
         self.phase = PipelinePhase::Export;
@@ -599,7 +616,7 @@ impl HybridPipeline {
     /// Get pipeline progress (0.0 - 1.0)
     pub async fn progress(&self) -> f32 {
         let state = self.state.read().await;
-        
+
         match self.phase {
             PipelinePhase::LiveScanning => {
                 // Estimate based on expected frame count
@@ -638,12 +655,13 @@ impl MultiCameraRig {
     pub fn single_camera() -> Self {
         Self {
             num_cameras: 1,
-            camera_transforms: vec![
-                [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
-            ],
-            camera_intrinsics: vec![
-                [[500.0, 0.0, 320.0], [0.0, 500.0, 240.0], [0.0, 0.0, 1.0]]
-            ],
+            camera_transforms: vec![[
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]],
+            camera_intrinsics: vec![[[500.0, 0.0, 320.0], [0.0, 500.0, 240.0], [0.0, 0.0, 1.0]]],
         }
     }
 

@@ -3,13 +3,13 @@
 //! Provides RSA-based license verification for commercial distribution.
 //! Licenses are signed by the vendor's private key and verified at runtime.
 
-use sha2::{Sha256, Digest};
-use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use anyhow::{anyhow, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
-use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, Pkcs1v15Sign};
+use rsa::{pkcs8::DecodePublicKey, Pkcs1v15Sign, RsaPublicKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// License types
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -89,35 +89,37 @@ impl LicenseVerifier {
             last_verified: 0,
         }
     }
-    
+
     /// Verify a signed license
     pub fn verify(&mut self, signed_license: &SignedLicense) -> Result<&LicenseData> {
         let pem = load_public_key_pem()?;
         if is_placeholder_key(&pem) && !cfg!(test) && !placeholder_key_allowed() {
-            return Err(anyhow!("Placeholder RSA public key is not allowed in production builds"));
+            return Err(anyhow!(
+                "Placeholder RSA public key is not allowed in production builds"
+            ));
         }
 
         // 1. Serialize license data for signature verification
         let data_json = serde_json::to_string(&signed_license.data)?;
         let data_hash = self.compute_hash(data_json.as_bytes());
-        
+
         // 2. Verify RSA signature
         if !self.verify_signature(&data_hash, &signed_license.signature) {
             tracing::warn!("License signature verification failed");
             return Err(anyhow!("Invalid license signature"));
         }
-        
+
         // 3. Check expiry
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         if signed_license.data.expires_at > 0 && now > signed_license.data.expires_at {
             tracing::warn!("License expired");
             return Err(anyhow!("License expired"));
         }
-        
+
         // 4. Check machine binding (if specified)
         if let Some(ref bound_machine) = signed_license.data.machine_id {
             let current_machine = self.get_machine_fingerprint();
@@ -126,7 +128,7 @@ impl LicenseVerifier {
                 return Err(anyhow!("License not valid for this machine"));
             }
         }
-        
+
         // 5. Cache verified license
         self.cached_license = Some(signed_license.data.clone());
         self.last_verified = now;
@@ -135,22 +137,22 @@ impl LicenseVerifier {
             expires_at = signed_license.data.expires_at,
             "License verified"
         );
-        
+
         Ok(self.cached_license.as_ref().unwrap())
     }
-    
+
     /// Load and verify license from file
     pub fn load_license(&mut self, path: &std::path::Path) -> Result<&LicenseData> {
         let license_json = std::fs::read_to_string(path)?;
         let signed_license: SignedLicense = serde_json::from_str(&license_json)?;
         self.verify(&signed_license)
     }
-    
+
     /// Get cached license (returns None if not verified)
     pub fn get_license(&self) -> Option<&LicenseData> {
         self.cached_license.as_ref()
     }
-    
+
     /// Check if a feature is enabled
     pub fn has_feature(&self, feature: &str) -> bool {
         self.cached_license
@@ -158,7 +160,7 @@ impl LicenseVerifier {
             .map(|l| l.features.contains(&feature.to_string()))
             .unwrap_or(false)
     }
-    
+
     /// Check if license is Enterprise tier
     pub fn is_enterprise(&self) -> bool {
         self.cached_license
@@ -166,14 +168,14 @@ impl LicenseVerifier {
             .map(|l| l.license_type == LicenseType::Enterprise)
             .unwrap_or(false)
     }
-    
+
     /// Compute SHA256 hash
     fn compute_hash(&self, data: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(data);
         hasher.finalize().into()
     }
-    
+
     /// Verify RSA signature (simplified - uses embedded public key)
     fn verify_signature(&self, hash: &[u8; 32], signature_b64: &str) -> bool {
         // Decode base64 signature
@@ -181,7 +183,7 @@ impl LicenseVerifier {
             Ok(bytes) => bytes,
             Err(_) => return false,
         };
-        
+
         let public_key_pem = match load_public_key_pem() {
             Ok(key) => key,
             Err(err) => {
@@ -199,15 +201,15 @@ impl LicenseVerifier {
             Ok(key) => key,
             Err(_) => return false,
         };
-        
+
         let scheme = Pkcs1v15Sign::new::<Sha256>();
         public_key.verify(scheme, hash, &signature_bytes).is_ok()
     }
-    
+
     /// Generate machine fingerprint for license binding
     fn get_machine_fingerprint(&self) -> String {
         let mut components = Vec::new();
-        
+
         // CPU info
         #[cfg(target_os = "linux")]
         {
@@ -220,14 +222,11 @@ impl LicenseVerifier {
                 }
             }
         }
-        
+
         // MAC address (first interface)
         #[cfg(target_os = "macos")]
         {
-            if let Ok(output) = std::process::Command::new("ifconfig")
-                .arg("en0")
-                .output()
-            {
+            if let Ok(output) = std::process::Command::new("ifconfig").arg("en0").output() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
                     if line.contains("ether") {
@@ -237,16 +236,16 @@ impl LicenseVerifier {
                 }
             }
         }
-        
+
         // Hostname
         if let Ok(hostname) = std::env::var("HOSTNAME") {
             components.push(hostname);
         }
-        
+
         // Hash all components
         let combined = components.join("|");
         let hash = self.compute_hash(combined.as_bytes());
-        hex::encode(&hash[..16])  // Use first 16 bytes
+        hex::encode(&hash[..16]) // Use first 16 bytes
     }
 }
 
@@ -279,15 +278,15 @@ pub fn generate_dev_license() -> SignedLicense {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     SignedLicense {
         data: LicenseData {
             id: uuid::Uuid::new_v4().to_string(),
             email: "dev@trueshot.local".to_string(),
             license_type: LicenseType::Development,
             issued_at: now,
-            expires_at: now + 365 * 24 * 3600,  // 1 year
-            max_scans_per_month: 0,  // Unlimited
+            expires_at: now + 365 * 24 * 3600, // 1 year
+            max_scans_per_month: 0,            // Unlimited
             machine_id: None,
             features: vec![
                 "3dgs".to_string(),
@@ -305,14 +304,14 @@ pub fn generate_dev_license() -> SignedLicense {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_dev_license_generation() {
         let license = generate_dev_license();
         assert_eq!(license.data.license_type, LicenseType::Development);
         assert!(license.data.features.contains(&"3dgs".to_string()));
     }
-    
+
     #[test]
     fn test_dev_license_verification() {
         let mut verifier = LicenseVerifier::new();

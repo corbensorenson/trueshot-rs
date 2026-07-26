@@ -1,15 +1,19 @@
-use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use crate::reconstruction::pipeline::{ReconstructionPipeline, ReconstructionConfig, ReconstructionType};
-use crate::reconstruction::livescan::{LiveScanData, PosePriors, PosePriorFrame, TransformConvention};
-use crate::reconstruction::multicam_sfm::CameraPose;
 use crate::intrinsics::estimate_intrinsics;
+use crate::reconstruction::livescan::{
+    LiveScanData, PosePriorFrame, PosePriors, TransformConvention,
+};
+use crate::reconstruction::multicam_sfm::CameraPose;
+use crate::reconstruction::pipeline::{
+    ReconstructionConfig, ReconstructionPipeline, ReconstructionType,
+};
 use crate::scanning::rig::{RigSolver, ScannerRig};
+use anyhow::{Context, Result};
 use chrono::NaiveDateTime;
 use exif::{In, Reader, Tag, Value};
 use nalgebra as na;
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// Unified interface for all reconstruction tasks
@@ -31,10 +35,10 @@ impl UnifiedReconstruction {
     ) -> Result<()> {
         let priors = self.resolve_priors(livescan_path.clone(), priors)?;
         let config = ReconstructionConfig {
-            reconstruction_type: if quality == "fast" { 
-                ReconstructionType::PhotogrammetryFast 
-            } else { 
-                ReconstructionType::PhotogrammetryHighQuality 
+            reconstruction_type: if quality == "fast" {
+                ReconstructionType::PhotogrammetryFast
+            } else {
+                ReconstructionType::PhotogrammetryHighQuality
             },
             workspace_path: self.workspace_path.clone(),
         };
@@ -66,9 +70,13 @@ impl UnifiedReconstruction {
     /// 1. Detects sequences (turntable rotations).
     /// 2. Solves Rig Configuration at the start of each sequence.
     /// 3. Propagates poses for the rest of the sequence using turntable angles.
-    pub fn synchronize_dslr_images(&self, dslr_dir: &PathBuf, livescan_path: &PathBuf) -> Result<PosePriors> {
+    pub fn synchronize_dslr_images(
+        &self,
+        dslr_dir: &PathBuf,
+        livescan_path: &PathBuf,
+    ) -> Result<PosePriors> {
         let livescan = LiveScanData::load_from_file(livescan_path)?;
-        
+
         // 1. Gather DSLR images (EXIF timestamps preferred)
         let dslr_images = collect_dslr_images(dslr_dir)?;
         if dslr_images.is_empty() {
@@ -78,7 +86,7 @@ impl UnifiedReconstruction {
         // 2. Group LiveScan data into Sequences (Angle resets or time gaps)
         // A sequence is a continuous set of captures where cameras are static.
         // We assume a sequence starts when angle ~= 0 or angle < prev_angle
-        
+
         let sequences = group_livescan_sequences(&livescan.frames);
         tracing::info!("Found {} capture sequences.", sequences.len());
 
@@ -93,7 +101,10 @@ impl UnifiedReconstruction {
 
         // 5. Solve rigs per sequence and propagate poses per frame
         let rig_solver = RigSolver::new(self.workspace_path.clone());
-        let mut priors = PosePriors { frames: Vec::new(), imu_samples: Vec::new() };
+        let mut priors = PosePriors {
+            frames: Vec::new(),
+            imu_samples: Vec::new(),
+        };
         let mut used_paths: HashSet<PathBuf> = HashSet::new();
         let mut rig_solved = 0usize;
         let mut rig_fallback = 0usize;
@@ -103,8 +114,7 @@ impl UnifiedReconstruction {
                 continue;
             }
 
-            let (_rig_frame_idx, rig_images) =
-                select_rig_frame(frame_indices, &frame_matches);
+            let (_rig_frame_idx, rig_images) = select_rig_frame(frame_indices, &frame_matches);
 
             let rig = if rig_images.len() >= 2 {
                 match rig_solver.solve_for_sequence(&rig_images) {
@@ -141,10 +151,13 @@ impl UnifiedReconstruction {
                             continue;
                         }
                         let key = img.camera_key.clone();
-                        let pose = pose_map
-                            .get(&key)
-                            .cloned()
-                            .unwrap_or_else(|| pose_map.values().next().cloned().unwrap_or_else(CameraPose::identity));
+                        let pose = pose_map.get(&key).cloned().unwrap_or_else(|| {
+                            pose_map
+                                .values()
+                                .next()
+                                .cloned()
+                                .unwrap_or_else(CameraPose::identity)
+                        });
                         let intrinsics = estimate_intrinsics(&img.path)?;
                         priors.frames.push(PosePriorFrame {
                             image_path: img.path.to_string_lossy().to_string(),
@@ -256,13 +269,24 @@ fn collect_dslr_images(root: &Path) -> Result<Vec<DslrImageInfo>> {
             camera_key,
         });
     }
-    images.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+    images.sort_by(|a, b| {
+        a.timestamp
+            .partial_cmp(&b.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(images)
 }
 
 fn is_image_path(path: &Path) -> bool {
-    match path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()) {
-        Some(ext) => matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "tif" | "tiff" | "nef" | "arw"),
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+    {
+        Some(ext) => matches!(
+            ext.as_str(),
+            "jpg" | "jpeg" | "png" | "tif" | "tiff" | "nef" | "arw"
+        ),
         None => false,
     }
 }
@@ -293,14 +317,18 @@ fn read_exif_timestamp(path: &Path) -> Option<f64> {
 }
 
 fn parse_exif_datetime(value: &Value) -> Option<NaiveDateTime> {
-    let Value::Ascii(values) = value else { return None };
+    let Value::Ascii(values) = value else {
+        return None;
+    };
     let raw = values.first()?;
     let text = String::from_utf8_lossy(raw).trim().to_string();
     NaiveDateTime::parse_from_str(&text, "%Y:%m:%d %H:%M:%S").ok()
 }
 
 fn parse_exif_subsec(value: &Value) -> Option<f64> {
-    let Value::Ascii(values) = value else { return None };
+    let Value::Ascii(values) = value else {
+        return None;
+    };
     let raw = values.first()?;
     let text = String::from_utf8_lossy(raw).trim().to_string();
     if text.is_empty() {
@@ -316,7 +344,10 @@ fn camera_key_from_path(path: &Path) -> String {
         Some(name) => name,
         None => return "camera".to_string(),
     };
-    let stem = Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or(file);
+    let stem = Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file);
     let key = if let Some((prefix, _)) = stem.split_once("__") {
         prefix
     } else if let Some((prefix, _)) = stem.split_once('_') {
@@ -329,7 +360,9 @@ fn camera_key_from_path(path: &Path) -> String {
     key.to_string()
 }
 
-fn group_livescan_sequences(frames: &[crate::reconstruction::livescan::LiveScanFrame]) -> Vec<Vec<usize>> {
+fn group_livescan_sequences(
+    frames: &[crate::reconstruction::livescan::LiveScanFrame],
+) -> Vec<Vec<usize>> {
     let mut sequences: Vec<Vec<usize>> = Vec::new();
     let mut current = Vec::new();
     let mut last_angle = 360.0f32;
@@ -487,7 +520,10 @@ fn pose_from_livescan_frame(
 }
 
 fn collect_camera_keys(dslr_images: &[DslrImageInfo]) -> Vec<String> {
-    let mut keys: Vec<String> = dslr_images.iter().map(|img| img.camera_key.clone()).collect();
+    let mut keys: Vec<String> = dslr_images
+        .iter()
+        .map(|img| img.camera_key.clone())
+        .collect();
     keys.sort();
     keys.dedup();
     keys

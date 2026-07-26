@@ -4,14 +4,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::gaussian_splatting::gs2mesh::{simplify_textured_mesh, TexturedMesh};
-use crate::reconstruction::{Face, Mesh};
-use crate::mesh::optimization::smooth_mesh;
 use crate::mesh::io::ensure_vertex_normals;
+use crate::mesh::optimization::smooth_mesh;
+use crate::reconstruction::{Face, Mesh};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum MeshEditOp {
-    Smooth { iterations: usize, lambda: f32 },
+    Smooth {
+        iterations: usize,
+        lambda: f32,
+    },
     Decimate {
         target_triangles: usize,
         preserve_boundaries: bool,
@@ -19,7 +22,9 @@ pub enum MeshEditOp {
         uv_seam_threshold: f32,
     },
     RecomputeNormals,
-    FillHoles { max_hole_vertices: usize },
+    FillHoles {
+        max_hole_vertices: usize,
+    },
 }
 
 pub fn apply_mesh_edits(mesh: &mut Mesh, ops: &[MeshEditOp]) -> Result<()> {
@@ -75,7 +80,13 @@ fn mesh_to_textured(mesh: &Mesh) -> TexturedMesh {
     let indices = mesh
         .faces
         .iter()
-        .map(|f| [f.vertices[0] as u32, f.vertices[1] as u32, f.vertices[2] as u32])
+        .map(|f| {
+            [
+                f.vertices[0] as u32,
+                f.vertices[1] as u32,
+                f.vertices[2] as u32,
+            ]
+        })
         .collect();
     TexturedMesh {
         vertices: mesh.vertices.clone(),
@@ -88,11 +99,7 @@ fn mesh_to_textured(mesh: &Mesh) -> TexturedMesh {
 }
 
 fn textured_to_mesh(mesh: &TexturedMesh) -> Mesh {
-    let uvs = mesh
-        .uvs
-        .iter()
-        .map(|uv| [uv.x, uv.y])
-        .collect::<Vec<_>>();
+    let uvs = mesh.uvs.iter().map(|uv| [uv.x, uv.y]).collect::<Vec<_>>();
     let faces = mesh
         .indices
         .iter()
@@ -141,7 +148,11 @@ fn fill_small_holes(mesh: &mut Mesh, max_hole_vertices: usize) {
                 if n == prev {
                     continue;
                 }
-                let k = if current < n { (current, n) } else { (n, current) };
+                let k = if current < n {
+                    (current, n)
+                } else {
+                    (n, current)
+                };
                 if !visited.contains(&k) {
                     next = Some(n);
                     visited.insert(k);
@@ -215,11 +226,7 @@ fn average_color(mesh: &Mesh, loop_vertices: &[usize]) -> [u8; 3] {
     if count == 0 {
         return [255, 255, 255];
     }
-    [
-        (r / count) as u8,
-        (g / count) as u8,
-        (b / count) as u8,
-    ]
+    [(r / count) as u8, (g / count) as u8, (b / count) as u8]
 }
 
 fn average_uv(mesh: &Mesh, loop_vertices: &[usize]) -> [f32; 2] {

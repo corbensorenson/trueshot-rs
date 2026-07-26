@@ -1,15 +1,15 @@
 //! Anisotropic Spherical Gaussians (ASG) for View-Dependent Appearance
-//! 
+//!
 //! NeurIPS 2024: Spec-Gaussian implementation.
 //! Better representation of specular and reflective surfaces.
-//! 
+//!
 //! Reference: "Spec-Gaussian: Anisotropic View-Dependent Appearance for 3D Gaussian Splatting"
 
-use nalgebra as na;
 use super::gaussian::SH_COEFFS_PER_CHANNEL;
+use nalgebra as na;
 
 /// Anisotropic Spherical Gaussian lobe
-/// 
+///
 /// Represents a view-dependent color component (specular highlights, reflections)
 #[derive(Debug, Clone)]
 pub struct AnisotropicSG {
@@ -63,14 +63,14 @@ impl AnisotropicSG {
     }
 
     /// Evaluate ASG for given viewing direction
-    /// 
+    ///
     /// Returns RGB contribution from this lobe
     pub fn evaluate(&self, view_dir: &na::Vector3<f32>) -> [f32; 3] {
         let v = view_dir.normalize();
-        
+
         // Dot product with lobe axis
         let cos_theta = self.axis.dot(&v);
-        
+
         if cos_theta <= 0.0 {
             return [0.0, 0.0, 0.0];
         }
@@ -80,10 +80,10 @@ impl AnisotropicSG {
             let bitangent = self.axis.cross(&self.tangent);
             let proj_tangent = v.dot(&self.tangent);
             let proj_bitangent = v.dot(&bitangent);
-            
+
             // Anisotropic falloff
-            let aniso_factor = proj_tangent.powi(2) * self.anisotropy 
-                             + proj_bitangent.powi(2) / self.anisotropy;
+            let aniso_factor =
+                proj_tangent.powi(2) * self.anisotropy + proj_bitangent.powi(2) / self.anisotropy;
             (-self.sharpness * aniso_factor * (1.0 - cos_theta)).exp()
         } else {
             // Isotropic falloff
@@ -102,20 +102,18 @@ impl AnisotropicSG {
     pub fn gradient(&self, view_dir: &na::Vector3<f32>) -> na::Matrix3<f32> {
         let v = view_dir.normalize();
         let cos_theta = self.axis.dot(&v);
-        
+
         if cos_theta <= 0.0 {
             return na::Matrix3::zeros();
         }
 
         let exp_term = (-self.sharpness * (1.0 - cos_theta)).exp();
-        
+
         // d(exp(-s*(1-d)))/dv = s * exp(-s*(1-d)) * axis
         let d_exp = self.sharpness * exp_term;
-        
+
         // Gradient for each color channel
-        let grad_col = |amp: f32| -> na::Vector3<f32> {
-            amp * d_exp * self.axis
-        };
+        let grad_col = |amp: f32| -> na::Vector3<f32> { amp * d_exp * self.axis };
 
         na::Matrix3::from_columns(&[
             grad_col(self.amplitude[0]),
@@ -146,28 +144,25 @@ impl ASGBank {
     ) -> Self {
         // Create a single lobe in reflection direction
         let sharpness = 1.0 / (roughness.powi(2) + 0.01);
-        
+
         let mut bank = Self::new();
-        bank.lobes.push(AnisotropicSG::new(
-            *normal,
-            sharpness,
-            specular_color,
-        ));
-        
+        bank.lobes
+            .push(AnisotropicSG::new(*normal, sharpness, specular_color));
+
         bank
     }
 
     /// Evaluate all lobes for given viewing direction
     pub fn evaluate(&self, view_dir: &na::Vector3<f32>) -> [f32; 3] {
         let mut total = [0.0f32; 3];
-        
+
         for lobe in &self.lobes {
             let contribution = lobe.evaluate(view_dir);
             total[0] += contribution[0];
             total[1] += contribution[1];
             total[2] += contribution[2];
         }
-        
+
         // Clamp to valid range
         [
             total[0].clamp(0.0, 1.0),
@@ -190,7 +185,7 @@ impl Default for ASGBank {
 }
 
 /// Extended Gaussian with Spherical Harmonics + ASG
-/// 
+///
 /// Combines diffuse (SH) and specular (ASG) components
 #[derive(Debug, Clone)]
 pub struct SpecularGaussian {
@@ -216,7 +211,13 @@ impl SpecularGaussian {
         let diffuse = [
             (self.sh_coeffs.first().unwrap_or(&0.0) * c0 + 0.5).clamp(0.0, 1.0),
             (self.sh_coeffs.get(SH_COEFFS_PER_CHANNEL).unwrap_or(&0.0) * c0 + 0.5).clamp(0.0, 1.0),
-            (self.sh_coeffs.get(SH_COEFFS_PER_CHANNEL * 2).unwrap_or(&0.0) * c0 + 0.5).clamp(0.0, 1.0),
+            (self
+                .sh_coeffs
+                .get(SH_COEFFS_PER_CHANNEL * 2)
+                .unwrap_or(&0.0)
+                * c0
+                + 0.5)
+                .clamp(0.0, 1.0),
         ];
 
         // Specular from ASG
@@ -303,8 +304,8 @@ mod tests {
     fn test_asg_evaluation() {
         let asg = AnisotropicSG::new(
             na::Vector3::new(0.0, 0.0, 1.0), // pointing up
-            10.0, // sharpness
-            [1.0, 1.0, 1.0], // white
+            10.0,                            // sharpness
+            [1.0, 1.0, 1.0],                 // white
         );
 
         // Directly along axis should be maximum
@@ -337,7 +338,7 @@ mod tests {
         // Evaluate at 45 degree angle
         let view = na::Vector3::new(0.0, 1.0, 1.0).normalize();
         let color = bank.evaluate(&view);
-        
+
         // Should have contributions from both lobes
         assert!(color[0] > 0.0);
         assert!(color[1] > 0.0);

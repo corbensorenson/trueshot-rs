@@ -3,9 +3,16 @@
 //! A complete CLI for all TrueShot operations with rich output,
 //! progress bars, and colored output.
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use config::{Config, File};
+use console::{style, Emoji};
+use image::{imageops::FilterType, DynamicImage, GrayImage, RgbImage};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use nalgebra as na;
+use reqwest::blocking::Client as HttpClient;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -13,30 +20,42 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use toml::Value as TomlValue;
-use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
-use console::{style, Emoji};
-use tray_icon::{TrayIconBuilder, menu::{Menu, MenuItem, PredefinedMenuItem}};
-use trueshot_core::fusion_engine::FusionEngine;
-use trueshot_core::smart_loader::SmartLoader;
+use tray_icon::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    TrayIconBuilder,
+};
+use trueshot_core::crash_handler::init_crash_handler;
+use trueshot_core::demosaic_ahd::ahd_demosaic_f32_owned;
+use trueshot_core::export::usd::{export_usd_with_options, UsdExportOptions};
+use trueshot_core::export::{
+    export_fbx, export_glb, export_gltf, export_ply, export_point_cloud_ply,
+    save_depth_tiff_with_digest, save_png_preview_with_digest, save_tiff16_from_f32_with_digest,
+    PlyExportOptions,
+};
+use trueshot_core::gaussian_splatting::{Camera as GsCamera, GaussianSplatTrainer, TrainingConfig};
+use trueshot_core::intrinsics::{
+    estimate_intrinsics_with_report, IntrinsicsReport, IntrinsicsSource,
+};
+use trueshot_core::inventory::{Device, Inventory, Machine, Model, Sequence, SequenceStatus};
+use trueshot_core::licensing::{Feature, LicenseError, LicenseManager};
+use trueshot_core::native_fusion::{fuse_native_group, NativeFusionConfig, NativeFusionResult};
+use trueshot_core::postprocess::postprocess_f32;
+use trueshot_core::processing_journal::{
+    artifact_digest_from_parts, ArtifactDigest, ArtifactVerification, ClaimDecision,
+    GroupProcessingStatus, ProcessingJournal,
+};
+use trueshot_core::reconstruction::multicam_sfm::{
+    patchmatch_stereo, CameraIntrinsics, CameraPose, DepthMap, FeatureType, MvsInput,
+    PatchMatchConfig, ReprojectionStats, SfmConfig, SfmPipeline,
+};
+use trueshot_core::resource_manager::{
+    AdaptiveDecodeController, CancellationToken, MemoryCreditPool, NativeSequenceMemoryEstimate,
+    PipelinePressureSample, SystemResources,
+};
+use trueshot_core::smart_loader::{NativeGroupArena, SmartLoader};
 use trueshot_core::timing::HierarchicalTimer;
 use trueshot_core::types::ProcessingOptions;
-use trueshot_core::export::{save_png, save_tiff16_from_f64, save_depth_tiff, generate_output_path, export_gltf, export_glb, export_ply, export_point_cloud_ply, export_fbx, PlyExportOptions};
-use trueshot_core::export::usd::{export_usd_with_options, UsdExportOptions};
-use trueshot_core::reconstruction::multicam_sfm::{
-    SfmPipeline, SfmConfig, FeatureType, PatchMatchConfig, patchmatch_stereo,
-    CameraPose, CameraIntrinsics, DepthMap, MvsInput, ReprojectionStats,
-};
 use trueshot_core::validation::validate_photogrammetry_input;
-use trueshot_core::intrinsics::{estimate_intrinsics_with_report, IntrinsicsReport, IntrinsicsSource};
-use trueshot_core::gaussian_splatting::{GaussianSplatTrainer, TrainingConfig, Camera as GsCamera};
-use trueshot_core::inventory::{Inventory, Model, Sequence, Machine, Device, SequenceStatus};
-use trueshot_core::crash_handler::init_crash_handler;
-use trueshot_core::licensing::{Feature, LicenseError, LicenseManager};
-use chrono::{DateTime, Utc};
-use image::{DynamicImage, GrayImage, RgbImage, imageops::FilterType};
-use nalgebra as na;
-use reqwest::blocking::Client as HttpClient;
-use reqwest::Url;
 use uuid::Uuid;
 
 mod mesh_io;
@@ -112,11 +131,11 @@ struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
-    
+
     /// Disable colored output
     #[arg(long, global = true)]
     no_color: bool,
-    
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -128,41 +147,57 @@ enum Commands {
         /// Server port
         #[arg(short, long, default_value_t = 3000)]
         port: u16,
-        
+
         /// Run with system tray icon
         #[arg(long)]
         tray: bool,
-        
+
         /// Run in background (daemon mode)
         #[arg(short, long)]
         daemon: bool,
     },
-    
+
     /// Process images through reconstruction pipeline
     Process {
         /// Input directory containing images
         #[arg(short, long)]
         input: PathBuf,
-        
+
         /// Output directory for results
         #[arg(short, long)]
         output: PathBuf,
-        
+
         /// Reconstruction mode
         #[arg(short, long, value_enum, default_value_t = Mode::Hybrid)]
         mode: Mode,
-        
+
         /// Quality level
         #[arg(short, long, value_enum, default_value_t = Quality::Medium)]
         quality: Quality,
-        
+
         /// Number of parallel jobs
         #[arg(short, long)]
         jobs: Option<usize>,
-        
+
+        /// Decode complete RAW frames instead of the exact shared object ROI
+        #[arg(long)]
+        full_frame: bool,
+
         /// Disable GPU acceleration
         #[arg(long)]
         no_gpu: bool,
+
+        /// Export a full-resolution normalized depth TIFF in burst mode
+        #[arg(long)]
+        depth: bool,
+
+        /// Export a full-resolution PNG instead of a bounded preview in burst mode
+        #[arg(long)]
+        full_resolution_preview: bool,
+
+        /// Long-edge pixel limit for the default burst preview
+        #[arg(long, default_value_t = 1600)]
+        preview_max_dimension: usize,
 
         /// Attempt to start a local trial if no license is present
         #[arg(long)]
@@ -172,25 +207,25 @@ enum Commands {
         #[arg(long)]
         trial_days: Option<i64>,
     },
-    
+
     /// Export model to different formats
     Export {
         /// Input model file
         #[arg(short, long)]
         input: PathBuf,
-        
+
         /// Output file path
         #[arg(short, long)]
         output: PathBuf,
-        
+
         /// Export format
         #[arg(short, long, value_enum)]
         format: ExportFormat,
-        
+
         /// Include vertex colors
         #[arg(long, default_value_t = true)]
         colors: bool,
-        
+
         /// Include normals
         #[arg(long, default_value_t = true)]
         normals: bool,
@@ -213,17 +248,17 @@ enum Commands {
         #[command(subcommand)]
         action: JobsCommand,
     },
-    
+
     /// Calibrate cameras
     Calibrate {
         /// Calibration images (checkerboard pattern)
         #[arg(short, long, num_args = 1..)]
         images: Vec<PathBuf>,
-        
+
         /// Checkerboard columns
         #[arg(long, default_value_t = 9)]
         cols: u32,
-        
+
         /// Checkerboard rows
         #[arg(long, default_value_t = 6)]
         rows: u32,
@@ -231,29 +266,29 @@ enum Commands {
         /// Checkerboard square size in mm
         #[arg(long, default_value_t = 25.0)]
         square_size_mm: f32,
-        
+
         /// Output calibration file
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    
+
     /// Manage model inventory
     Inventory {
         #[command(subcommand)]
         action: InventoryAction,
     },
-    
+
     /// Show system status and diagnostics
     Status {
         /// Show detailed hardware information
         #[arg(long)]
         hardware: bool,
-        
+
         /// Check for updates
         #[arg(long)]
         check_updates: bool,
     },
-    
+
     /// Manage configuration
     Config {
         #[command(subcommand)]
@@ -454,7 +489,7 @@ enum ExportFormat {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let _crash_guard = init_crash_handler(env::var("TRUESHOT_SENTRY_DSN").ok());
-    
+
     // Initialize logging
     if cli.verbose {
         tracing_subscriber::fmt()
@@ -469,36 +504,87 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Serve { port, tray, daemon } => cmd_serve(port, tray, daemon),
-        Commands::Process { input, output, mode, quality, jobs, no_gpu, trial, trial_days } => {
-            cmd_process(input, output, mode, quality, jobs, no_gpu, trial, trial_days)
-        }
-        Commands::Export { input, output, format, colors, normals, noncommercial, trial, trial_days } => {
-            cmd_export(input, output, format, colors, normals, noncommercial, trial, trial_days)
-        }
-        Commands::Calibrate { images, cols, rows, square_size_mm, output } => {
-            cmd_calibrate(images, cols, rows, square_size_mm, output)
-        }
+        Commands::Process {
+            input,
+            output,
+            mode,
+            quality,
+            jobs,
+            full_frame,
+            no_gpu,
+            depth,
+            full_resolution_preview,
+            preview_max_dimension,
+            trial,
+            trial_days,
+        } => cmd_process(
+            input,
+            output,
+            mode,
+            quality,
+            jobs,
+            full_frame,
+            no_gpu,
+            depth,
+            full_resolution_preview,
+            preview_max_dimension,
+            trial,
+            trial_days,
+        ),
+        Commands::Export {
+            input,
+            output,
+            format,
+            colors,
+            normals,
+            noncommercial,
+            trial,
+            trial_days,
+        } => cmd_export(
+            input,
+            output,
+            format,
+            colors,
+            normals,
+            noncommercial,
+            trial,
+            trial_days,
+        ),
+        Commands::Calibrate {
+            images,
+            cols,
+            rows,
+            square_size_mm,
+            output,
+        } => cmd_calibrate(images, cols, rows, square_size_mm, output),
         Commands::Inventory { action } => cmd_inventory(action),
-        Commands::Status { hardware, check_updates } => cmd_status(hardware, check_updates),
+        Commands::Status {
+            hardware,
+            check_updates,
+        } => cmd_status(hardware, check_updates),
         Commands::Config { action } => cmd_config(action),
         Commands::Jobs { action } => cmd_jobs(action),
     }
 }
 
 fn cmd_serve(port: u16, tray: bool, daemon: bool) -> Result<()> {
-    println!("{} Starting TrueShot Server on port {}...", ROCKET, style(port).cyan());
-    
+    println!(
+        "{} Starting TrueShot Server on port {}...",
+        ROCKET,
+        style(port).cyan()
+    );
+
     if daemon {
         println!("  Running in daemon mode (background)");
     }
-    
+
     // Start the actual server
     let mut child = Command::new("cargo")
         .args(["run", "-p", "trueshot-server", "--release"])
         .env("TRUESHOT_SERVER_PORT", port.to_string())
         .spawn()
         .context("Failed to start server")?;
-    
+
     if tray {
         run_with_tray(port)?;
     } else if !daemon {
@@ -506,7 +592,7 @@ fn cmd_serve(port: u16, tray: bool, daemon: bool) -> Result<()> {
     } else {
         println!("{} Server started with PID: {}", CHECK, child.id());
     }
-    
+
     Ok(())
 }
 
@@ -516,10 +602,17 @@ fn cmd_process(
     mode: Mode,
     quality: Quality,
     jobs: Option<usize>,
+    full_frame: bool,
     no_gpu: bool,
+    export_depth: bool,
+    full_resolution_preview: bool,
+    preview_max_dimension: usize,
     trial: bool,
     trial_days: Option<i64>,
 ) -> Result<()> {
+    if !(64..=16_384).contains(&preview_max_dimension) {
+        anyhow::bail!("Preview max dimension must be between 64 and 16384 pixels");
+    }
     let mut license_manager = init_license_manager()?;
     let required = process_required_features(mode);
     ensure_cli_license(&mut license_manager, &required, trial, trial_days)?;
@@ -543,7 +636,7 @@ fn cmd_process(
     println!("  {} Output:  {}", FOLDER, style(output.display()).green());
     println!("  {} Mode:    {}", CAMERA, style(mode).yellow());
     println!("  {} Quality: {:?}", style("⚙").dim(), quality);
-    
+
     if no_gpu {
         println!("  {} GPU:     {}", GPU, style("Disabled").red());
     } else {
@@ -552,12 +645,35 @@ fn cmd_process(
     println!();
 
     let result = match mode {
-        Mode::Burst => run_burst_pipeline(&input, &output, quality, jobs, no_gpu, Some(&inventory_ctx), Some(&mut run_state)),
+        Mode::Burst => run_burst_pipeline(
+            &input,
+            &output,
+            quality,
+            jobs,
+            full_frame,
+            no_gpu,
+            export_depth,
+            full_resolution_preview,
+            preview_max_dimension,
+            Some(&inventory_ctx),
+            Some(&mut run_state),
+        ),
         Mode::Photogrammetry | Mode::Gaussians | Mode::Hybrid | Mode::Quick => {
-            run_reconstruction_pipeline(&input, &output, mode, quality, Some(&inventory_ctx), Some(&mut run_state))
+            run_reconstruction_pipeline(
+                &input,
+                &output,
+                mode,
+                quality,
+                Some(&inventory_ctx),
+                Some(&mut run_state),
+            )
         }
-        Mode::Live => anyhow::bail!("Live mode is only available via the server and live capture workflow"),
-        Mode::Avatar => anyhow::bail!("Avatar mode requires the full capture stack; use the server UI"),
+        Mode::Live => {
+            anyhow::bail!("Live mode is only available via the server and live capture workflow")
+        }
+        Mode::Avatar => {
+            anyhow::bail!("Avatar mode requires the full capture stack; use the server UI")
+        }
     };
 
     if let Err(err) = result {
@@ -627,7 +743,9 @@ fn enforce_cli_scan_limit(manager: &LicenseManager) -> Result<()> {
     let mut ledger = load_usage_ledger();
     let current = ledger.counts.get(&entry_key).copied().unwrap_or(0);
     if current >= max {
-        anyhow::bail!("Monthly scan limit exceeded (limit {max}). Upgrade your license to continue.");
+        anyhow::bail!(
+            "Monthly scan limit exceeded (limit {max}). Upgrade your license to continue."
+        );
     }
     ledger.counts.insert(entry_key, current + 1);
     save_usage_ledger(&ledger)?;
@@ -801,7 +919,27 @@ fn cmd_export(
 }
 
 fn init_license_manager() -> Result<LicenseManager> {
-    LicenseManager::new().map_err(|err| anyhow::anyhow!(license_error_message(&err)))
+    let mut manager =
+        LicenseManager::new().map_err(|err| anyhow::anyhow!(license_error_message(&err)))?;
+    if let Ok(key) = env::var("TRUESHOT_LICENSE_KEY") {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            let device_name = env::var("TRUESHOT_LICENSE_DEVICE_NAME")
+                .ok()
+                .and_then(|value| {
+                    let trimmed_name = value.trim().to_string();
+                    if trimmed_name.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed_name)
+                    }
+                });
+            manager
+                .load_license_key(trimmed, device_name)
+                .map_err(|err| anyhow::anyhow!(license_error_message(&err)))?;
+        }
+    }
+    Ok(manager)
 }
 
 fn process_required_features(mode: Mode) -> Vec<Feature> {
@@ -926,7 +1064,7 @@ fn cmd_calibrate(
     println!("  Checkerboard: {}x{}", cols, rows);
     println!("  Images: {}", images.len());
     println!("  Square size: {:.2} mm", square_size_mm);
-    
+
     if images.is_empty() {
         println!("{} No calibration images provided!", WARNING);
         return Ok(());
@@ -962,7 +1100,11 @@ fn cmd_calibrate(
 
     pb.finish_with_message("Complete!");
     println!();
-    println!("{} Calibration saved to: {}", CHECK, style(output_path.display()).green());
+    println!(
+        "{} Calibration saved to: {}",
+        CHECK,
+        style(output_path.display()).green()
+    );
 
     let report_path = output_path.with_extension("report.json");
     let _ = write_run_report(
@@ -992,7 +1134,11 @@ fn run_burst_pipeline(
     output: &Path,
     quality: Quality,
     jobs: Option<usize>,
+    full_frame: bool,
     no_gpu: bool,
+    export_depth: bool,
+    full_resolution_preview: bool,
+    preview_max_dimension: usize,
     _inventory_ctx: Option<&InventoryContext>,
     mut run_state: Option<&mut RunStateManager>,
 ) -> Result<()> {
@@ -1004,63 +1150,321 @@ fn run_burst_pipeline(
     }
     std::fs::create_dir_all(output)?;
 
-    let image_count = count_images(input)?;
-    println!("  Found {} images", style(image_count).cyan().bold());
+    let mut options = build_processing_options(quality, jobs, no_gpu, full_frame);
+    let initial_decode_workers = jobs
+        .unwrap_or_else(|| num_cpus::get_physical().clamp(1, 8))
+        .max(1);
+    options.max_parallel_sequences = Some(initial_decode_workers);
+    let mut loader = SmartLoader::new(options.clone());
+    let mut capture_groups = loader.open_capture_groups(input)?;
+    let group_count = capture_groups.total_groups();
+    println!(
+        "  Processing {} capture groups via {}",
+        style(group_count).cyan().bold(),
+        if capture_groups.is_streaming_manifest() {
+            "streaming manifest"
+        } else {
+            "legacy importer"
+        }
+    );
     if let Some(state) = run_state.as_deref_mut() {
         state.mark_step_completed("scan_input", vec![]);
         state.mark_step_started("sfm");
     }
-
-    let options = build_processing_options(quality, jobs, no_gpu);
-    let loader = SmartLoader::new(options.clone());
-    let sequences = loader.scan_and_group(input)?;
+    let fusion_config = native_fusion_config(quality);
+    let mut native_arena = NativeGroupArena::default();
+    let resources = SystemResources::query();
+    let memory_budget_bytes = configured_memory_budget(resources.available_memory)?;
+    let memory_credits = MemoryCreditPool::new(memory_budget_bytes)?;
+    let cancellation = CancellationToken::default();
+    install_cancellation_listener(cancellation.clone());
+    let journal = ProcessingJournal::open(
+        &output
+            .join(".trueshot")
+            .join("burst_processing_journal.redb"),
+    )?;
+    let (export_sender, export_receiver, export_worker) = burst_export_worker()?;
+    let mut export_pending = false;
+    let retry_limit = env::var("TRUESHOT_GROUP_RETRY_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(3)
+        .clamp(1, 100);
+    let mut adaptive_workers = jobs.is_none().then(|| {
+        AdaptiveDecodeController::new(
+            initial_decode_workers,
+            resources.physical_cores.max(initial_decode_workers).min(32),
+        )
+    });
+    println!(
+        "  Memory budget: {:.1} MiB",
+        memory_budget_bytes as f64 / (1024.0 * 1024.0)
+    );
+    let mut failures = Vec::new();
 
     let mp = MultiProgress::new();
-    let seq_pb = mp.add(ProgressBar::new(sequences.len() as u64));
+    let seq_pb = mp.add(ProgressBar::new(group_count));
     seq_pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ETA {eta_precise} {msg}",
+            )
             .unwrap()
             .progress_chars("#>-"),
     );
 
-    for sequence in &sequences {
+    for capture_group in &mut capture_groups {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        let capture_group = capture_group?;
+        let sequence = &capture_group.sequence;
+        if let Some(entry) = journal.get(&capture_group.group_id)? {
+            if entry.status == GroupProcessingStatus::Committed {
+                if journal.verify_committed_with(
+                    &capture_group.group_id,
+                    output,
+                    resume_verification_policy(&capture_group.group_id)?,
+                )? {
+                    seq_pb.set_message(format!("Skipped committed {}", sequence.meta.bone_id));
+                    seq_pb.inc(1);
+                    continue;
+                }
+                journal.invalidate_committed(
+                    &capture_group.group_id,
+                    "Committed artifact verification failed; scheduling deterministic rebuild",
+                )?;
+            }
+        }
+        match journal.claim(&capture_group.group_id, retry_limit)? {
+            ClaimDecision::Process { .. } => {}
+            ClaimDecision::AlreadyCommitted => {
+                seq_pb.inc(1);
+                continue;
+            }
+            ClaimDecision::RetryLimitReached { attempts } => {
+                failures.push(format!(
+                    "{} reached retry limit after {} attempts",
+                    sequence.meta.bone_id, attempts
+                ));
+                seq_pb.inc(1);
+                continue;
+            }
+        }
+
         seq_pb.set_message(format!("Sequence {}", sequence.meta.bone_id));
-        let step_pb = mp.add(ProgressBar::new(3));
+        let step_pb = mp.add(ProgressBar::new(4));
         step_pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{bar:30.magenta/blue}] {pos}/{len} {msg}")
                 .unwrap(),
         );
+        let failure_pb = step_pb.clone();
 
         let mut timer = HierarchicalTimer::new(&sequence.meta.bone_id);
-        step_pb.set_message("Loading frames");
-        let frames = loader.load_sequence(sequence, &mut timer)?;
-        step_pb.inc(1);
+        let group_started = std::time::Instant::now();
+        let process_result = (|| -> Result<BurstExportTask> {
+            let crop_plan = loader.resolved_sequence_crop_plan(
+                sequence,
+                capture_group.crop_plan,
+                &mut timer,
+            )?;
+            let rect = crop_plan
+                .rect
+                .context("Resolved burst crop has no rectangle")?;
+            let (x0, y0, x1, y1) = rect.to_bounds();
+            let width = x1.checked_sub(x0).context("Burst crop width underflow")?;
+            let height = y1.checked_sub(y0).context("Burst crop height underflow")?;
+            let estimate = NativeSequenceMemoryEstimate::estimate(
+                sequence.len(),
+                width,
+                height,
+                num_cpus::get(),
+                fusion_config.tile_size,
+                fusion_config.analysis_max_dimension,
+            )?;
+            let memory_permit =
+                memory_credits.acquire(estimate.peak_memory_bytes, &cancellation)?;
+            ensure_not_cancelled(&cancellation)?;
 
-        step_pb.set_message("Fusing frames");
-        let engine = FusionEngine::new(options.clone());
-        let result = engine.process(frames, &sequence.meta, &mut timer)?;
-        step_pb.inc(1);
+            step_pb.set_message("Decoding native ROI group");
+            let faults_before = major_page_faults();
+            let decode_started = std::time::Instant::now();
+            let group = loader.load_sequence_native_with_plan_into(
+                sequence,
+                Some(crop_plan),
+                &mut native_arena,
+                &mut timer,
+            )?;
+            let decode_seconds = decode_started.elapsed().as_secs_f64();
+            let major_page_faults = major_page_faults().saturating_sub(faults_before);
+            ensure_not_cancelled(&cancellation)?;
+            let native_input_bytes = group.size_bytes();
+            let decoded_megapixels =
+                group.len() as f64 * group.width as f64 * group.height as f64 / 1_000_000.0;
+            step_pb.inc(1);
 
-        step_pb.set_message("Exporting outputs");
-        let output_path = generate_output_path(output, &sequence.meta.bone_id, &sequence.meta.vantage, sequence.meta.rot_deg);
-        let mask_bool = result.mask.mapv(|v| v > 0);
-        save_tiff16_from_f64(&result.rgb_f64, &mask_bool, &output_path)?;
+            step_pb.set_message("Fusing HDR and focus planes");
+            let fused = fuse_native_group(&group, &sequence.meta, &fusion_config)?;
+            drop(group);
+            ensure_not_cancelled(&cancellation)?;
+            let fused_bytes = fused.size_bytes();
+            step_pb.inc(1);
 
-        let preview_path = output_path.with_extension("png");
-        save_png(&result.rgb_u8, &result.mask, &preview_path)?;
+            step_pb.set_message("Demosaicing and tone mapping");
+            let NativeFusionResult {
+                bayer,
+                depth,
+                confidence: _,
+                foreground_mask,
+                transforms,
+                radiance_anchor,
+            } = fused;
+            let rgb_cam: [[f32; 4]; 3] = [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ];
+            let linear_rgb = ahd_demosaic_f32_owned(bayer, &rgb_cam)?;
+            let display_rgb = postprocess_f32(&linear_rgb)?;
+            ensure_not_cancelled(&cancellation)?;
+            step_pb.inc(1);
 
-        let depth_path = output_path.with_file_name(format!(
-            "{}_{}_{}deg_depth.tiff",
-            sequence.meta.bone_id,
-            sequence.meta.vantage,
-            sequence.meta.rot_deg as u32
-        ));
-        let depth_f32 = result.depth_map.mapv(|v| v as f32);
-        save_depth_tiff(&depth_f32, &depth_path)?;
+            let output_path = burst_group_output_path(output, sequence, &capture_group.group_id);
+            let preview_path = output_path.with_extension("png");
+            let depth_path = output_path.with_file_name(format!(
+                "{}_depth.tiff",
+                output_path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("trueshot-burst")
+            ));
+            let accepted_transforms = transforms
+                .iter()
+                .filter(|transform| transform.accepted)
+                .count();
+            let transform_count = transforms.len();
+            let output_root = output.to_path_buf();
+            let group_id = capture_group.group_id.clone();
+            let label = sequence.meta.bone_id.clone();
+            let depth = export_depth.then_some(depth);
+            let preview_max_dimension = if full_resolution_preview {
+                usize::MAX
+            } else {
+                preview_max_dimension
+            };
+            step_pb.set_message("Queued for atomic export");
+            Ok(BurstExportTask {
+                group_id,
+                label,
+                started_at: group_started,
+                decode_seconds,
+                decoded_megapixels,
+                major_page_faults,
+                export: Box::new(move || {
+                    // Retain admission credits until every large array is written
+                    // and dropped by the export worker.
+                    let _memory_permit = memory_permit;
+                    step_pb.set_message("Exporting outputs");
+                    let linear_digest = save_tiff16_from_f32_with_digest(
+                        &linear_rgb,
+                        &foreground_mask,
+                        &output_path,
+                    )?;
+                    let preview_digest = save_png_preview_with_digest(
+                        &display_rgb,
+                        &foreground_mask,
+                        &preview_path,
+                        preview_max_dimension,
+                    )?;
+                    let mut artifacts = vec![
+                        artifact_digest_from_parts(
+                            &output_path,
+                            &output_root,
+                            linear_digest.size_bytes,
+                            linear_digest.sha256,
+                        )?,
+                        artifact_digest_from_parts(
+                            &preview_path,
+                            &output_root,
+                            preview_digest.size_bytes,
+                            preview_digest.sha256,
+                        )?,
+                    ];
+                    if let Some(depth) = depth {
+                        let depth_digest = save_depth_tiff_with_digest(&depth, &depth_path)?;
+                        artifacts.push(artifact_digest_from_parts(
+                            &depth_path,
+                            &output_root,
+                            depth_digest.size_bytes,
+                            depth_digest.sha256,
+                        )?);
+                    }
+                    step_pb.inc(1);
+                    step_pb.finish_with_message(format!(
+                        "Sequence complete ({:.1} MiB native + {:.1} MiB fused, {}/{} transforms, anchor {:.3e})",
+                        native_input_bytes as f64 / (1024.0 * 1024.0),
+                        fused_bytes as f64 / (1024.0 * 1024.0),
+                        accepted_transforms,
+                        transform_count,
+                        radiance_anchor,
+                    ));
+                    Ok(artifacts)
+                }),
+            })
+        })();
 
-        step_pb.finish_with_message("Sequence complete");
+        match process_result {
+            Ok(task) => {
+                let mut writer_wait_seconds = 0.0;
+                if export_pending {
+                    let wait_started = std::time::Instant::now();
+                    let outcome = export_receiver
+                        .recv()
+                        .context("Burst export worker stopped unexpectedly")?;
+                    writer_wait_seconds = wait_started.elapsed().as_secs_f64();
+                    complete_burst_export(&journal, outcome, &mut failures)?;
+                }
+                let pressure_sample = PipelinePressureSample {
+                    decoded_megapixels: task.decoded_megapixels,
+                    decode_seconds: task.decode_seconds,
+                    writer_wait_seconds,
+                    available_memory_ratio: available_memory_ratio(),
+                    major_page_faults: task.major_page_faults,
+                };
+                export_sender
+                    .send(task)
+                    .map_err(|_| anyhow::anyhow!("Burst export worker stopped unexpectedly"))?;
+                export_pending = true;
+                if let Some(controller) = adaptive_workers.as_mut() {
+                    let adjustment = controller.observe(pressure_sample);
+                    if adjustment.changed {
+                        tracing::info!(
+                            "Adaptive NEF workers: {} -> {} (decode {:.2}s, writer wait {:.2}s, major faults {})",
+                            adjustment.previous_workers,
+                            adjustment.workers,
+                            pressure_sample.decode_seconds,
+                            pressure_sample.writer_wait_seconds,
+                            pressure_sample.major_page_faults,
+                        );
+                        options.max_parallel_sequences = Some(adjustment.workers);
+                        loader = SmartLoader::new(options.clone());
+                    }
+                }
+            }
+            Err(error) => {
+                failure_pb.abandon_with_message(format!("Sequence failed: {error:#}"));
+                if cancellation.is_cancelled() {
+                    journal.mark_interrupted(
+                        &capture_group.group_id,
+                        "Operator cancellation; safe to resume",
+                    )?;
+                } else {
+                    journal.mark_failed(&capture_group.group_id, &error)?;
+                }
+                failures.push(format!("{}: {error:#}", sequence.meta.bone_id));
+            }
+        }
         seq_pb.inc(1);
 
         if options.verbose_timing {
@@ -1068,12 +1472,259 @@ fn run_burst_pipeline(
         }
     }
 
+    if export_pending {
+        let outcome = export_receiver
+            .recv()
+            .context("Burst export worker stopped unexpectedly")?;
+        complete_burst_export(&journal, outcome, &mut failures)?;
+    }
+    drop(export_sender);
+    export_worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("Burst export worker panicked"))?;
+
     seq_pb.finish_with_message("All sequences complete");
+    if cancellation.is_cancelled() {
+        anyhow::bail!("Burst processing cancelled; completed groups are safe to resume");
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} capture groups failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
     if let Some(state) = run_state.as_deref_mut() {
         state.mark_step_completed("sfm", collect_artifacts(output, &["focus_stacks"]));
         state.mark_step_completed("reports", collect_artifacts(output, &["run_report.json"]));
     }
     Ok(())
+}
+
+fn configured_memory_budget(available_memory: u64) -> Result<u64> {
+    if let Ok(value) = env::var("TRUESHOT_MEMORY_BUDGET_MIB") {
+        let mebibytes = value
+            .parse::<u64>()
+            .context("TRUESHOT_MEMORY_BUDGET_MIB must be an integer")?;
+        let budget = mebibytes
+            .checked_mul(1024 * 1024)
+            .context("Configured memory budget overflow")?;
+        if budget == 0 {
+            anyhow::bail!("TRUESHOT_MEMORY_BUDGET_MIB must be greater than zero");
+        }
+        if available_memory != 0 && budget > available_memory {
+            anyhow::bail!(
+                "Configured memory budget is {:.1} MiB, but only {:.1} MiB is currently available",
+                budget as f64 / (1024.0 * 1024.0),
+                available_memory as f64 / (1024.0 * 1024.0),
+            );
+        }
+        return Ok(budget);
+    }
+    if available_memory == 0 {
+        anyhow::bail!("Unable to determine available system memory");
+    }
+    Ok((available_memory / 4 * 3)
+        .max(64 * 1024 * 1024)
+        .min(available_memory))
+}
+
+fn resume_verification_policy(group_id: &str) -> Result<ArtifactVerification> {
+    match env::var("TRUESHOT_RESUME_VERIFY")
+        .unwrap_or_else(|_| "sampled".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "fast" | "metadata" => Ok(ArtifactVerification::Metadata),
+        "full" | "hash" => Ok(ArtifactVerification::FullHash),
+        "sampled" => {
+            let sample_rate = env::var("TRUESHOT_RESUME_HASH_SAMPLE_RATE")
+                .ok()
+                .map(|value| {
+                    value
+                        .parse::<u32>()
+                        .context("TRUESHOT_RESUME_HASH_SAMPLE_RATE must be an integer")
+                })
+                .transpose()?
+                .unwrap_or(1_000)
+                .max(1);
+            let prefix = group_id
+                .get(..8)
+                .context("Capture group ID is too short for sampled verification")?;
+            let sample =
+                u32::from_str_radix(prefix, 16).context("Capture group ID is not hexadecimal")?;
+            Ok(if sample % sample_rate == 0 {
+                ArtifactVerification::FullHash
+            } else {
+                ArtifactVerification::Metadata
+            })
+        }
+        value => anyhow::bail!(
+            "Unknown TRUESHOT_RESUME_VERIFY value {value}; use metadata, sampled, or full"
+        ),
+    }
+}
+
+type BurstExportJob = Box<dyn FnOnce() -> Result<Vec<ArtifactDigest>> + Send + 'static>;
+
+struct BurstExportTask {
+    group_id: String,
+    label: String,
+    started_at: std::time::Instant,
+    decode_seconds: f64,
+    decoded_megapixels: f64,
+    major_page_faults: u64,
+    export: BurstExportJob,
+}
+
+struct BurstExportOutcome {
+    group_id: String,
+    label: String,
+    duration_ms: u64,
+    result: Result<Vec<ArtifactDigest>>,
+}
+
+fn burst_export_worker() -> Result<(
+    std::sync::mpsc::SyncSender<BurstExportTask>,
+    std::sync::mpsc::Receiver<BurstExportOutcome>,
+    std::thread::JoinHandle<()>,
+)> {
+    let (task_sender, task_receiver) = std::sync::mpsc::sync_channel::<BurstExportTask>(1);
+    let (result_sender, result_receiver) = std::sync::mpsc::channel::<BurstExportOutcome>();
+    let worker = std::thread::Builder::new()
+        .name("trueshot-burst-export".to_string())
+        .spawn(move || {
+            while let Ok(task) = task_receiver.recv() {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task.export))
+                    .map_err(|payload| {
+                        let message = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("unknown panic");
+                        anyhow::anyhow!("Burst export worker panicked: {message}")
+                    })
+                    .and_then(|result| result);
+                let outcome = BurstExportOutcome {
+                    group_id: task.group_id,
+                    label: task.label,
+                    duration_ms: task.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    result,
+                };
+                if result_sender.send(outcome).is_err() {
+                    break;
+                }
+            }
+        })
+        .context("Start burst export worker")?;
+    Ok((task_sender, result_receiver, worker))
+}
+
+fn complete_burst_export(
+    journal: &ProcessingJournal,
+    outcome: BurstExportOutcome,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    match outcome.result {
+        Ok(artifacts) => {
+            journal.mark_committed(&outcome.group_id, outcome.duration_ms, artifacts)?;
+        }
+        Err(error) => {
+            journal.mark_failed(&outcome.group_id, &error)?;
+            failures.push(format!("{}: {error:#}", outcome.label));
+        }
+    }
+    Ok(())
+}
+
+fn install_cancellation_listener(cancellation: CancellationToken) {
+    let _ = std::thread::Builder::new()
+        .name("trueshot-signal-listener".to_string())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+            else {
+                return;
+            };
+            if runtime.block_on(tokio::signal::ctrl_c()).is_ok() {
+                cancellation.cancel();
+                eprintln!("Cancellation requested; finishing the durable export boundary...");
+            }
+        });
+}
+
+fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<()> {
+    if cancellation.is_cancelled() {
+        anyhow::bail!("Processing cancelled")
+    }
+    Ok(())
+}
+
+fn available_memory_ratio() -> f64 {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    let total_memory = system.total_memory();
+    if total_memory == 0 {
+        0.0
+    } else {
+        system.available_memory() as f64 / total_memory as f64
+    }
+}
+
+#[cfg(unix)]
+fn major_page_faults() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: getrusage initializes the supplied rusage structure on success.
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if status == 0 {
+        // SAFETY: status 0 guarantees initialization by getrusage.
+        unsafe { usage.assume_init() }.ru_majflt.max(0) as u64
+    } else {
+        0
+    }
+}
+
+#[cfg(not(unix))]
+fn major_page_faults() -> u64 {
+    0
+}
+
+fn burst_group_output_path(
+    output: &Path,
+    sequence: &trueshot_core::types::Sequence,
+    group_id: &str,
+) -> PathBuf {
+    let sanitize = |value: &str| {
+        value
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+    };
+    output.join(format!(
+        "{}_{}_{:03}deg_{}.tiff",
+        sanitize(&sequence.meta.bone_id),
+        sanitize(&sequence.meta.vantage),
+        sequence.meta.rot_deg as u32,
+        &group_id[..12],
+    ))
+}
+
+fn native_fusion_config(quality: Quality) -> NativeFusionConfig {
+    let mut config = NativeFusionConfig::default();
+    config.analysis_max_dimension = match quality {
+        Quality::Low => 384,
+        Quality::Medium => 512,
+        Quality::High => 768,
+        Quality::Ultra => 1024,
+    };
+    config
 }
 
 fn run_reconstruction_pipeline(
@@ -1095,7 +1746,8 @@ fn run_reconstruction_pipeline(
     } else {
         input.to_path_buf()
     };
-    validate_photogrammetry_input(&image_dir, 6).context("Photogrammetry input validation failed")?;
+    validate_photogrammetry_input(&image_dir, 6)
+        .context("Photogrammetry input validation failed")?;
 
     let image_paths = collect_sfm_images(&image_dir)?;
     if image_paths.len() < 2 {
@@ -1168,7 +1820,13 @@ fn run_reconstruction_pipeline(
     if let Some(state) = run_state.as_deref_mut() {
         state.mark_step_completed(
             "sfm",
-            collect_artifacts(output, &[".trueshot/checkpoints/sparse_reconstruction.json", "sparse.ply"]),
+            collect_artifacts(
+                output,
+                &[
+                    ".trueshot/checkpoints/sparse_reconstruction.json",
+                    "sparse.ply",
+                ],
+            ),
         );
     }
 
@@ -1187,12 +1845,7 @@ fn run_reconstruction_pipeline(
             if let Some(state) = run_state.as_deref_mut() {
                 state.mark_step_started("dense");
             }
-            dense_points = run_dense_mvs(
-                &image_paths,
-                &poses,
-                &cameras,
-                quality,
-            )?;
+            dense_points = run_dense_mvs(&image_paths, &poses, &cameras, quality)?;
             if !dense_points.is_empty() {
                 let dense_path = output.join("dense.ply");
                 export_dense_point_cloud(&dense_points, &dense_path)?;
@@ -1202,7 +1855,10 @@ fn run_reconstruction_pipeline(
         if let Some(state) = run_state.as_deref_mut() {
             state.mark_step_completed(
                 "dense",
-                collect_artifacts(output, &["dense.ply", ".trueshot/checkpoints/dense_points.zst"]),
+                collect_artifacts(
+                    output,
+                    &["dense.ply", ".trueshot/checkpoints/dense_points.zst"],
+                ),
             );
         }
     }
@@ -1229,10 +1885,7 @@ fn run_reconstruction_pipeline(
             )?;
         }
         if let Some(state) = run_state.as_deref_mut() {
-            state.mark_step_completed(
-                "gaussian",
-                collect_artifacts(output, &["gaussians.ply"]),
-            );
+            state.mark_step_completed("gaussian", collect_artifacts(output, &["gaussians.ply"]));
         }
     }
 
@@ -1253,39 +1906,44 @@ fn run_reconstruction_pipeline(
     if let Some(state) = run_state.as_deref_mut() {
         state.mark_step_completed(
             "reports",
-            collect_artifacts(output, &["reconstruction_report.json", "intrinsics_report.json"]),
+            collect_artifacts(
+                output,
+                &["reconstruction_report.json", "intrinsics_report.json"],
+            ),
         );
     }
 
     Ok(())
 }
 
-fn build_processing_options(quality: Quality, jobs: Option<usize>, _no_gpu: bool) -> ProcessingOptions {
+fn build_processing_options(
+    quality: Quality,
+    jobs: Option<usize>,
+    _no_gpu: bool,
+    full_frame: bool,
+) -> ProcessingOptions {
     let mut options = ProcessingOptions::default();
     options.max_parallel_sequences = jobs;
     options.export_format = "tiff16".to_string();
     options.verbose_timing = matches!(quality, Quality::High | Quality::Ultra);
+    options.full_decode = full_frame;
 
     match quality {
         Quality::Low => {
             options.noise_sigma = 18.0;
             options.grade_k = 1.8;
-            options.full_decode = false;
         }
         Quality::Medium => {
             options.noise_sigma = 10.0;
             options.grade_k = 1.5;
-            options.full_decode = false;
         }
         Quality::High => {
             options.noise_sigma = 6.0;
             options.grade_k = 1.2;
-            options.full_decode = true;
         }
         Quality::Ultra => {
             options.noise_sigma = 4.0;
             options.grade_k = 1.0;
-            options.full_decode = true;
         }
     }
 
@@ -1304,7 +1962,11 @@ fn collect_sfm_images(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn is_sfm_image_path(path: &Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "tif" | "tiff")
 }
 
@@ -1415,7 +2077,9 @@ fn colorize_sparse_points(
     for point in &mut reconstruction.points {
         let mut colored = false;
         for view_idx in 0..view_limit {
-            if let Some((x, y)) = project_point(&point.position, &poses[view_idx], &intrinsics[view_idx]) {
+            if let Some((x, y)) =
+                project_point(&point.position, &poses[view_idx], &intrinsics[view_idx])
+            {
                 let pixel = images[view_idx].get_pixel(x, y);
                 point.color = [pixel[0], pixel[1], pixel[2]];
                 colored = true;
@@ -1459,16 +2123,21 @@ fn run_dense_mvs(
 ) -> Result<Vec<(na::Point3<f64>, [u8; 3])>> {
     let scale = dense_scale_for_quality(quality);
     let images = load_mvs_images(image_paths, intrinsics, scale)?;
-    let adjusted_intrinsics: Vec<CameraIntrinsics> = images.iter().map(|img| img.intrinsics.clone()).collect();
+    let adjusted_intrinsics: Vec<CameraIntrinsics> =
+        images.iter().map(|img| img.intrinsics.clone()).collect();
 
     let patch_config = patchmatch_config_from_quality(quality);
     let mut depth_maps: Vec<DepthMap> = Vec::with_capacity(images.len());
 
     for (i, image) in images.iter().enumerate() {
         let src_indices = select_source_indices(i, images.len(), max_source_views(quality));
-        let src_images: Vec<&GrayImage> = src_indices.iter().map(|&idx| &images[idx].gray).collect();
+        let src_images: Vec<&GrayImage> =
+            src_indices.iter().map(|&idx| &images[idx].gray).collect();
         let src_poses: Vec<&CameraPose> = src_indices.iter().map(|&idx| &poses[idx]).collect();
-        let src_intrinsics: Vec<&CameraIntrinsics> = src_indices.iter().map(|&idx| &adjusted_intrinsics[idx]).collect();
+        let src_intrinsics: Vec<&CameraIntrinsics> = src_indices
+            .iter()
+            .map(|&idx| &adjusted_intrinsics[idx])
+            .collect();
 
         let input = MvsInput {
             ref_image: &image.gray,
@@ -1512,7 +2181,11 @@ fn load_mvs_images(
             .with_context(|| format!("Failed to open image {}", path.display()))?;
         let (rgb, gray) = downscale_image_pair(&img, scale);
         let intr = scale_intrinsics(&intrinsics[idx], scale, rgb.width(), rgb.height());
-        images.push(MvsImage { rgb, gray, intrinsics: intr });
+        images.push(MvsImage {
+            rgb,
+            gray,
+            intrinsics: intr,
+        });
     }
     Ok(images)
 }
@@ -1669,7 +2342,8 @@ fn fuse_depth_maps_colored(
                     }
                     let src_pose = &poses[src_idx];
                     let src_intr = &intrinsics[src_idx];
-                    if let Some((sx, sy, sz)) = project_to_camera(&point_world, src_pose, src_intr) {
+                    if let Some((sx, sy, sz)) = project_to_camera(&point_world, src_pose, src_intr)
+                    {
                         if let Some((src_depth, src_conf, _)) = src_depth_map.get(sx, sy) {
                             if src_conf > 0.5 {
                                 let depth_diff = (src_depth as f64 - sz).abs();
@@ -1740,10 +2414,7 @@ fn export_dense_point_cloud(points: &[(na::Point3<f64>, [u8; 3])], path: &Path) 
     Ok(())
 }
 
-fn write_intrinsics_report(
-    output: &Path,
-    reports: &[(String, IntrinsicsReport)],
-) -> Result<()> {
+fn write_intrinsics_report(output: &Path, reports: &[(String, IntrinsicsReport)]) -> Result<()> {
     if reports.is_empty() {
         return Ok(());
     }
@@ -1922,7 +2593,14 @@ fn run_gaussian_splatting(
         }
     } else {
         for p in sparse_points {
-            initial_points.push((na::Point3::new(p.position.x as f32, p.position.y as f32, p.position.z as f32), p.color));
+            initial_points.push((
+                na::Point3::new(
+                    p.position.x as f32,
+                    p.position.y as f32,
+                    p.position.z as f32,
+                ),
+                p.color,
+            ));
         }
     }
 
@@ -1936,15 +2614,23 @@ fn run_gaussian_splatting(
         let intr = &intrinsics[idx];
         let rotation = pose.rotation.to_rotation_matrix();
         let mut transform = na::Matrix4::<f32>::identity();
-        transform.fixed_view_mut::<3, 3>(0, 0).copy_from(&rotation.matrix().map(|v| v as f32));
+        transform
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&rotation.matrix().map(|v| v as f32));
         transform[(0, 3)] = pose.translation.x as f32;
         transform[(1, 3)] = pose.translation.y as f32;
         transform[(2, 3)] = pose.translation.z as f32;
 
         let intr_matrix = na::Matrix3::<f32>::new(
-            intr.fx as f32, 0.0, intr.cx as f32,
-            0.0, intr.fy as f32, intr.cy as f32,
-            0.0, 0.0, 1.0,
+            intr.fx as f32,
+            0.0,
+            intr.cx as f32,
+            0.0,
+            intr.fy as f32,
+            intr.cy as f32,
+            0.0,
+            0.0,
+            1.0,
         );
 
         cameras.push(GsCamera {
@@ -2012,20 +2698,17 @@ fn load_config_doc() -> Result<TomlValue> {
     if path.exists() {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config {}", path.display()))?;
-        let doc = toml::from_str(&content)
-            .context("Failed to parse config TOML")?;
+        let doc = toml::from_str(&content).context("Failed to parse config TOML")?;
         Ok(doc)
     } else {
-        let doc = toml::from_str(DEFAULT_CONFIG)
-            .context("Failed to parse default config")?;
+        let doc = toml::from_str(DEFAULT_CONFIG).context("Failed to parse default config")?;
         Ok(doc)
     }
 }
 
 fn save_config_doc(doc: &TomlValue) -> Result<()> {
     let path = config_file_path();
-    let rendered = toml::to_string_pretty(doc)
-        .context("Failed to render config")?;
+    let rendered = toml::to_string_pretty(doc).context("Failed to render config")?;
     std::fs::write(&path, rendered)
         .with_context(|| format!("Failed to write config {}", path.display()))?;
     Ok(())
@@ -2104,7 +2787,12 @@ fn confirm_delete(model_id: &str) -> Result<bool> {
     Ok(input.trim() == "DELETE")
 }
 
-fn create_inventory_context(input: &Path, output: &Path, mode: Mode, quality: Quality) -> Result<InventoryContext> {
+fn create_inventory_context(
+    input: &Path,
+    output: &Path,
+    mode: Mode,
+    quality: Quality,
+) -> Result<InventoryContext> {
     let inventory = load_inventory()?;
     let model_name = output
         .file_name()
@@ -2137,10 +2825,16 @@ fn update_inventory_sequence(ctx: &InventoryContext, output: &Path, status: Sequ
 
     let folder = output.display().to_string();
     if let Err(err) = inventory.update_sequence_folder(&ctx.sequence_id, &folder) {
-        eprintln!("{} Inventory sequence folder update failed: {}", WARNING, err);
+        eprintln!(
+            "{} Inventory sequence folder update failed: {}",
+            WARNING, err
+        );
     }
     if let Err(err) = inventory.update_sequence_status(&ctx.sequence_id, status) {
-        eprintln!("{} Inventory sequence status update failed: {}", WARNING, err);
+        eprintln!(
+            "{} Inventory sequence status update failed: {}",
+            WARNING, err
+        );
     }
     if let Err(err) = inventory.touch_model(&ctx.model_id) {
         eprintln!("{} Inventory model update failed: {}", WARNING, err);
@@ -2240,10 +2934,8 @@ impl RunStateManager {
                         manager.persist()?;
                         return Ok(manager);
                     } else {
-                        let archived = path.with_extension(format!(
-                            "json.bak.{}",
-                            chrono::Utc::now().timestamp()
-                        ));
+                        let archived = path
+                            .with_extension(format!("json.bak.{}", chrono::Utc::now().timestamp()));
                         let _ = std::fs::rename(&path, archived);
                     }
                 }
@@ -2384,7 +3076,10 @@ fn dense_checkpoint_path(output: &Path) -> PathBuf {
     checkpoint_dir(output).join("dense_points.zst")
 }
 
-fn save_sparse_checkpoint(output: &Path, reconstruction: &trueshot_core::reconstruction::multicam_sfm::SparseReconstruction) -> Result<()> {
+fn save_sparse_checkpoint(
+    output: &Path,
+    reconstruction: &trueshot_core::reconstruction::multicam_sfm::SparseReconstruction,
+) -> Result<()> {
     let path = sparse_checkpoint_path(output);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2394,7 +3089,9 @@ fn save_sparse_checkpoint(output: &Path, reconstruction: &trueshot_core::reconst
     Ok(())
 }
 
-fn load_sparse_checkpoint(output: &Path) -> Result<trueshot_core::reconstruction::multicam_sfm::SparseReconstruction> {
+fn load_sparse_checkpoint(
+    output: &Path,
+) -> Result<trueshot_core::reconstruction::multicam_sfm::SparseReconstruction> {
     let path = sparse_checkpoint_path(output);
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("Missing sparse checkpoint at {}", path.display()))?;
@@ -2428,7 +3125,12 @@ fn load_dense_checkpoint(output: &Path) -> Result<Vec<(na::Point3<f64>, [u8; 3])
     let records: Vec<DensePointRecord> = bincode::deserialize(&decoded)?;
     let points = records
         .into_iter()
-        .map(|r| (na::Point3::new(r.position[0], r.position[1], r.position[2]), r.color))
+        .map(|r| {
+            (
+                na::Point3::new(r.position[0], r.position[1], r.position[2]),
+                r.color,
+            )
+        })
         .collect();
     Ok(points)
 }
@@ -2453,7 +3155,9 @@ fn write_run_report(
         .unwrap_or_default()
         .as_secs();
     let run_id = uuid::Uuid::new_v4().to_string();
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
 
     let base = serde_json::json!({
         "run_id": run_id,
@@ -2477,16 +3181,26 @@ fn write_run_report(
     });
 
     let payload = match kind {
-        RunReportKind::Process { mode, quality, input, output, jobs, gpu_disabled } => {
-            let artifacts = collect_artifacts(&output, &[
-                "sparse.ply",
-                "dense.ply",
-                "gaussians.ply",
-                "reconstruction_report.json",
-                "intrinsics_report.json",
-                "inventory.json",
-                "run_report.json",
-            ]);
+        RunReportKind::Process {
+            mode,
+            quality,
+            input,
+            output,
+            jobs,
+            gpu_disabled,
+        } => {
+            let artifacts = collect_artifacts(
+                &output,
+                &[
+                    "sparse.ply",
+                    "dense.ply",
+                    "gaussians.ply",
+                    "reconstruction_report.json",
+                    "intrinsics_report.json",
+                    "inventory.json",
+                    "run_report.json",
+                ],
+            );
             serde_json::json!({
                 "kind": "process",
                 "mode": mode.to_string(),
@@ -2498,7 +3212,13 @@ fn write_run_report(
                 "artifacts": artifacts,
             })
         }
-        RunReportKind::Export { input, output, format, include_colors, include_normals } => {
+        RunReportKind::Export {
+            input,
+            output,
+            format,
+            include_colors,
+            include_normals,
+        } => {
             serde_json::json!({
                 "kind": "export",
                 "input": input.to_string_lossy(),
@@ -2508,7 +3228,16 @@ fn write_run_report(
                 "include_normals": include_normals,
             })
         }
-        RunReportKind::Calibrate { images, output, rows, cols, square_size_mm, rms_error, width, height } => {
+        RunReportKind::Calibrate {
+            images,
+            output,
+            rows,
+            cols,
+            square_size_mm,
+            rms_error,
+            width,
+            height,
+        } => {
             serde_json::json!({
                 "kind": "calibrate",
                 "images": images.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
@@ -2567,7 +3296,10 @@ fn cmd_inventory(action: InventoryAction) -> Result<()> {
             }
             println!();
             if models.is_empty() {
-                println!("  {} No models found. Use 'trueshot process' to create models.", WARNING);
+                println!(
+                    "  {} No models found. Use 'trueshot process' to create models.",
+                    WARNING
+                );
                 return Ok(());
             }
             for model in models {
@@ -2581,8 +3313,8 @@ fn cmd_inventory(action: InventoryAction) -> Result<()> {
         }
         InventoryAction::Show { id } => {
             let inventory = load_inventory()?;
-            let model_id = uuid::Uuid::parse_str(&id)
-                .with_context(|| format!("Invalid model id: {}", id))?;
+            let model_id =
+                uuid::Uuid::parse_str(&id).with_context(|| format!("Invalid model id: {}", id))?;
             let model = inventory.get_model(&model_id)?;
             let model = match model {
                 Some(model) => model,
@@ -2614,8 +3346,8 @@ fn cmd_inventory(action: InventoryAction) -> Result<()> {
         }
         InventoryAction::Delete { id, force } => {
             let inventory = load_inventory()?;
-            let model_id = uuid::Uuid::parse_str(&id)
-                .with_context(|| format!("Invalid model id: {}", id))?;
+            let model_id =
+                uuid::Uuid::parse_str(&id).with_context(|| format!("Invalid model id: {}", id))?;
             if !force && !confirm_delete(&id)? {
                 println!("Aborted.");
                 return Ok(());
@@ -2656,33 +3388,35 @@ fn cmd_inventory(action: InventoryAction) -> Result<()> {
 fn cmd_status(hardware: bool, check_updates: bool) -> Result<()> {
     println!("{} TrueShot System Status", ROCKET);
     println!();
-    
+
     // Version info
     println!("  Version: {}", style(env!("CARGO_PKG_VERSION")).cyan());
     println!();
-    
+
     // System resources
     println!("  {} System Resources:", style("📊").dim());
-    
+
     let sys = sysinfo::System::new_all();
     println!("    CPU:    {} cores", num_cpus::get());
-    println!("    Memory: {:.1} GB total, {:.1} GB available",
+    println!(
+        "    Memory: {:.1} GB total, {:.1} GB available",
         sys.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
-        sys.available_memory() as f64 / 1024.0 / 1024.0 / 1024.0);
-    
+        sys.available_memory() as f64 / 1024.0 / 1024.0 / 1024.0
+    );
+
     if hardware {
         println!();
         println!("  {} Hardware Details:", GPU);
         // GPU detection would go here
         println!("    GPU:    Detection enabled (use --verbose for details)");
     }
-    
+
     if check_updates {
         println!();
         println!("  Checking for updates...");
         println!("    {} You are running the latest version!", CHECK);
     }
-    
+
     Ok(())
 }
 
@@ -2726,7 +3460,11 @@ fn cmd_config(action: ConfigAction) -> Result<()> {
             let path = config_file_path();
             std::fs::write(&path, DEFAULT_CONFIG)
                 .with_context(|| format!("Failed to write {}", path.display()))?;
-            println!("{} Configuration reset to defaults at {}", CHECK, path.display());
+            println!(
+                "{} Configuration reset to defaults at {}",
+                CHECK,
+                path.display()
+            );
         }
         ConfigAction::Edit => {
             let path = config_file_path();
@@ -2776,7 +3514,11 @@ fn cmd_jobs(action: JobsCommand) -> Result<()> {
             api_token,
         ),
         JobsCommand::List { server, api_token } => cmd_jobs_list(server, api_token),
-        JobsCommand::Get { id, server, api_token } => cmd_jobs_get(id, server, api_token),
+        JobsCommand::Get {
+            id,
+            server,
+            api_token,
+        } => cmd_jobs_get(id, server, api_token),
     }
 }
 
@@ -2798,8 +3540,9 @@ fn cmd_jobs_submit(
     let token = resolve_api_token(api_token)?;
     let payload = build_job_payload(payload, payload_file, workspace, livescan, dslr, job_type)?;
     let request_id = match request_id {
-        Some(value) => Uuid::parse_str(&value)
-            .with_context(|| format!("Invalid request id: {}", value))?,
+        Some(value) => {
+            Uuid::parse_str(&value).with_context(|| format!("Invalid request id: {}", value))?
+        }
         None => Uuid::new_v4(),
     };
 
@@ -2828,7 +3571,9 @@ fn cmd_jobs_submit(
         .context("Failed to submit job")?;
 
     if !response.status().is_success() {
-        let text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+        let text = response
+            .text()
+            .unwrap_or_else(|_| "Unknown error".to_string());
         anyhow::bail!("Job submission failed: {}", text);
     }
 
@@ -2852,7 +3597,9 @@ fn cmd_jobs_list(server: Option<String>, api_token: Option<String>) -> Result<()
         .context("Failed to fetch jobs")?;
 
     if !response.status().is_success() {
-        let text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+        let text = response
+            .text()
+            .unwrap_or_else(|_| "Unknown error".to_string());
         anyhow::bail!("Job list failed: {}", text);
     }
 
@@ -2876,7 +3623,9 @@ fn cmd_jobs_get(id: String, server: Option<String>, api_token: Option<String>) -
         .context("Failed to fetch job")?;
 
     if !response.status().is_success() {
-        let text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+        let text = response
+            .text()
+            .unwrap_or_else(|_| "Unknown error".to_string());
         anyhow::bail!("Job fetch failed: {}", text);
     }
 
@@ -2899,8 +3648,8 @@ fn resolve_server_url(server_override: Option<String>) -> Result<String> {
     } else {
         format!("http://{}", trimmed)
     };
-    let parsed = Url::parse(&normalized)
-        .with_context(|| format!("Invalid server URL: {}", normalized))?;
+    let parsed =
+        Url::parse(&normalized).with_context(|| format!("Invalid server URL: {}", normalized))?;
     Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
@@ -2934,14 +3683,14 @@ fn build_job_payload(
     if let Some(path) = payload_file {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let json: serde_json::Value = serde_json::from_str(&content)
-            .context("Payload file must be valid JSON")?;
+        let json: serde_json::Value =
+            serde_json::from_str(&content).context("Payload file must be valid JSON")?;
         return Ok(json);
     }
 
     if let Some(text) = payload {
-        let json: serde_json::Value = serde_json::from_str(&text)
-            .context("Payload must be valid JSON")?;
+        let json: serde_json::Value =
+            serde_json::from_str(&text).context("Payload must be valid JSON")?;
         return Ok(json);
     }
 
@@ -2959,37 +3708,57 @@ fn run_with_tray(port: u16) -> Result<()> {
     let event_loop = tao::event_loop::EventLoop::new();
     let tray_menu = Menu::new();
     let quit_i = MenuItem::new("Quit", true, None);
-    tray_menu.append_items(&[&quit_i, &PredefinedMenuItem::separator()]).unwrap();
+    tray_menu
+        .append_items(&[&quit_i, &PredefinedMenuItem::separator()])
+        .unwrap();
 
     let _tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_tooltip(&format!("TrueShot Server (port {})", port))
         .build()
         .unwrap();
-    
+
     println!("{} Tray icon initialized. Running event loop...", CHECK);
-    
+
     event_loop.run(move |_event, _, control_flow| {
         *control_flow = tao::event_loop::ControlFlow::Wait;
     });
 }
 
-fn count_images(dir: &Path) -> Result<usize> {
-    if !dir.exists() {
-        return Ok(0);
+#[cfg(test)]
+mod burst_pipeline_tests {
+    use super::*;
+
+    #[test]
+    fn export_worker_isolates_job_panics_and_continues() {
+        let (sender, receiver, worker) = burst_export_worker().unwrap();
+        sender
+            .send(BurstExportTask {
+                group_id: "a".repeat(64),
+                label: "panic".to_string(),
+                started_at: std::time::Instant::now(),
+                decode_seconds: 0.1,
+                decoded_megapixels: 1.0,
+                major_page_faults: 0,
+                export: Box::new(|| panic!("synthetic exporter panic")),
+            })
+            .unwrap();
+        let failed = receiver.recv().unwrap();
+        assert!(failed.result.unwrap_err().to_string().contains("synthetic"));
+
+        sender
+            .send(BurstExportTask {
+                group_id: "b".repeat(64),
+                label: "healthy".to_string(),
+                started_at: std::time::Instant::now(),
+                decode_seconds: 0.1,
+                decoded_megapixels: 1.0,
+                major_page_faults: 0,
+                export: Box::new(|| Ok(Vec::new())),
+            })
+            .unwrap();
+        assert!(receiver.recv().unwrap().result.is_ok());
+        drop(sender);
+        worker.join().unwrap();
     }
-    
-    let extensions = ["jpg", "jpeg", "png", "tiff", "tif", "raw", "dng", "cr2", "nef"];
-    let count = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| extensions.contains(&ext.to_lowercase().as_str()))
-                .unwrap_or(false)
-        })
-        .count();
-    
-    Ok(count)
 }

@@ -44,7 +44,7 @@ impl Transition {
             easing: EasingFunction::EaseInOut,
         }
     }
-    
+
     /// Get normalized progress (0.0 to 1.0)
     pub fn progress(&self) -> f32 {
         let elapsed = self.start_time.elapsed();
@@ -52,7 +52,7 @@ impl Transition {
         let clamped = raw.clamp(0.0, 1.0);
         self.easing.apply(clamped)
     }
-    
+
     /// Check if transition is complete
     pub fn is_complete(&self) -> bool {
         self.start_time.elapsed() >= self.duration
@@ -106,14 +106,14 @@ impl TransitionManager {
             default_duration: Duration::from_millis(500),
         }
     }
-    
+
     pub fn with_duration(duration: Duration) -> Self {
         Self {
             active: HashMap::new(),
             default_duration: duration,
         }
     }
-    
+
     /// Start a new transition
     pub fn start_transition(
         &mut self,
@@ -124,7 +124,7 @@ impl TransitionManager {
         let transition = Transition::new(object_id, from, to, self.default_duration);
         self.active.insert(object_id, transition);
     }
-    
+
     /// Start transition with custom duration
     pub fn start_transition_with_duration(
         &mut self,
@@ -136,27 +136,27 @@ impl TransitionManager {
         let transition = Transition::new(object_id, from, to, duration);
         self.active.insert(object_id, transition);
     }
-    
+
     /// Get transition progress for an object
     pub fn get_progress(&self, object_id: Uuid) -> Option<f32> {
         self.active.get(&object_id).map(|t| t.progress())
     }
-    
+
     /// Get a transition
     pub fn get_transition(&self, object_id: Uuid) -> Option<&Transition> {
         self.active.get(&object_id)
     }
-    
+
     /// Check if object is transitioning
     pub fn is_transitioning(&self, object_id: Uuid) -> bool {
         self.active.contains_key(&object_id)
     }
-    
+
     /// Update and clean up completed transitions
     /// Returns list of completed object IDs with their final representations
     pub fn update(&mut self) -> Vec<(Uuid, ObjectRepresentation)> {
         let mut completed = Vec::new();
-        
+
         self.active.retain(|id, transition| {
             if transition.is_complete() {
                 completed.push((*id, (*transition.to).clone()));
@@ -165,15 +165,15 @@ impl TransitionManager {
                 true
             }
         });
-        
+
         completed
     }
-    
+
     /// Cancel a transition
     pub fn cancel(&mut self, object_id: Uuid) -> Option<Transition> {
         self.active.remove(&object_id)
     }
-    
+
     /// Get number of active transitions
     pub fn active_count(&self) -> usize {
         self.active.len()
@@ -204,32 +204,32 @@ impl TransitionBlend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_easing_functions() {
         // Linear
         assert_eq!(EasingFunction::Linear.apply(0.0), 0.0);
         assert_eq!(EasingFunction::Linear.apply(0.5), 0.5);
         assert_eq!(EasingFunction::Linear.apply(1.0), 1.0);
-        
+
         // EaseIn starts slow
         assert!(EasingFunction::EaseIn.apply(0.5) < 0.5);
-        
+
         // EaseOut ends slow
         assert!(EasingFunction::EaseOut.apply(0.5) > 0.5);
     }
-    
+
     #[test]
     fn test_transition_manager() {
         let mut manager = TransitionManager::new();
         let id = Uuid::new_v4();
-        
+
         manager.start_transition(
             id,
             ObjectRepresentation::Pending,
             ObjectRepresentation::Pending,
         );
-        
+
         assert!(manager.is_transitioning(id));
         assert_eq!(manager.active_count(), 1);
     }

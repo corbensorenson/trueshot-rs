@@ -91,15 +91,15 @@ impl Default for ReconstructionMethod {
 }
 
 pub mod hull;
-pub mod pipeline;
-pub mod livescan;
-pub mod unified;
-pub mod job;
 pub mod hybrid;
+pub mod job;
+pub mod livescan;
 pub mod multicam_sfm;
+pub mod pipeline;
+pub mod unified;
 
 // Re-export hybrid pipeline for easy access
-pub use hybrid::{HybridPipeline, HybridConfig, HybridQuality, PipelinePhase};
+pub use hybrid::{HybridConfig, HybridPipeline, HybridQuality, PipelinePhase};
 
 // Re-export multi-camera SfM
-pub use multicam_sfm::{MultiCamSfm, MultiCamConfig, CameraId, LivescanFrame, HighResImage};
+pub use multicam_sfm::{CameraId, HighResImage, LivescanFrame, MultiCamConfig, MultiCamSfm};

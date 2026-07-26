@@ -40,11 +40,11 @@ pub struct FrameMetadata {
 /// * Pattern describing focus planes and exposures
 pub fn analyze_focus_exposure_pattern(metadata: &[FrameMetadata]) -> Result<FocusExposurePattern> {
     let total_images = metadata.len();
-    
+
     if total_images == 0 {
         anyhow::bail!("No images to analyze");
     }
-    
+
     if total_images == 1 {
         return Ok(FocusExposurePattern {
             focus_planes: 1,
@@ -53,25 +53,30 @@ pub fn analyze_focus_exposure_pattern(metadata: &[FrameMetadata]) -> Result<Focu
             representative_indices: vec![0],
         });
     }
-    
-    tracing::info!("Analyzing {} images for focus/exposure pattern", total_images);
-    
+
+    tracing::info!(
+        "Analyzing {} images for focus/exposure pattern",
+        total_images
+    );
+
     // Sort by timestamp (should already be sorted, but ensure it)
     let mut sorted_metadata = metadata.to_vec();
     sorted_metadata.sort_by_key(|m| m.timestamp_ms);
-    
+
     // Calculate time differences between consecutive images
     let mut time_diffs = Vec::new();
     for i in 1..sorted_metadata.len() {
-        let diff_ms = sorted_metadata[i].timestamp_ms.saturating_sub(sorted_metadata[i-1].timestamp_ms);
+        let diff_ms = sorted_metadata[i]
+            .timestamp_ms
+            .saturating_sub(sorted_metadata[i - 1].timestamp_ms);
         time_diffs.push(diff_ms);
     }
-    
+
     // Detect exposures per plane by finding repeating shutter speed pattern
     let exposures_per_plane = detect_exposures_per_plane(&sorted_metadata);
-    
+
     tracing::info!("Detected {} exposures per focus plane", exposures_per_plane);
-    
+
     // Calculate focus planes
     let focus_planes = if total_images % exposures_per_plane == 0 {
         total_images / exposures_per_plane
@@ -79,19 +84,24 @@ pub fn analyze_focus_exposure_pattern(metadata: &[FrameMetadata]) -> Result<Focu
         // Best fit
         (total_images + exposures_per_plane - 1) / exposures_per_plane
     };
-    
-    tracing::info!("Detected {} focus planes × {} exposures = {} images (actual: {})",
-                   focus_planes, exposures_per_plane, focus_planes * exposures_per_plane, total_images);
-    
+
+    tracing::info!(
+        "Detected {} focus planes × {} exposures = {} images (actual: {})",
+        focus_planes,
+        exposures_per_plane,
+        focus_planes * exposures_per_plane,
+        total_images
+    );
+
     // Calculate representative indices (middle exposure of each focus plane)
     let middle_exp_idx = exposures_per_plane / 2;
     let representative_indices: Vec<usize> = (0..focus_planes)
         .map(|focus_idx| focus_idx * exposures_per_plane + middle_exp_idx)
         .filter(|&idx| idx < total_images)
         .collect();
-    
+
     tracing::info!("Representative frames: {:?}", representative_indices);
-    
+
     Ok(FocusExposurePattern {
         focus_planes,
         exposures_per_plane,
@@ -105,41 +115,45 @@ fn detect_exposures_per_plane(metadata: &[FrameMetadata]) -> usize {
     if metadata.len() < 2 {
         return 1;
     }
-    
+
     // Collect unique shutter speeds
     let mut shutter_speeds: Vec<f64> = metadata.iter().map(|m| m.shutter_speed).collect();
     shutter_speeds.sort_by(|a, b| a.partial_cmp(b).unwrap());
     shutter_speeds.dedup_by(|a, b| (*a - *b).abs() < 0.0001);
-    
+
     let unique_exposures = shutter_speeds.len();
-    
-    tracing::info!("Found {} unique shutter speeds: {:?}", unique_exposures, shutter_speeds);
-    
+
+    tracing::info!(
+        "Found {} unique shutter speeds: {:?}",
+        unique_exposures,
+        shutter_speeds
+    );
+
     // If we have 3 unique shutter speeds, it's likely 3 exposures per plane (HDR)
     // If we have 1 unique shutter speed, it's 1 exposure per plane (focus stack only)
     // Otherwise, try to detect the pattern
-    
+
     if (2..=5).contains(&unique_exposures) {
         // Verify the pattern repeats
         let pattern_length = unique_exposures;
         let mut pattern_matches = true;
-        
+
         for i in 0..metadata.len().saturating_sub(pattern_length) {
             let current_speed = metadata[i].shutter_speed;
             let next_cycle_speed = metadata[i + pattern_length].shutter_speed;
-            
+
             if (current_speed - next_cycle_speed).abs() > 0.0001 {
                 pattern_matches = false;
                 break;
             }
         }
-        
+
         if pattern_matches {
             tracing::info!("Detected repeating pattern of {} exposures", pattern_length);
             return pattern_length;
         }
     }
-    
+
     // Fallback: assume 3 exposures per plane (common HDR pattern)
     if unique_exposures >= 3 {
         3
@@ -155,7 +169,10 @@ pub fn extract_frame_metadata(paths: &[PathBuf]) -> Result<Vec<FrameMetadata>> {
     use crate::exif_parser::extract_z9_metadata;
     use rayon::prelude::*;
 
-    tracing::info!("Extracting metadata from {} files (fast mode - no decompression)...", paths.len());
+    tracing::info!(
+        "Extracting metadata from {} files (fast mode - no decompression)...",
+        paths.len()
+    );
 
     let metadata: Vec<FrameMetadata> = paths
         .par_iter()
@@ -189,7 +206,7 @@ pub fn extract_frame_metadata(paths: &[PathBuf]) -> Result<Vec<FrameMetadata>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_detect_3_exposures_20_focus() {
         // Simulate 20 focus planes × 3 exposures = 60 images
@@ -202,7 +219,7 @@ mod tests {
                     2 => 1.0 / 250.0,
                     _ => 1.0 / 60.0,
                 };
-                
+
                 FrameMetadata {
                     path: PathBuf::from(format!("image_{:04}.nef", i)),
                     timestamp_ms: i as u64 * 100,
@@ -210,15 +227,15 @@ mod tests {
                 }
             })
             .collect();
-        
+
         let pattern = analyze_focus_exposure_pattern(&metadata).unwrap();
-        
+
         assert_eq!(pattern.focus_planes, 20);
         assert_eq!(pattern.exposures_per_plane, 3);
         assert_eq!(pattern.total_images, 60);
         assert_eq!(pattern.representative_indices.len(), 20);
     }
-    
+
     #[test]
     fn test_detect_3_exposures_7_focus() {
         // Simulate 7 focus planes × 3 exposures = 21 images
@@ -231,7 +248,7 @@ mod tests {
                     2 => 1.0 / 250.0,
                     _ => 1.0 / 60.0,
                 };
-                
+
                 FrameMetadata {
                     path: PathBuf::from(format!("image_{:04}.nef", i)),
                     timestamp_ms: i as u64 * 100,
@@ -239,12 +256,11 @@ mod tests {
                 }
             })
             .collect();
-        
+
         let pattern = analyze_focus_exposure_pattern(&metadata).unwrap();
-        
+
         assert_eq!(pattern.focus_planes, 7);
         assert_eq!(pattern.exposures_per_plane, 3);
         assert_eq!(pattern.total_images, 21);
     }
 }
-

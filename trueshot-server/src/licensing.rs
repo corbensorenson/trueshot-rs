@@ -208,6 +208,14 @@ impl LicenseGate {
             .map_err(|err| err.to_string())
     }
 
+    pub fn activate_with_key(&mut self, license_key: &str, device_name: Option<String>) -> Result<LicenseSnapshot, String> {
+        let manager = self.ensure_manager()?;
+        manager
+            .load_license_key(license_key, device_name)
+            .map_err(|err| err.to_string())?;
+        Ok(self.status_snapshot())
+    }
+
     pub fn create_trial(&mut self, duration_days: i64, bundles: &[String]) -> Result<LicenseSnapshot, String> {
         let manager = self.ensure_manager()?;
         let selected_bundles = if bundles.is_empty() {

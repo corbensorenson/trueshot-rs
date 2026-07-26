@@ -1,0 +1,25 @@
+{
+  "categories": {
+    "local_workload": "Endpoints that perform capture, reconstruction, rendering, storage, or project operations on customer hardware.",
+    "control_plane": "Endpoints that handle authentication, licensing, metadata, and system control for local deployments."
+  },
+  "tags": {
+    "audit": "control_plane",
+    "auth": "control_plane",
+    "calibration": "local_workload",
+    "devices": "local_workload",
+    "docs": "control_plane",
+    "general": "control_plane",
+    "guest": "local_workload",
+    "hardware": "local_workload",
+    "health": "control_plane",
+    "jobs": "local_workload",
+    "phones": "local_workload",
+    "project": "local_workload",
+    "scan": "local_workload",
+    "storage": "local_workload",
+    "system": "control_plane",
+    "websocket": "local_workload",
+    "wizard": "local_workload"
+  }
+}

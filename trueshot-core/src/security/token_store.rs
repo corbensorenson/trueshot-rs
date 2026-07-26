@@ -3,11 +3,11 @@
 //! Stores OAuth tokens and credentials in the OS keychain.
 //! A lightweight on-disk index tracks providers without storing secrets.
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use keyring::Entry;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use keyring::Entry;
 
 // ============================================================================
 // Types
@@ -59,8 +59,7 @@ impl TokenStore {
     /// Secrets are stored in the OS keychain; `data_dir` holds a provider index only.
     pub fn new(data_dir: impl Into<PathBuf>) -> Result<Self, TokenStoreError> {
         let data_dir = data_dir.into();
-        std::fs::create_dir_all(&data_dir)
-            .map_err(|e| TokenStoreError::Io(e.to_string()))?;
+        std::fs::create_dir_all(&data_dir).map_err(|e| TokenStoreError::Io(e.to_string()))?;
         let index_path = data_dir.join("tokens.index.json");
         let index = load_index(&index_path)?;
 
@@ -92,12 +91,10 @@ impl TokenStore {
     /// Load a token by provider
     pub fn load_token(&self, provider: &str) -> Result<StoredToken, TokenStoreError> {
         let entry = self.entry_for(provider)?;
-        let payload = entry
-            .get_password()
-            .map_err(|e| match e {
-                keyring::Error::NoEntry => TokenStoreError::NotFound(provider.to_string()),
-                _ => TokenStoreError::Keyring(e.to_string()),
-            })?;
+        let payload = entry.get_password().map_err(|e| match e {
+            keyring::Error::NoEntry => TokenStoreError::NotFound(provider.to_string()),
+            _ => TokenStoreError::Keyring(e.to_string()),
+        })?;
         let token = serde_json::from_str(&payload)
             .map_err(|e| TokenStoreError::Serialization(e.to_string()))?;
         Ok(token)
@@ -107,7 +104,9 @@ impl TokenStore {
     pub fn list_providers(&self) -> Result<Vec<String>, TokenStoreError> {
         let mut index = self.index.lock().unwrap();
         // Clean stale providers if keyring entries were removed externally.
-        index.providers.retain(|provider| self.entry_exists(provider));
+        index
+            .providers
+            .retain(|provider| self.entry_exists(provider));
         persist_index(&self.index_path, &index)?;
         Ok(index.providers.clone())
     }
@@ -115,12 +114,10 @@ impl TokenStore {
     /// Delete a token
     pub fn delete_token(&self, provider: &str) -> Result<(), TokenStoreError> {
         let entry = self.entry_for(provider)?;
-        entry
-            .delete_password()
-            .map_err(|e| match e {
-                keyring::Error::NoEntry => TokenStoreError::NotFound(provider.to_string()),
-                _ => TokenStoreError::Keyring(e.to_string()),
-            })?;
+        entry.delete_password().map_err(|e| match e {
+            keyring::Error::NoEntry => TokenStoreError::NotFound(provider.to_string()),
+            _ => TokenStoreError::Keyring(e.to_string()),
+        })?;
 
         let mut index = self.index.lock().unwrap();
         index.providers.retain(|p| p != provider);
@@ -174,20 +171,16 @@ fn load_index(path: &Path) -> Result<TokenIndex, TokenStoreError> {
     if !path.exists() {
         return Ok(TokenIndex::default());
     }
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| TokenStoreError::Io(e.to_string()))?;
-    serde_json::from_str(&content)
-        .map_err(|e| TokenStoreError::Serialization(e.to_string()))
+    let content = std::fs::read_to_string(path).map_err(|e| TokenStoreError::Io(e.to_string()))?;
+    serde_json::from_str(&content).map_err(|e| TokenStoreError::Serialization(e.to_string()))
 }
 
 fn persist_index(path: &Path, index: &TokenIndex) -> Result<(), TokenStoreError> {
     let json = serde_json::to_string_pretty(index)
         .map_err(|e| TokenStoreError::Serialization(e.to_string()))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)
-        .map_err(|e| TokenStoreError::Io(e.to_string()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| TokenStoreError::Io(e.to_string()))?;
+    std::fs::write(&tmp, json).map_err(|e| TokenStoreError::Io(e.to_string()))?;
+    std::fs::rename(&tmp, path).map_err(|e| TokenStoreError::Io(e.to_string()))?;
     Ok(())
 }
 

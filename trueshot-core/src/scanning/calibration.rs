@@ -63,7 +63,7 @@ impl AutoCalibrator {
         // Let's use standard approximation for subject distance D.
         // Front DoF ~ (N * c * D^2) / (f^2 + N * c * D)
         // Rear DoF ~ (N * c * D^2) / (f^2 - N * c * D)
-        
+
         let f = self.lens.focal_length_mm;
         let n = self.lens.aperture_f_stop;
         let c = self.lens.sensor_coc_mm;
@@ -75,33 +75,33 @@ impl AutoCalibrator {
         // Hyperfocal H = f^2 / (N * c)
         // Near = H * D / (H + D)
         // Far = H * D / (H - D)
-        
+
         // But we want the "Safe Step Size" to ensure overlap.
         // Step Size <= DoF * OverlapFactor (0.7)
-        
+
         // Let's compute a simplified "Slice Depth"
         // At distance D, with magnification M ~ f / (D - f)
         let mag = f / (d - f).max(1.0);
-        
+
         // Macro DoF approx: 2 * N * c * ((1 + M) / M^2)
         // If M is small (< 0.1), use standard.
-        
+
         let dof_mm = if mag > 0.1 {
             // Macro regime
             2.0 * n * c * ((1.0 + mag) / (mag * mag))
         } else {
             // Standard regime
-             (2.0 * n * c * d * d) / (f * f)
+            (2.0 * n * c * d * d) / (f * f)
         };
-        
+
         // Safety / Overlap factor
         let overlap = match quality {
-            QualityLevel::Preview => 1.5, // Gaps allowed? No, just huge steps.
+            QualityLevel::Preview => 1.5,  // Gaps allowed? No, just huge steps.
             QualityLevel::Standard => 0.8, // 20% overlap
-            QualityLevel::High => 0.6,    // 40% overlap
-            QualityLevel::Ultra => 0.5,   // 50% overlap - super dense
+            QualityLevel::High => 0.6,     // 40% overlap
+            QualityLevel::Ultra => 0.5,    // 50% overlap - super dense
         };
-        
+
         let step_size_mm = dof_mm * overlap;
 
         // 3. Scan Range
@@ -109,12 +109,12 @@ impl AutoCalibrator {
         let margin_mm = object_radius_mm * 0.2; // 20% margin
         let near = d - object_radius_mm - margin_mm;
         let far = d + object_radius_mm + margin_mm;
-        
+
         let total_depth = far - near;
         let steps = (total_depth / step_size_mm).ceil() as usize;
-        
+
         // Clamp steps reasonably
-        let steps = steps.max(1).min(1000); 
+        let steps = steps.max(1).min(1000);
 
         CalibrationResult {
             turntable_step_deg,
@@ -129,32 +129,36 @@ impl AutoCalibrator {
         frame: &image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
     ) -> Vec<f32> {
         // Histogram Analysis
-        let mut hist_low = 0;   // Shadows (e.g. < 10)
-        let mut hist_high = 0;  // Highlights (e.g. > 245)
+        let mut hist_low = 0; // Shadows (e.g. < 10)
+        let mut hist_high = 0; // Highlights (e.g. > 245)
         let mut total = 0;
-        
+
         for p in frame.pixels() {
             let l = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) as u8;
-            if l < 10 { hist_low += 1; }
-            if l > 245 { hist_high += 1; }
-            total += 1; 
+            if l < 10 {
+                hist_low += 1;
+            }
+            if l > 245 {
+                hist_high += 1;
+            }
+            total += 1;
         }
-        
+
         let pct_low = hist_low as f32 / total as f32;
         let pct_high = hist_high as f32 / total as f32;
-        
+
         let mut stops = vec![0.0]; // Always include base exposure
-        
+
         if pct_low > 0.05 {
             // Significant shadows crushed -> Need Overexposure (longer shutter)
-            stops.push(2.0); 
+            stops.push(2.0);
         }
-        
+
         if pct_high > 0.02 {
             // Highlights clipped -> Need Underexposure (faster shutter)
             stops.push(-2.0);
         }
-        
+
         // ensure sorted
         stops.sort_by(|a, b| a.partial_cmp(b).unwrap());
         stops

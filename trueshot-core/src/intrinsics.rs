@@ -1,8 +1,8 @@
-use anyhow::{Result, Context};
-use std::path::{Path, PathBuf};
+use crate::reconstruction::multicam_sfm::CameraIntrinsics;
+use anyhow::{Context, Result};
 use exif::{Reader, Tag, Value};
 use serde::{Deserialize, Serialize};
-use crate::reconstruction::multicam_sfm::CameraIntrinsics;
+use std::path::{Path, PathBuf};
 
 const FULL_FRAME_DIAGONAL_MM: f64 = 43.266615305567875; // sqrt(36^2 + 24^2)
 
@@ -35,7 +35,9 @@ pub fn estimate_intrinsics(path: &Path) -> Result<CameraIntrinsics> {
     Ok(intrinsics)
 }
 
-pub fn estimate_intrinsics_with_report(path: &Path) -> Result<(CameraIntrinsics, IntrinsicsReport)> {
+pub fn estimate_intrinsics_with_report(
+    path: &Path,
+) -> Result<(CameraIntrinsics, IntrinsicsReport)> {
     if let Some((intrinsics, report)) = load_calibration_override(path)? {
         return Ok((intrinsics, report));
     }
@@ -214,9 +216,11 @@ fn read_exif(path: &Path) -> Result<exif::Exif> {
 }
 
 fn exif_pixel_dimensions(exif: &exif::Exif) -> Option<(u32, u32)> {
-    let width = exif.get_field(Tag::PixelXDimension, exif::In::PRIMARY)
+    let width = exif
+        .get_field(Tag::PixelXDimension, exif::In::PRIMARY)
         .and_then(|f| exif_first_u32(&f.value));
-    let height = exif.get_field(Tag::PixelYDimension, exif::In::PRIMARY)
+    let height = exif
+        .get_field(Tag::PixelYDimension, exif::In::PRIMARY)
         .and_then(|f| exif_first_u32(&f.value));
     match (width, height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
@@ -225,15 +229,19 @@ fn exif_pixel_dimensions(exif: &exif::Exif) -> Option<(u32, u32)> {
 }
 
 fn focal_from_focal_plane(exif: &exif::Exif) -> Option<(f64, f64)> {
-    let focal_mm = exif.get_field(Tag::FocalLength, exif::In::PRIMARY)
+    let focal_mm = exif
+        .get_field(Tag::FocalLength, exif::In::PRIMARY)
         .and_then(|f| exif_first_f64(&f.value))?;
 
-    let x_res = exif.get_field(Tag::FocalPlaneXResolution, exif::In::PRIMARY)
+    let x_res = exif
+        .get_field(Tag::FocalPlaneXResolution, exif::In::PRIMARY)
         .and_then(|f| exif_first_f64(&f.value))?;
-    let y_res = exif.get_field(Tag::FocalPlaneYResolution, exif::In::PRIMARY)
+    let y_res = exif
+        .get_field(Tag::FocalPlaneYResolution, exif::In::PRIMARY)
         .and_then(|f| exif_first_f64(&f.value))?;
 
-    let unit = exif.get_field(Tag::FocalPlaneResolutionUnit, exif::In::PRIMARY)
+    let unit = exif
+        .get_field(Tag::FocalPlaneResolutionUnit, exif::In::PRIMARY)
         .and_then(|f| exif_first_u32(&f.value))
         .unwrap_or(2); // Default to inches
 
@@ -254,7 +262,8 @@ fn focal_from_focal_plane(exif: &exif::Exif) -> Option<(f64, f64)> {
 }
 
 fn focal_from_35mm_equiv(exif: &exif::Exif, width: u32, height: u32) -> Option<f64> {
-    let f_equiv = exif.get_field(Tag::FocalLengthIn35mmFilm, exif::In::PRIMARY)
+    let f_equiv = exif
+        .get_field(Tag::FocalLengthIn35mmFilm, exif::In::PRIMARY)
         .and_then(|f| exif_first_f64(&f.value))?;
 
     if f_equiv <= 0.0 {

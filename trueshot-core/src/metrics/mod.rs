@@ -1,2 +1,2 @@
-pub mod image_metrics;
 pub mod geometry_metrics;
+pub mod image_metrics;

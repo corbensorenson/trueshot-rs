@@ -1,10 +1,10 @@
-use actix_web::{post, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::audit::AuditEvent;
-use crate::auth::require_admin;
+use crate::auth::{require_admin, AuthContext};
 use crate::licensing::require_license_feature;
 use trueshot_core::licensing::Feature;
 use crate::state::AppState;
@@ -127,8 +127,10 @@ pub async fn complete_xr_session(
 }
 
 fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
-    let (actor, role) = req.extensions().get::<crate::auth::AuthClaims>()
-        .map(|claims| (claims.subject.clone(), format!("{:?}", claims.role)))
+    let (actor, role) = req
+        .extensions()
+        .get::<AuthContext>()
+        .map(|context| (context.sub.clone(), format!("{:?}", context.role)))
         .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
     let ip = req.peer_addr().map(|p| p.ip().to_string());
     (actor, role, ip)

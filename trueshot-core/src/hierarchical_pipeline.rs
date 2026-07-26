@@ -2,21 +2,19 @@
 //!
 //! Integrates grading and cascaded collapse for both speed and quality
 
+use anyhow::{Context, Result};
 use ndarray::{Array2, Array3};
-use anyhow::{Result, Context};
 use std::time::Instant;
 
-use crate::hierarchical_grading::{
-    compute_sharpness_map, grade_pixels, GradingParams, compute_grade_stats,
-};
 use crate::hierarchical_collapse::{
-    collapse_c_grade, collapse_b_grade, collapse_a_grade,
-    merge_graded_results,
-    HierarchicalParams, CollapseResult,
+    collapse_a_grade, collapse_b_grade, collapse_c_grade, merge_graded_results, CollapseResult,
+    HierarchicalParams,
 };
-use crate::types::AlignmentInfo;
+use crate::hierarchical_grading::{
+    compute_grade_stats, compute_sharpness_map, grade_pixels, GradingParams,
+};
 use crate::joint_demosaic::demosaic_bayer_frame;
-
+use crate::types::AlignmentInfo;
 
 /// Process a stack of images using hierarchical grading and collapse
 ///
@@ -61,7 +59,10 @@ pub fn hierarchical_process(
     let (height, width, channels) = frames[0].dim();
 
     if channels != 1 {
-        anyhow::bail!("Expected single-channel Bayer frames, got {} channels", channels);
+        anyhow::bail!(
+            "Expected single-channel Bayer frames, got {} channels",
+            channels
+        );
     }
 
     tracing::info!(
@@ -73,25 +74,34 @@ pub fn hierarchical_process(
     let sharpness_start = Instant::now();
 
     // Compute sharpness for one reference exposure per focus plane
-    let ref_exposure_idx = num_exposures / 2;  // Middle exposure (0 EV)
+    let ref_exposure_idx = num_exposures / 2; // Middle exposure (0 EV)
     let mut sharpness_maps: Vec<Array2<f64>> = Vec::with_capacity(num_focus_planes);
 
     for plane_idx in 0..num_focus_planes {
         let frame_idx = plane_idx * num_exposures + ref_exposure_idx;
         if frame_idx >= num_images {
-            tracing::warn!("Focus plane {} reference frame {} out of bounds", plane_idx, frame_idx);
+            tracing::warn!(
+                "Focus plane {} reference frame {} out of bounds",
+                plane_idx,
+                frame_idx
+            );
             continue;
         }
 
         // Extract frame (it's (H, W, 1), we need (H, W))
         let frame = frames[frame_idx].slice(ndarray::s![.., .., 0]).to_owned();
-        let sharpness = compute_sharpness_map(&frame, grading_params)
-            .context(format!("Failed to compute sharpness map for focus plane {}", plane_idx))?;
+        let sharpness = compute_sharpness_map(&frame, grading_params).context(format!(
+            "Failed to compute sharpness map for focus plane {}",
+            plane_idx
+        ))?;
         sharpness_maps.push(sharpness);
     }
 
-    tracing::info!("Sharpness analysis: {:.1}ms ({} focus planes)",
-        sharpness_start.elapsed().as_secs_f64() * 1000.0, sharpness_maps.len());
+    tracing::info!(
+        "Sharpness analysis: {:.1}ms ({} focus planes)",
+        sharpness_start.elapsed().as_secs_f64() * 1000.0,
+        sharpness_maps.len()
+    );
 
     // Step 1b: Find maximum sharpness across all focus planes for each pixel
     let mut max_sharpness = Array2::<f64>::zeros((height, width));
@@ -122,10 +132,16 @@ pub fn hierarchical_process(
     let grades = grade_pixels(&max_sharpness, foreground_mask, grading_params)
         .context("Failed to grade pixels")?;
     let stats = compute_grade_stats(&grades);
-    tracing::info!("Pixel grading: {:.1}ms", grading_start.elapsed().as_secs_f64() * 1000.0);
+    tracing::info!(
+        "Pixel grading: {:.1}ms",
+        grading_start.elapsed().as_secs_f64() * 1000.0
+    );
     tracing::info!(
         "Grade distribution: A={:.1}%, B={:.1}%, C={:.1}%, D={:.1}%",
-        stats.percent_a, stats.percent_b, stats.percent_c, stats.percent_d
+        stats.percent_a,
+        stats.percent_b,
+        stats.percent_c,
+        stats.percent_d
     );
 
     // Step 3: Cascaded collapse (multi-pass A/B/C grading)
@@ -138,13 +154,17 @@ pub fn hierarchical_process(
         &grades,
         exposures,
         collapse_params,
-        Some(&best_plane),  // Pass best focus plane map
-        num_exposures,      // Pass number of exposures per plane
-        wb_multipliers,     // Pass white balance multipliers
-        alignments,         // Pass scale information for focus breathing compensation
-    ).context("Failed to collapse C-grade")?;
-    tracing::info!("C-grade collapse: {:.1}ms ({} pixels)",
-        c_start.elapsed().as_secs_f64() * 1000.0, stats.count_c);
+        Some(&best_plane), // Pass best focus plane map
+        num_exposures,     // Pass number of exposures per plane
+        wb_multipliers,    // Pass white balance multipliers
+        alignments,        // Pass scale information for focus breathing compensation
+    )
+    .context("Failed to collapse C-grade")?;
+    tracing::info!(
+        "C-grade collapse: {:.1}ms ({} pixels)",
+        c_start.elapsed().as_secs_f64() * 1000.0,
+        stats.count_c
+    );
 
     // B-grade: Guided by C (with per-pixel focus plane selection and soft blending)
     let b_start = Instant::now();
@@ -154,13 +174,17 @@ pub fn hierarchical_process(
         &c_result,
         exposures,
         collapse_params,
-        Some(&best_plane),  // Pass best focus plane map
-        num_exposures,      // Pass number of exposures per plane
-        wb_multipliers,     // Pass white balance multipliers
-        alignments,         // Pass scale information for focus breathing compensation
-    ).context("Failed to collapse B-grade")?;
-    tracing::info!("B-grade collapse: {:.1}ms ({} pixels)",
-        b_start.elapsed().as_secs_f64() * 1000.0, stats.count_b);
+        Some(&best_plane), // Pass best focus plane map
+        num_exposures,     // Pass number of exposures per plane
+        wb_multipliers,    // Pass white balance multipliers
+        alignments,        // Pass scale information for focus breathing compensation
+    )
+    .context("Failed to collapse B-grade")?;
+    tracing::info!(
+        "B-grade collapse: {:.1}ms ({} pixels)",
+        b_start.elapsed().as_secs_f64() * 1000.0,
+        stats.count_b
+    );
 
     // A-grade: Full quality, guided by B/C (with optional SR and per-pixel focus plane selection)
     let a_start = Instant::now();
@@ -172,18 +196,25 @@ pub fn hierarchical_process(
         exposures,
         collapse_params,
         alignments,
-        Some(&best_plane),  // Pass best focus plane map
-        num_exposures,      // Pass number of exposures per plane
-        wb_multipliers,     // Pass white balance multipliers
-    ).context("Failed to collapse A-grade")?;
-    tracing::info!("A-grade collapse: {:.1}ms ({} pixels)",
-        a_start.elapsed().as_secs_f64() * 1000.0, stats.count_a);
+        Some(&best_plane), // Pass best focus plane map
+        num_exposures,     // Pass number of exposures per plane
+        wb_multipliers,    // Pass white balance multipliers
+    )
+    .context("Failed to collapse A-grade")?;
+    tracing::info!(
+        "A-grade collapse: {:.1}ms ({} pixels)",
+        a_start.elapsed().as_secs_f64() * 1000.0,
+        stats.count_a
+    );
 
     // Step 4: Merge results
     let merge_start = Instant::now();
     let merged = merge_graded_results(&a_result, &b_result, &c_result, &grades)
         .context("Failed to merge graded results")?;
-    tracing::info!("Merge: {:.1}ms", merge_start.elapsed().as_secs_f64() * 1000.0);
+    tracing::info!(
+        "Merge: {:.1}ms",
+        merge_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Step 5: Demosaic the final Bayer result
     let demosaic_start = Instant::now();
@@ -191,14 +222,17 @@ pub fn hierarchical_process(
         CollapseResult::Bayer(bayer) => {
             tracing::info!("Demosaicing final Bayer result");
             let rgb = demosaic_bayer_frame(&bayer.insert_axis(ndarray::Axis(2)), wb_multipliers)?;
-            CollapseResult::Rgb(rgb.permuted_axes([2, 0, 1]))  // Convert (H, W, 3) to (3, H, W)
+            CollapseResult::Rgb(rgb.permuted_axes([2, 0, 1])) // Convert (H, W, 3) to (3, H, W)
         }
         CollapseResult::Rgb(rgb) => {
             // Already RGB (from SR path)
             CollapseResult::Rgb(rgb)
         }
     };
-    tracing::info!("Demosaic: {:.1}ms", demosaic_start.elapsed().as_secs_f64() * 1000.0);
+    tracing::info!(
+        "Demosaic: {:.1}ms",
+        demosaic_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     tracing::info!(
         "Hierarchical processing complete: {:.1}ms total",
@@ -233,12 +267,12 @@ pub fn benchmark_hierarchical(
         foreground_mask,
         reference_idx,
         exposures,
-        None,  // No alignments for benchmark
+        None, // No alignments for benchmark
         &grading_params,
         &collapse_params,
         num_focus_planes,
         num_exposures,
-        &wb_multipliers,  // Neutral WB for benchmark
+        &wb_multipliers, // Neutral WB for benchmark
     )?;
     let hier_time = hier_start.elapsed();
 
@@ -246,7 +280,9 @@ pub fn benchmark_hierarchical(
     let hier_result = match hier_collapse_result {
         CollapseResult::Bayer(bayer) => bayer,
         CollapseResult::Rgb(_) => {
-            anyhow::bail!("Unexpected RGB result in benchmark (should be Bayer at native resolution)");
+            anyhow::bail!(
+                "Unexpected RGB result in benchmark (should be Bayer at native resolution)"
+            );
         }
     };
 
@@ -263,7 +299,9 @@ pub fn benchmark_hierarchical(
 
     tracing::info!(
         "Benchmark: Hierarchical={:.1}ms, Standard={:.1}ms, Speedup={:.2}x",
-        results.hierarchical_ms, results.standard_ms, results.speedup
+        results.hierarchical_ms,
+        results.standard_ms,
+        results.speedup
     );
 
     Ok((hier_result, std_result, results))
@@ -365,15 +403,16 @@ mod tests {
         let result = hierarchical_process(
             &frames,
             &mask,
-            2,  // middle image as reference
+            2, // middle image as reference
             &exposures,
-            None,  // No alignments (native resolution)
+            None, // No alignments (native resolution)
             &grading_params,
             &collapse_params,
-            1,  // num_focus_planes
-            5,  // num_exposures
+            1, // num_focus_planes
+            5, // num_exposures
             &[1.0, 1.0, 1.0, 1.0],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Result is CollapseResult, extract Bayer data
         match result {
@@ -383,7 +422,13 @@ mod tests {
                 for y in 0..100 {
                     for x in 0..100 {
                         let val = bayer[[y, x]];
-                        assert!(val >= 0.0 && val <= 1.0, "Value {} out of range at ({}, {})", val, y, x);
+                        assert!(
+                            val >= 0.0 && val <= 1.0,
+                            "Value {} out of range at ({}, {})",
+                            val,
+                            y,
+                            x
+                        );
                     }
                 }
             }
@@ -414,13 +459,15 @@ mod tests {
         let exposures = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
         // Create synthetic alignments (small subpixel shifts)
-        let alignments: Vec<AlignmentInfo> = (0..5).map(|i| {
-            AlignmentInfo {
-                dx: (i as f64 - 2.0) * 0.1,  // -0.2, -0.1, 0.0, 0.1, 0.2
-                dy: (i as f64 - 2.0) * 0.15,
-                scale: 1.0,
-            }
-        }).collect();
+        let alignments: Vec<AlignmentInfo> = (0..5)
+            .map(|i| {
+                AlignmentInfo {
+                    dx: (i as f64 - 2.0) * 0.1, // -0.2, -0.1, 0.0, 0.1, 0.2
+                    dy: (i as f64 - 2.0) * 0.15,
+                    scale: 1.0,
+                }
+            })
+            .collect();
 
         let grading_params = GradingParams::default();
         let mut collapse_params = HierarchicalParams::default();
@@ -435,17 +482,18 @@ mod tests {
             Some(&alignments),
             &grading_params,
             &collapse_params,
-            1,  // num_focus_planes
-            5,  // num_exposures
+            1, // num_focus_planes
+            5, // num_exposures
             &[1.0, 1.0, 1.0, 1.0],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Result should be RGB (SR path)
         match result {
             CollapseResult::Rgb(rgb) => {
                 let (channels, h, w) = rgb.dim();
                 assert_eq!(channels, 3);
-                assert_eq!(h, 100);  // 2x upsampled
+                assert_eq!(h, 100); // 2x upsampled
                 assert_eq!(w, 100);
             }
             CollapseResult::Bayer(_) => panic!("Expected RGB result for SR, got Bayer"),
@@ -471,12 +519,8 @@ mod tests {
         let mask = Array2::<bool>::from_elem((50, 50), true);
         let exposures = vec![1.0, 2.0, 3.0];
 
-        let (hier_result, std_result, bench) = benchmark_hierarchical(
-            &frames,
-            &mask,
-            1,
-            &exposures,
-        ).unwrap();
+        let (hier_result, std_result, bench) =
+            benchmark_hierarchical(&frames, &mask, 1, &exposures).unwrap();
 
         assert_eq!(hier_result.dim(), (50, 50));
         assert_eq!(std_result.dim(), (50, 50));
@@ -485,8 +529,10 @@ mod tests {
         assert!(bench.hierarchical_ms > 0.0);
         assert!(bench.standard_ms > 0.0);
 
-        println!("Benchmark: Hierarchical={:.1}ms, Standard={:.1}ms, Speedup={:.2}x",
-            bench.hierarchical_ms, bench.standard_ms, bench.speedup);
+        println!(
+            "Benchmark: Hierarchical={:.1}ms, Standard={:.1}ms, Speedup={:.2}x",
+            bench.hierarchical_ms, bench.standard_ms, bench.speedup
+        );
     }
 
     #[test]

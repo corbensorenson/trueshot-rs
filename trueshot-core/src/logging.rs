@@ -3,13 +3,13 @@
 //! This module provides comprehensive logging that writes immediately to files
 //! so that logs are preserved even if the process crashes.
 
+use crate::events::{EventBus, LogLevel, SystemEvent};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::sync::{Once, Arc, OnceLock};
+use std::sync::{Arc, Once, OnceLock};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*};
-use tracing_subscriber::{Layer, layer::Context as LayerContext, registry::LookupSpan};
-use crate::events::{EventBus, SystemEvent, LogLevel};
+use tracing_subscriber::{layer::Context as LayerContext, registry::LookupSpan, Layer};
 
 // Global guard to keep file writer alive - using OnceLock for safety
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
@@ -36,7 +36,7 @@ where
             tracing::Level::INFO => LogLevel::Info,
             _ => return, // Skip debug/trace for bus
         };
-        
+
         // Avoid infinite loop if EventBus logs itself
         if event.metadata().target().contains("events") {
             return;
@@ -54,7 +54,7 @@ pub fn init_default_logging() -> Result<PathBuf> {
     let log_dir = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("logs");
-    
+
     init_logging(&log_dir)
 }
 
@@ -85,9 +85,7 @@ pub fn init_logging<P: AsRef<Path>>(log_dir: P) -> Result<PathBuf> {
         .with_file(true)
         .with_line_number(true);
 
-    let stderr_layer = fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(false);
+    let stderr_layer = fmt::layer().with_writer(std::io::stderr).with_target(false);
 
     // Initialize tracing
     // We use try_init() to handle cases where it might be called multiple times in tests
@@ -96,15 +94,17 @@ pub fn init_logging<P: AsRef<Path>>(log_dir: P) -> Result<PathBuf> {
         .with(file_layer)
         .with(stderr_layer)
         .try_init()
-        .is_ok() 
+        .is_ok()
     {
         // Redirect log crate events to tracing
         let _ = tracing_log::LogTracer::init();
-        
+
         tracing::info!("=== TRUESHOT LOGGING INITIALIZED ===");
         tracing::info!("Log file: {}", log_path.display());
     } else {
-        eprintln!("Tracing subscriber already initialized, new log file might not capture everything.");
+        eprintln!(
+            "Tracing subscriber already initialized, new log file might not capture everything."
+        );
     }
 
     Ok(log_path)
@@ -113,30 +113,31 @@ pub fn init_logging<P: AsRef<Path>>(log_dir: P) -> Result<PathBuf> {
 /// Read the latest log file content
 pub fn read_latest_log<P: AsRef<Path>>(log_dir: P) -> Result<String> {
     let log_dir = log_dir.as_ref();
-    
+
     // Find the most recent log file
     let mut log_files: Vec<_> = std::fs::read_dir(log_dir)?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
-            if path.extension()? == "log" && 
-               path.file_name()?.to_str()?.starts_with("trueshot_") {
+            if path.extension()? == "log" && path.file_name()?.to_str()?.starts_with("trueshot_") {
                 Some(path)
             } else {
                 None
             }
         })
         .collect();
-    
+
     log_files.sort_by(|a, b| {
         std::fs::metadata(b)
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-            .cmp(&std::fs::metadata(a)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH))
+            .cmp(
+                &std::fs::metadata(a)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
     });
-    
+
     if let Some(latest_log) = log_files.first() {
         std::fs::read_to_string(latest_log)
             .with_context(|| format!("Failed to read log file: {}", latest_log.display()))

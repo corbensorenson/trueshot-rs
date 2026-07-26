@@ -4,6 +4,8 @@
 
 TrueShot is a full-stack 3D capture system that pairs a Rust reconstruction core with a production server, a real-time dashboard, and a power-user CLI.
 
+TrueShot is **local-first**: capture, reconstruction, rendering, and export run on the user's hardware. Vendor infrastructure is limited to licensing, downloads, and update metadata.
+
 ## 🎯 Key Capabilities
 
 - **Smart Scan Wizard**: Object analysis, quality scoring, and adaptive next-best-view planning
@@ -40,6 +42,7 @@ npm run dev
 - Start from `config.production.toml` and copy to `config.toml`.
 - Set `TRUESHOT_ENV=production` and configure TLS or `server.tls_proxy=true`.
 - Follow the checklist in `docs/PRODUCTION_READINESS.md`.
+- Local-first policy: `docs/LOCAL_FIRST_POLICY.md`.
 
 ### CLI Examples
 

@@ -14,27 +14,27 @@
 //!
 //! See the whitepaper for full architecture details.
 
-pub mod scene_graph;
-pub mod motion_score;
-pub mod segmentation;
-pub mod unified_renderer;
-pub mod transitions;
-pub mod meshification;
-pub mod gpu_meshification;
 pub mod avatar;
 pub mod facial_landmarks;
-pub mod streaming;
+pub mod gpu_meshification;
+pub mod meshification;
+pub mod motion_score;
 pub mod pipeline;
+pub mod scene_graph;
+pub mod segmentation;
+pub mod streaming;
+pub mod transitions;
+pub mod unified_renderer;
 
 // Re-exports
-pub use scene_graph::{HybridScene, HybridSceneNode, ObjectRepresentation, MeshData, Vertex};
-pub use motion_score::{MotionScorer, MotionClassification};
-pub use segmentation::{ObjectSegmenter, SegmentedObject, TrackedObject, BoundingBox3D};
-pub use unified_renderer::{UnifiedRenderer, UnifiedCamera, UnifiedFrame};
-pub use transitions::TransitionManager;
-pub use meshification::{MeshificationPipeline, MeshificationConfig, MeshificationResult};
+pub use avatar::{Avatar, AvatarTracker, BlendshapePreset, BoneName, BoundAvatar, Skeleton};
+pub use facial_landmarks::{ARKitBlendshape, FaceDetection, FacialLandmarkDetector};
 pub use gpu_meshification::GpuMeshifier;
-pub use avatar::{Avatar, AvatarTracker, BoundAvatar, Skeleton, BoneName, BlendshapePreset};
-pub use facial_landmarks::{FacialLandmarkDetector, FaceDetection, ARKitBlendshape};
-pub use streaming::{StreamEncoder, StreamDecoder, StreamPacket};
-pub use pipeline::{LiveHybridPipeline, LiveHybridConfig, PipelineStats};
+pub use meshification::{MeshificationConfig, MeshificationPipeline, MeshificationResult};
+pub use motion_score::{MotionClassification, MotionScorer};
+pub use pipeline::{LiveHybridConfig, LiveHybridPipeline, PipelineStats};
+pub use scene_graph::{HybridScene, HybridSceneNode, MeshData, ObjectRepresentation, Vertex};
+pub use segmentation::{BoundingBox3D, ObjectSegmenter, SegmentedObject, TrackedObject};
+pub use streaming::{StreamDecoder, StreamEncoder, StreamPacket};
+pub use transitions::TransitionManager;
+pub use unified_renderer::{UnifiedCamera, UnifiedFrame, UnifiedRenderer};

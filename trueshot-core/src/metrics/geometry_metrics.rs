@@ -9,6 +9,7 @@ use std::path::Path;
 const DEFAULT_SAMPLE_LIMIT: usize = 5000;
 const DEFAULT_FSCORE_THRESHOLD: f64 = 0.01;
 const DEFAULT_NORMAL_NEIGHBORS: usize = 16;
+type PointKdTree = KdTree<f64, usize, [f64; 3]>;
 
 #[derive(Debug, Clone)]
 pub struct PointCloud {
@@ -61,10 +62,7 @@ pub fn load_point_cloud_with_normals(path: &Path) -> Result<PointCloud> {
     }
 }
 
-pub fn chamfer_distance(
-    points_a: &[na::Point3<f64>],
-    points_b: &[na::Point3<f64>],
-) -> Option<f64> {
+pub fn chamfer_distance(points_a: &[na::Point3<f64>], points_b: &[na::Point3<f64>]) -> Option<f64> {
     if points_a.is_empty() || points_b.is_empty() {
         return None;
     }
@@ -96,12 +94,18 @@ pub fn compute_geometry_metrics(
     let pred_sample = sample_cloud(pred, options.sample_limit);
     let gt_sample = sample_cloud(gt, options.sample_limit);
 
-    let (mean_pred, max_pred, within_pred) =
-        mean_min_distance_kdtree(&pred_sample.points, &gt_sample.points, options.fscore_threshold)
-            .unwrap_or((0.0, 0.0, 0));
-    let (mean_gt, max_gt, within_gt) =
-        mean_min_distance_kdtree(&gt_sample.points, &pred_sample.points, options.fscore_threshold)
-            .unwrap_or((0.0, 0.0, 0));
+    let (mean_pred, max_pred, within_pred) = mean_min_distance_kdtree(
+        &pred_sample.points,
+        &gt_sample.points,
+        options.fscore_threshold,
+    )
+    .unwrap_or((0.0, 0.0, 0));
+    let (mean_gt, max_gt, within_gt) = mean_min_distance_kdtree(
+        &gt_sample.points,
+        &pred_sample.points,
+        options.fscore_threshold,
+    )
+    .unwrap_or((0.0, 0.0, 0));
 
     let chamfer = Some((mean_pred + mean_gt) * 0.5);
     let hausdorff = Some(max_pred.max(max_gt));
@@ -121,11 +125,8 @@ pub fn compute_geometry_metrics(
         _ => None,
     };
 
-    let normal_consistency = compute_normal_consistency(
-        &pred_sample,
-        &gt_sample,
-        options.normal_k.max(3),
-    );
+    let normal_consistency =
+        compute_normal_consistency(&pred_sample, &gt_sample, options.normal_k.max(3));
 
     GeometryMetrics {
         chamfer,
@@ -176,15 +177,16 @@ fn sample_cloud(cloud: &PointCloud, max_points: usize) -> PointCloud {
     }
     let step = (cloud.points.len() as f64 / max_points as f64).ceil() as usize;
     let points: Vec<na::Point3<f64>> = cloud.points.iter().step_by(step).cloned().collect();
-    let normals = cloud.normals.as_ref().map(|normals| {
-        normals.iter().step_by(step).cloned().collect::<Vec<_>>()
-    });
+    let normals = cloud
+        .normals
+        .as_ref()
+        .map(|normals| normals.iter().step_by(step).cloned().collect::<Vec<_>>());
     PointCloud { points, normals }
 }
 
 fn load_ply_ascii_cloud(path: &Path) -> Result<PointCloud> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open PLY: {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open PLY: {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut header = String::new();
     let mut vertex_count = 0usize;
@@ -253,16 +255,34 @@ fn load_ply_ascii_cloud(path: &Path) -> Result<PointCloud> {
         if parts.len() < 3 {
             continue;
         }
-        let x = parts.get(x_idx).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        let y = parts.get(y_idx).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        let z = parts.get(z_idx).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let x = parts
+            .get(x_idx)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let y = parts
+            .get(y_idx)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let z = parts
+            .get(z_idx)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
         points.push(na::Point3::new(x, y, z));
         if let (Some(nx), Some(ny), Some(nz), Some(normals_vec)) =
             (nx_idx, ny_idx, nz_idx, normals.as_mut())
         {
-            let nx = parts.get(nx).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-            let ny = parts.get(ny).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-            let nz = parts.get(nz).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            let nx = parts
+                .get(nx)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let ny = parts
+                .get(ny)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let nz = parts
+                .get(nz)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0);
             let mut normal = na::Vector3::new(nx, ny, nz);
             if normal.norm() > 0.0 {
                 normal = normal.normalize();
@@ -275,8 +295,8 @@ fn load_ply_ascii_cloud(path: &Path) -> Result<PointCloud> {
 }
 
 fn load_obj_cloud(path: &Path) -> Result<PointCloud> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open OBJ: {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open OBJ: {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut points = Vec::new();
 
@@ -294,10 +314,13 @@ fn load_obj_cloud(path: &Path) -> Result<PointCloud> {
         }
     }
 
-    Ok(PointCloud { points, normals: None })
+    Ok(PointCloud {
+        points,
+        normals: None,
+    })
 }
 
-fn build_kdtree(points: &[na::Point3<f64>]) -> KdTree<f64, usize, 3> {
+fn build_kdtree(points: &[na::Point3<f64>]) -> PointKdTree {
     let mut tree = KdTree::new(3);
     for (idx, p) in points.iter().enumerate() {
         let _ = tree.add([p.x, p.y, p.z], idx);
@@ -305,25 +328,19 @@ fn build_kdtree(points: &[na::Point3<f64>]) -> KdTree<f64, usize, 3> {
     tree
 }
 
-fn nearest_distance(tree: &KdTree<f64, usize, 3>, point: &na::Point3<f64>) -> Option<f64> {
+fn nearest_distance(tree: &PointKdTree, point: &na::Point3<f64>) -> Option<f64> {
     let query = [point.x, point.y, point.z];
     let nearest = tree.nearest(&query, 1, &squared_euclidean).ok()?;
-    nearest
-        .first()
-        .map(|(dist, _)| dist.sqrt())
+    nearest.first().map(|(dist, _)| dist.sqrt())
 }
 
-fn nearest_index(tree: &KdTree<f64, usize, 3>, point: &na::Point3<f64>) -> Option<usize> {
+fn nearest_index(tree: &PointKdTree, point: &na::Point3<f64>) -> Option<usize> {
     let query = [point.x, point.y, point.z];
     let nearest = tree.nearest(&query, 1, &squared_euclidean).ok()?;
     nearest.first().map(|(_, idx)| **idx)
 }
 
-fn compute_normal_consistency(
-    pred: &PointCloud,
-    gt: &PointCloud,
-    normal_k: usize,
-) -> Option<f64> {
+fn compute_normal_consistency(pred: &PointCloud, gt: &PointCloud, normal_k: usize) -> Option<f64> {
     if pred.points.is_empty() || gt.points.is_empty() {
         return None;
     }

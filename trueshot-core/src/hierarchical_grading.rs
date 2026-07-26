@@ -8,17 +8,17 @@
 //!
 //! This amortizes computation: 70% pixel savings, 3-5x speedup vs flat processing
 
-use ndarray::{Array2, Array3};
 use anyhow::Result;
+use ndarray::{Array2, Array3};
 
 /// Pixel quality grades
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Grade {
-    A = 0,  // High quality - full processing
-    B = 1,  // Medium quality - guided processing
-    C = 2,  // Low quality - baseline processing
-    D = 3,  // Background/outlier - excluded
+    A = 0, // High quality - full processing
+    B = 1, // Medium quality - guided processing
+    C = 2, // Low quality - baseline processing
+    D = 3, // Background/outlier - excluded
 }
 
 /// Grading parameters
@@ -28,13 +28,13 @@ pub struct GradingParams {
     /// Higher k = more conservative (fewer A-grade pixels)
     /// Typical: 2.0-3.0, ISO-scaled for noise robustness
     pub k_threshold: f64,
-    
+
     /// Percentile thresholds for A/B/C boundaries
     /// [p_A, p_B, p_C] where p_A is top percentile for A-grade
     /// Default: [60, 35, 15] means top 40% → A, next 25% → B, bottom 35% → C
     /// (C-grade gets all remaining foreground pixels below p_B)
     pub percentile_thresholds: [f64; 3],
-    
+
     /// Multi-scale analysis (pyramid levels for robustness)
     pub pyramid_levels: usize,
 }
@@ -43,7 +43,7 @@ impl Default for GradingParams {
     fn default() -> Self {
         Self {
             k_threshold: 2.5,
-            percentile_thresholds: [60.0, 35.0, 15.0],  // More A/B, less C
+            percentile_thresholds: [60.0, 35.0, 15.0], // More A/B, less C
             pyramid_levels: 2,
         }
     }
@@ -59,7 +59,7 @@ impl Default for GradingParams {
 /// **NEW APPROACH**: Takes demosaiced RGB input instead of raw Bayer
 /// This eliminates ALL Bayer-related artifacts in sharpness computation
 pub fn compute_sharpness_map_from_rgb(
-    rgb: &Array3<f64>,  // H×W×3 RGB image
+    rgb: &Array3<f64>, // H×W×3 RGB image
     params: &GradingParams,
 ) -> Result<Array2<f64>> {
     let (height, width, _) = rgb.dim();
@@ -94,10 +94,7 @@ pub fn compute_sharpness_map_from_rgb(
 ///
 /// **DEPRECATED**: This approach has issues with horizontal banding
 /// Use `compute_sharpness_map_from_rgb` instead for better quality
-pub fn compute_sharpness_map(
-    image: &Array2<f64>,
-    params: &GradingParams,
-) -> Result<Array2<f64>> {
+pub fn compute_sharpness_map(image: &Array2<f64>, params: &GradingParams) -> Result<Array2<f64>> {
     let (height, width) = image.dim();
 
     // Extract green channel from Bayer pattern (RGGB)
@@ -241,21 +238,21 @@ fn extract_green_channel_from_bayer(bayer: &Array2<f64>) -> Result<Array2<f64>> 
 /// Compute gradient magnitude (faster than Laplacian variance)
 fn compute_laplacian_variance(
     image: &Array2<f64>,
-    _window_size: usize,  // Unused, kept for API compatibility
+    _window_size: usize, // Unused, kept for API compatibility
 ) -> Result<Array2<f64>> {
     let (height, width) = image.dim();
     let mut gradient = Array2::<f64>::zeros((height, width));
 
     // Compute gradient magnitude using Sobel operators (much faster)
-    for y in 1..height-1 {
-        for x in 1..width-1 {
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
             // Horizontal gradient (Sobel Gx)
-            let gx = (image[[y-1, x+1]] + 2.0 * image[[y, x+1]] + image[[y+1, x+1]])
-                   - (image[[y-1, x-1]] + 2.0 * image[[y, x-1]] + image[[y+1, x-1]]);
+            let gx = (image[[y - 1, x + 1]] + 2.0 * image[[y, x + 1]] + image[[y + 1, x + 1]])
+                - (image[[y - 1, x - 1]] + 2.0 * image[[y, x - 1]] + image[[y + 1, x - 1]]);
 
             // Vertical gradient (Sobel Gy)
-            let gy = (image[[y+1, x-1]] + 2.0 * image[[y+1, x]] + image[[y+1, x+1]])
-                   - (image[[y-1, x-1]] + 2.0 * image[[y-1, x]] + image[[y-1, x+1]]);
+            let gy = (image[[y + 1, x - 1]] + 2.0 * image[[y + 1, x]] + image[[y + 1, x + 1]])
+                - (image[[y - 1, x - 1]] + 2.0 * image[[y - 1, x]] + image[[y - 1, x + 1]]);
 
             // Gradient magnitude (squared to avoid sqrt, still monotonic)
             gradient[[y, x]] = gx * gx + gy * gy;
@@ -266,7 +263,7 @@ fn compute_laplacian_variance(
 }
 
 /// Grade pixels based on sharpness map
-/// 
+///
 /// Uses adaptive thresholding: θ = μ + k*σ
 /// Then applies percentile-based binning for A/B/C/D grades
 pub fn grade_pixels(
@@ -276,7 +273,7 @@ pub fn grade_pixels(
 ) -> Result<Array2<u8>> {
     let (height, width) = sharpness.dim();
     let mut grades = Array2::<u8>::from_elem((height, width), Grade::D as u8);
-    
+
     // Collect foreground sharpness values for statistics
     let mut fg_sharpness: Vec<f64> = Vec::new();
     for y in 0..height {
@@ -286,11 +283,11 @@ pub fn grade_pixels(
             }
         }
     }
-    
+
     if fg_sharpness.is_empty() {
         return Ok(grades);
     }
-    
+
     // Sort for percentile calculation
     fg_sharpness.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -303,7 +300,10 @@ pub fn grade_pixels(
     let median_sharp = fg_sharpness[n / 2];
     tracing::info!(
         "Sharpness stats: min={:.6}, median={:.6}, max={:.6}, n={}",
-        min_sharp, median_sharp, max_sharp, n
+        min_sharp,
+        median_sharp,
+        max_sharp,
+        n
     );
     let idx_a = ((n - 1) as f64 * params.percentile_thresholds[0] / 100.0) as usize;
     let idx_b = ((n - 1) as f64 * params.percentile_thresholds[1] / 100.0) as usize;
@@ -315,9 +315,14 @@ pub fn grade_pixels(
 
     tracing::info!(
         "Grading thresholds: A>{:.6e} (idx={}), B>{:.6e} (idx={}), C>{:.6e} (idx={})",
-        threshold_a, idx_a, threshold_b, idx_b, threshold_c, idx_c
+        threshold_a,
+        idx_a,
+        threshold_b,
+        idx_b,
+        threshold_c,
+        idx_c
     );
-    
+
     // Assign grades
     for y in 0..height {
         for x in 0..width {
@@ -339,7 +344,7 @@ pub fn grade_pixels(
             };
         }
     }
-    
+
     // DISABLED: Grade smoothing made artifacts worse (Attempt 75)
     // smooth_grade_boundaries(&mut grades, foreground_mask)?;
 
@@ -363,13 +368,13 @@ pub fn grade_pixels(
 
 /// Extract pixels of a specific grade from a stack of images
 pub fn extract_grade_pixels(
-    images: &Array3<f64>,  // H x W x N (stack of N images)
+    images: &Array3<f64>, // H x W x N (stack of N images)
     grades: &Array2<u8>,
     target_grade: Grade,
 ) -> Vec<(usize, usize, Vec<f64>)> {
     let (height, width, num_images) = images.dim();
     let mut pixels = Vec::new();
-    
+
     for y in 0..height {
         for x in 0..width {
             if grades[[y, x]] == target_grade as u8 {
@@ -381,7 +386,7 @@ pub fn extract_grade_pixels(
             }
         }
     }
-    
+
     pixels
 }
 
@@ -392,7 +397,7 @@ pub fn compute_grade_stats(grades: &Array2<u8>) -> GradeStats {
     let count_b = grades.iter().filter(|&&g| g == Grade::B as u8).count();
     let count_c = grades.iter().filter(|&&g| g == Grade::C as u8).count();
     let count_d = grades.iter().filter(|&&g| g == Grade::D as u8).count();
-    
+
     GradeStats {
         percent_a: 100.0 * count_a as f64 / total,
         percent_b: 100.0 * count_b as f64 / total,
@@ -409,15 +414,12 @@ pub fn compute_grade_stats(grades: &Array2<u8>) -> GradeStats {
 ///
 /// For each pixel, if it's surrounded by higher-grade neighbors, upgrade it.
 /// This creates smoother transitions between grade regions and reduces artifacts.
-fn smooth_grade_boundaries(
-    grades: &mut Array2<u8>,
-    foreground_mask: &Array2<bool>,
-) -> Result<()> {
+fn smooth_grade_boundaries(grades: &mut Array2<u8>, foreground_mask: &Array2<bool>) -> Result<()> {
     let (height, width) = grades.dim();
     let mut smoothed = grades.clone();
 
-    for y in 1..height-1 {
-        for x in 1..width-1 {
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
             if !foreground_mask[[y, x]] {
                 continue;
             }
@@ -425,7 +427,7 @@ fn smooth_grade_boundaries(
             let current_grade = grades[[y, x]];
 
             // Count neighbors of each grade in 3x3 window
-            let mut neighbor_grades = [0u32; 4];  // A, B, C, D counts
+            let mut neighbor_grades = [0u32; 4]; // A, B, C, D counts
             for dy in -1..=1 {
                 for dx in -1..=1 {
                     if dy == 0 && dx == 0 {
@@ -477,7 +479,7 @@ pub struct GradeStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_grading_basic() {
         // Create synthetic sharpness map
@@ -506,13 +508,13 @@ mod tests {
                 sharpness[[y, x]] = 0.5;
             }
         }
-        
+
         let mask = Array2::<bool>::from_elem((100, 100), true);
         let params = GradingParams::default();
-        
+
         let grades = grade_pixels(&sharpness, &mask, &params).unwrap();
         let stats = compute_grade_stats(&grades);
-        
+
         // Should have roughly equal distribution
         assert!(stats.percent_a > 20.0 && stats.percent_a < 30.0);
         assert!(stats.percent_b > 20.0 && stats.percent_b < 30.0);
@@ -520,4 +522,3 @@ mod tests {
         assert!(stats.percent_d > 20.0 && stats.percent_d < 30.0);
     }
 }
-

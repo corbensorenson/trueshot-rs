@@ -92,115 +92,136 @@ pub fn gpu_collapse_pixels(
         mapped_at_creation: false,
     });
 
-    gpu_ctx.queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&images_f32));
-    gpu_ctx.queue.write_buffer(&weights_buffer, 0, bytemuck::cast_slice(&weights_f32));
-    gpu_ctx.queue.write_buffer(&coords_buffer, 0, bytemuck::cast_slice(&coords_u32));
-    gpu_ctx.queue.write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
+    gpu_ctx
+        .queue
+        .write_buffer(&input_buffer, 0, bytemuck::cast_slice(&images_f32));
+    gpu_ctx
+        .queue
+        .write_buffer(&weights_buffer, 0, bytemuck::cast_slice(&weights_f32));
+    gpu_ctx
+        .queue
+        .write_buffer(&coords_buffer, 0, bytemuck::cast_slice(&coords_u32));
+    gpu_ctx
+        .queue
+        .write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
 
-    let shader = gpu_ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Collapse Shader"),
-        source: wgpu::ShaderSource::Wgsl(COLLAPSE_SHADER.into()),
-    });
+    let shader = gpu_ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Collapse Shader"),
+            source: wgpu::ShaderSource::Wgsl(COLLAPSE_SHADER.into()),
+        });
 
-    let bind_group_layout = gpu_ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Collapse Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+    let bind_group_layout =
+        gpu_ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Collapse Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+    let pipeline_layout = gpu_ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Collapse Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+    let pipeline = gpu_ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Collapse Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: "collapse",
+        });
+
+    let bind_group = gpu_ctx
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Collapse Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: weights_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: coords_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: output_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: params_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-        ],
-    });
+            ],
+        });
 
-    let pipeline_layout = gpu_ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Collapse Pipeline Layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    let pipeline = gpu_ctx.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Collapse Pipeline"),
-        layout: Some(&pipeline_layout),
-        module: &shader,
-        entry_point: "collapse",
-    });
-
-    let bind_group = gpu_ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Collapse Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: weights_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: coords_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: output_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = gpu_ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Collapse Encoder"),
-    });
+    let mut encoder = gpu_ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Collapse Encoder"),
+        });
 
     let workgroup_size = WORKGROUP_SIZE as u32;
     let dispatch_x = ((num_pixels as u32) + workgroup_size - 1) / workgroup_size;

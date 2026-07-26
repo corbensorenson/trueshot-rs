@@ -1,5 +1,5 @@
 //! Native Structure from Motion Pipeline
-//! 
+//!
 //! TrueShot's own SfM implementation for commercial use.
 
 use anyhow::Result;
@@ -32,16 +32,19 @@ impl CameraIntrinsics {
         let fy = fx;
         let cx = width as f64 / 2.0;
         let cy = height as f64 / 2.0;
-        
-        Self { fx, fy, cx, cy, width, height }
+
+        Self {
+            fx,
+            fy,
+            cx,
+            cy,
+            width,
+            height,
+        }
     }
 
     pub fn to_matrix(&self) -> na::Matrix3<f64> {
-        na::Matrix3::new(
-            self.fx, 0.0, self.cx,
-            0.0, self.fy, self.cy,
-            0.0, 0.0, 1.0,
-        )
+        na::Matrix3::new(self.fx, 0.0, self.cx, 0.0, self.fy, self.cy, 0.0, 0.0, 1.0)
     }
 }
 
@@ -97,12 +100,13 @@ impl NativeSfmPipeline {
         tracing::info!("🔍 Starting native SfM with {} images", self.images.len());
 
         // Initialize with first image
-        self.poses.push(CameraPose::identity(self.images[0].clone()));
+        self.poses
+            .push(CameraPose::identity(self.images[0].clone()));
 
         // Process remaining images incrementally
         for i in 1..self.images.len() {
             tracing::info!("Processing image {}/{}", i + 1, self.images.len());
-            
+
             // Load images
             let img_prev = image::open(&self.images[i - 1])?;
             let img_curr = image::open(&self.images[i])?;
@@ -116,7 +120,11 @@ impl NativeSfmPipeline {
             let features_prev = extractor.detect(&gray_prev);
             let features_curr = extractor.detect(&gray_curr);
 
-            tracing::debug!("Found {} and {} features", features_prev.len(), features_curr.len());
+            tracing::debug!(
+                "Found {} and {} features",
+                features_prev.len(),
+                features_curr.len()
+            );
 
             // Match features
             let matcher = trueshot_vision::matching::NativeMatcher::default();
@@ -130,14 +138,16 @@ impl NativeSfmPipeline {
             }
 
             // Convert matches to point pairs
-            let pts1: Vec<(f64, f64)> = matches.iter()
+            let pts1: Vec<(f64, f64)> = matches
+                .iter()
                 .map(|m| {
                     let kp = &features_prev[m.idx1].keypoint;
                     (kp.x as f64, kp.y as f64)
                 })
                 .collect();
 
-            let pts2: Vec<(f64, f64)> = matches.iter()
+            let pts2: Vec<(f64, f64)> = matches
+                .iter()
                 .map(|m| {
                     let kp = &features_curr[m.idx2].keypoint;
                     (kp.x as f64, kp.y as f64)
@@ -146,14 +156,14 @@ impl NativeSfmPipeline {
 
             // Estimate pose using native geometry
             let k = self.intrinsics.to_matrix();
-            
+
             if let Some(f) = trueshot_vision::geometry::estimate_fundamental_8point(&pts1, &pts2) {
                 let e = trueshot_vision::geometry::fundamental_to_essential(&f, &k);
                 let solutions = trueshot_vision::geometry::decompose_essential(&e);
 
-                if let Some((r, t)) = trueshot_vision::geometry::select_correct_pose(
-                    &solutions, &pts1, &pts2, &k
-                ) {
+                if let Some((r, t)) =
+                    trueshot_vision::geometry::select_correct_pose(&solutions, &pts1, &pts2, &k)
+                {
                     self.poses.push(CameraPose {
                         rotation: r,
                         translation: t,
@@ -166,8 +176,11 @@ impl NativeSfmPipeline {
             }
         }
 
-        tracing::info!("✅ Native SfM complete: {} cameras, {} points",
-            self.poses.len(), self.points_3d.len());
+        tracing::info!(
+            "✅ Native SfM complete: {} cameras, {} points",
+            self.poses.len(),
+            self.points_3d.len()
+        );
 
         Ok(())
     }
@@ -186,16 +199,20 @@ impl NativeSfmPipeline {
         let pose2 = &self.poses[idx2];
 
         let p1 = trueshot_vision::geometry::essential::projection_matrix(
-            &k, &pose1.rotation, &pose1.translation
+            &k,
+            &pose1.rotation,
+            &pose1.translation,
         );
         let p2 = trueshot_vision::geometry::essential::projection_matrix(
-            &k, &pose2.rotation, &pose2.translation
+            &k,
+            &pose2.rotation,
+            &pose2.translation,
         );
 
         for (pt1, pt2) in pts1.iter().zip(pts2.iter()) {
-            if let Some(point_3d) = trueshot_vision::geometry::essential::triangulate_point(
-                *pt1, *pt2, &p1, &p2
-            ) {
+            if let Some(point_3d) =
+                trueshot_vision::geometry::essential::triangulate_point(*pt1, *pt2, &p1, &p2)
+            {
                 // Check depth is positive
                 if point_3d.z > 0.0 && point_3d.z < 100.0 {
                     let error = reprojection_error(&point_3d, &p1, *pt1, &p2, *pt2);
@@ -245,9 +262,10 @@ impl NativeSfmPipeline {
         writeln!(file, "end_header")?;
 
         for pt in &self.points_3d {
-            writeln!(file, "{} {} {} {} {} {}",
-                pt.position.x, pt.position.y, pt.position.z,
-                pt.color[0], pt.color[1], pt.color[2]
+            writeln!(
+                file,
+                "{} {} {} {} {} {}",
+                pt.position.x, pt.position.y, pt.position.z, pt.color[0], pt.color[1], pt.color[2]
             )?;
         }
 

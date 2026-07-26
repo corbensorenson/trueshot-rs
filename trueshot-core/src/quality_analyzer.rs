@@ -1,4 +1,3 @@
-
 use anyhow::Result;
 use ndarray::{Array2, Array3};
 use std::collections::HashMap;
@@ -41,7 +40,10 @@ impl Defect {
     }
 
     pub fn is_low_bad(&self) -> bool {
-        matches!(self, Defect::ObjectErosion | Defect::Blur | Defect::RawUnderexposed)
+        matches!(
+            self,
+            Defect::ObjectErosion | Defect::Blur | Defect::RawUnderexposed
+        )
     }
 }
 
@@ -103,10 +105,10 @@ impl Analyzer {
         thresholds.insert(Defect::ColorCast, 15.0);
         thresholds.insert(Defect::BlackDots, 0.01);
         thresholds.insert(Defect::RawUnderexposed, 0.2); // >20% pixels too dark
-        
+
         Self { thresholds, params }
     }
-    
+
     // ... assess ...
     pub fn assess(
         &self,
@@ -117,58 +119,90 @@ impl Analyzer {
         // [Existing logic stays same, I will rewrite it to be safe]
         let mut scores = HashMap::new();
         let mut reasons = Vec::new();
-        
+
         // 1. Edge Banding
         let edge_score = self.detect_edge_banding(rgb)?;
         scores.insert(Defect::EdgeBanding, edge_score);
         if edge_score > self.thresholds[&Defect::EdgeBanding] {
-             reasons.push(format!("{} (score={:.2})", Defect::EdgeBanding.description(), edge_score));
+            reasons.push(format!(
+                "{} (score={:.2})",
+                Defect::EdgeBanding.description(),
+                edge_score
+            ));
         }
 
         // 2. Background Leak
         let bg_score = self.detect_background_leak(mask)?;
         scores.insert(Defect::BackgroundLeak, bg_score);
         if bg_score > self.thresholds[&Defect::BackgroundLeak] {
-            reasons.push(format!("{} (score={:.2})", Defect::BackgroundLeak.description(), bg_score));
+            reasons.push(format!(
+                "{} (score={:.2})",
+                Defect::BackgroundLeak.description(),
+                bg_score
+            ));
         }
 
         // 3. Object Erosion
         let erosion_score = self.detect_object_erosion(mask)?;
         scores.insert(Defect::ObjectErosion, erosion_score);
         if erosion_score < self.thresholds[&Defect::ObjectErosion] {
-            reasons.push(format!("{} (ratio={:.2})", Defect::ObjectErosion.description(), erosion_score));
+            reasons.push(format!(
+                "{} (ratio={:.2})",
+                Defect::ObjectErosion.description(),
+                erosion_score
+            ));
         }
 
         // 4. Blur
         let blur_score = self.detect_blur(rgb)?;
         scores.insert(Defect::Blur, blur_score);
         if blur_score < self.thresholds[&Defect::Blur] {
-            reasons.push(format!("{} (var={:.2})", Defect::Blur.description(), blur_score));
+            reasons.push(format!(
+                "{} (var={:.2})",
+                Defect::Blur.description(),
+                blur_score
+            ));
         }
 
         // 5. Overexposure
         let overexp = self.detect_overexposure(rgb)?;
         scores.insert(Defect::Overexposure, overexp);
         if overexp > self.thresholds[&Defect::Overexposure] {
-            reasons.push(format!("{} (ratio={:.2})", Defect::Overexposure.description(), overexp));
+            reasons.push(format!(
+                "{} (ratio={:.2})",
+                Defect::Overexposure.description(),
+                overexp
+            ));
         }
 
         // 6. Color Cast
         let cast = self.detect_color_cast(rgb)?;
         scores.insert(Defect::ColorCast, cast);
         if cast > self.thresholds[&Defect::ColorCast] {
-            reasons.push(format!("{} (score={:.2})", Defect::ColorCast.description(), cast));
+            reasons.push(format!(
+                "{} (score={:.2})",
+                Defect::ColorCast.description(),
+                cast
+            ));
         }
 
         // 7. Black Dots
         let black = self.detect_black_dots(rgb, mask)?;
         scores.insert(Defect::BlackDots, black);
         if black > self.thresholds[&Defect::BlackDots] {
-            reasons.push(format!("{} (ratio={:.4})", Defect::BlackDots.description(), black));
+            reasons.push(format!(
+                "{} (ratio={:.4})",
+                Defect::BlackDots.description(),
+                black
+            ));
         }
 
         let pass = reasons.is_empty();
-        Ok(Assessment { scores, pass, reasons })
+        Ok(Assessment {
+            scores,
+            pass,
+            reasons,
+        })
     }
 
     pub fn thresholds(&self) -> HashMap<Defect, f64> {
@@ -186,8 +220,12 @@ impl Analyzer {
 
         for v in bayer.iter() {
             let val = *v;
-            if val < min_val { min_val = val; }
-            if val > max_val { max_val = val; }
+            if val < min_val {
+                min_val = val;
+            }
+            if val > max_val {
+                max_val = val;
+            }
             sum += val;
 
             // Map 0.0-1.0 to 0-255
@@ -295,25 +333,41 @@ impl Analyzer {
     }
 
     fn detect_color_cast(&self, rgb: &Array3<u8>) -> Result<f64> {
-         let r_mean = rgb.slice(ndarray::s![.., .., 0]).mapv(|v| v as f64).mean().unwrap_or(0.0);
-         let g_mean = rgb.slice(ndarray::s![.., .., 1]).mapv(|v| v as f64).mean().unwrap_or(0.0);
-         let b_mean = rgb.slice(ndarray::s![.., .., 2]).mapv(|v| v as f64).mean().unwrap_or(0.0);
-         let dev = ((r_mean - g_mean).powi(2) + (b_mean - g_mean).powi(2)).sqrt();
-         Ok(dev)
+        let r_mean = rgb
+            .slice(ndarray::s![.., .., 0])
+            .mapv(|v| v as f64)
+            .mean()
+            .unwrap_or(0.0);
+        let g_mean = rgb
+            .slice(ndarray::s![.., .., 1])
+            .mapv(|v| v as f64)
+            .mean()
+            .unwrap_or(0.0);
+        let b_mean = rgb
+            .slice(ndarray::s![.., .., 2])
+            .mapv(|v| v as f64)
+            .mean()
+            .unwrap_or(0.0);
+        let dev = ((r_mean - g_mean).powi(2) + (b_mean - g_mean).powi(2)).sqrt();
+        Ok(dev)
     }
-    
+
     fn detect_black_dots(&self, rgb: &Array3<u8>, mask: &Array2<u8>) -> Result<f64> {
-         let mut black = 0;
-         let mut fg = 0;
-         for ((y, x), &m) in mask.indexed_iter() {
-             if m > 128 {
-                 fg += 1;
-                 let sum = rgb[[y, x, 0]] as u32 + rgb[[y, x, 1]] as u32 + rgb[[y, x, 2]] as u32;
-                 if sum < 30 { black += 1; }
-             }
-         }
-         if fg == 0 { return Ok(0.0); }
-         Ok(black as f64 / fg as f64)
+        let mut black = 0;
+        let mut fg = 0;
+        for ((y, x), &m) in mask.indexed_iter() {
+            if m > 128 {
+                fg += 1;
+                let sum = rgb[[y, x, 0]] as u32 + rgb[[y, x, 1]] as u32 + rgb[[y, x, 2]] as u32;
+                if sum < 30 {
+                    black += 1;
+                }
+            }
+        }
+        if fg == 0 {
+            return Ok(0.0);
+        }
+        Ok(black as f64 / fg as f64)
     }
 }
 
@@ -324,10 +378,10 @@ fn rgb_to_gray(rgb: &Array3<u8>) -> Array2<f64> {
     // Convert RGB to grayscale
     for y in 0..h {
         for x in 0..w {
-            let r = rgb[[y,x,0]] as f64;
-            let g = rgb[[y,x,1]] as f64;
-            let b = rgb[[y,x,2]] as f64;
-            gray[[y,x]] = 0.299*r + 0.587*g + 0.114*b;
+            let r = rgb[[y, x, 0]] as f64;
+            let g = rgb[[y, x, 1]] as f64;
+            let b = rgb[[y, x, 2]] as f64;
+            gray[[y, x]] = 0.299 * r + 0.587 * g + 0.114 * b;
         }
     }
     gray
@@ -339,9 +393,7 @@ fn sobel_x(img: &Array2<f64>) -> Array2<f64> {
     if h < 3 || w < 3 {
         return out;
     }
-    let kernel = [[-1.0, 0.0, 1.0],
-                  [-2.0, 0.0, 2.0],
-                  [-1.0, 0.0, 1.0]];
+    let kernel = [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]];
     for y in 1..h - 1 {
         for x in 1..w - 1 {
             let mut sum = 0.0;
@@ -363,9 +415,7 @@ fn sobel_y(img: &Array2<f64>) -> Array2<f64> {
     if h < 3 || w < 3 {
         return out;
     }
-    let kernel = [[-1.0, -2.0, -1.0],
-                  [0.0, 0.0, 0.0],
-                  [1.0, 2.0, 1.0]];
+    let kernel = [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]];
     for y in 1..h - 1 {
         for x in 1..w - 1 {
             let mut sum = 0.0;
@@ -415,9 +465,7 @@ fn compute_laplacian(img: &Array2<f64>) -> Array2<f64> {
     if h < 3 || w < 3 {
         return out;
     }
-    let kernel = [[0.0, 1.0, 0.0],
-                  [1.0, -4.0, 1.0],
-                  [0.0, 1.0, 0.0]];
+    let kernel = [[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]];
     for y in 1..h - 1 {
         for x in 1..w - 1 {
             let mut sum = 0.0;

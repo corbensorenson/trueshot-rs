@@ -9,7 +9,7 @@ where
 {
     // Use tokio's spawn_blocking which uses a dedicated thread pool
     // For heavy parallelism, one might configure a custom Rayon pool here
-    task::spawn_blocking(move || {
-        f()
-    }).await.expect("CPU Task Failed")
+    task::spawn_blocking(move || f())
+        .await
+        .expect("CPU Task Failed")
 }

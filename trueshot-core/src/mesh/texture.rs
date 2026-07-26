@@ -1,6 +1,6 @@
 use crate::reconstruction::Mesh;
-use nalgebra as na;
 use image::{ImageBuffer, Rgb, RgbaImage};
+use nalgebra as na;
 
 /// UV coordinate (texture coordinate)
 #[derive(Debug, Clone, Copy)]
@@ -19,7 +19,7 @@ impl UV {
 #[derive(Debug, Clone)]
 pub struct TexturedMesh {
     pub mesh: Mesh,
-    pub uv_coords: Vec<UV>,           // UV coordinate per vertex
+    pub uv_coords: Vec<UV>, // UV coordinate per vertex
     pub texture_atlas: Option<RgbaImage>,
 }
 
@@ -66,35 +66,35 @@ impl TextureAtlasBuilder {
             camera_poses: Vec::new(),
         }
     }
-    
+
     /// Add a camera view with image
     pub fn add_view(&mut self, image: ImageBuffer<Rgb<u8>, Vec<u8>>, pose: CameraPose) {
         self.images.push(image);
         self.camera_poses.push(pose);
     }
-    
+
     /// Generate UV coordinates using simple planar projection
     pub fn generate_uv_planar(&self, mesh: &Mesh) -> Vec<UV> {
         if mesh.vertices.is_empty() {
             return Vec::new();
         }
-        
+
         // Find bounding box
         let mut min = mesh.vertices[0].coords;
         let mut max = mesh.vertices[0].coords;
-        
+
         for vertex in &mesh.vertices {
             min = min.inf(&vertex.coords);
             max = max.sup(&vertex.coords);
         }
-        
+
         let size = max - min;
         let max_dim = size.x.max(size.y).max(size.z);
-        
+
         if max_dim == 0.0 {
             return vec![UV::new(0.5, 0.5); mesh.vertices.len()];
         }
-        
+
         // Project onto XY plane and normalize to [0, 1]
         mesh.vertices
             .iter()

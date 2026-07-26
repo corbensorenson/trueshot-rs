@@ -20,21 +20,21 @@ use crate::gaussian_splatting::gaussian_4d::Gaussian4D;
 pub struct GpuMeshifier {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    
+
     // Compute pipelines
     voxel_accumulate_pipeline: wgpu::ComputePipeline,
     marching_cubes_pipeline: wgpu::ComputePipeline,
     normal_estimation_pipeline: wgpu::ComputePipeline,
-    
+
     // Bind group layouts
     voxel_bind_group_layout: wgpu::BindGroupLayout,
     marching_cubes_bind_group_layout: wgpu::BindGroupLayout,
     normal_bind_group_layout: wgpu::BindGroupLayout,
-    
+
     // Lookup tables
     marching_cubes_lut: wgpu::Buffer,
     edge_table: wgpu::Buffer,
-    
+
     config: MeshificationConfig,
 }
 
@@ -58,7 +58,7 @@ impl GpuMeshifier {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
-        
+
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -67,7 +67,7 @@ impl GpuMeshifier {
             })
             .await
             .ok_or(GpuMeshError::NoAdapter)?;
-        
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -79,183 +79,192 @@ impl GpuMeshifier {
             )
             .await
             .map_err(|e| GpuMeshError::DeviceError(e.to_string()))?;
-        
+
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        
+
         // Create bind group layouts
-        let voxel_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Voxel BGL"),
-            entries: &[
-                // Gaussians input
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let voxel_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Voxel BGL"),
+                entries: &[
+                    // Gaussians input
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Voxel density output
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Voxel density output
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Uniforms
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
-        
-        let marching_cubes_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Marching Cubes BGL"),
-            entries: &[
-                // Voxel density input
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                ],
+            });
+
+        let marching_cubes_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Marching Cubes BGL"),
+                entries: &[
+                    // Voxel density input
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Marching cubes LUT
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Marching cubes LUT
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Vertices output
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Vertices output
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Atomic counters
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Atomic counters
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
-        
-        let normal_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Normal Estimation BGL"),
-            entries: &[
-                // Vertices
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                ],
+            });
+
+        let normal_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Normal Estimation BGL"),
+                entries: &[
+                    // Vertices
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Gaussians
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Gaussians
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
-        
+                ],
+            });
+
         // Create compute pipelines
         let voxel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Voxel Accumulate Shader"),
             source: wgpu::ShaderSource::Wgsl(VOXEL_ACCUMULATE_SHADER.into()),
         });
-        
+
         let marching_cubes_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Marching Cubes Shader"),
             source: wgpu::ShaderSource::Wgsl(MARCHING_CUBES_SHADER.into()),
         });
-        
+
         let normal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Normal Estimation Shader"),
             source: wgpu::ShaderSource::Wgsl(NORMAL_ESTIMATION_SHADER.into()),
         });
-        
-        let voxel_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Voxel Pipeline Layout"),
-            bind_group_layouts: &[&voxel_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        
-        let marching_cubes_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Marching Cubes Pipeline Layout"),
-            bind_group_layouts: &[&marching_cubes_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        
-        let normal_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Normal Pipeline Layout"),
-            bind_group_layouts: &[&normal_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        
-        let voxel_accumulate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Voxel Accumulate Pipeline"),
-            layout: Some(&voxel_pipeline_layout),
-            module: &voxel_shader,
-            entry_point: "main",
-        });
-        
-        let marching_cubes_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Marching Cubes Pipeline"),
-            layout: Some(&marching_cubes_pipeline_layout),
-            module: &marching_cubes_shader,
-            entry_point: "main",
-        });
-        
-        let normal_estimation_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Normal Estimation Pipeline"),
-            layout: Some(&normal_pipeline_layout),
-            module: &normal_shader,
-            entry_point: "main",
-        });
-        
+
+        let voxel_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Voxel Pipeline Layout"),
+                bind_group_layouts: &[&voxel_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let marching_cubes_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Marching Cubes Pipeline Layout"),
+                bind_group_layouts: &[&marching_cubes_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let normal_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Normal Pipeline Layout"),
+                bind_group_layouts: &[&normal_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let voxel_accumulate_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Voxel Accumulate Pipeline"),
+                layout: Some(&voxel_pipeline_layout),
+                module: &voxel_shader,
+                entry_point: "main",
+            });
+
+        let marching_cubes_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Marching Cubes Pipeline"),
+                layout: Some(&marching_cubes_pipeline_layout),
+                module: &marching_cubes_shader,
+                entry_point: "main",
+            });
+
+        let normal_estimation_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Normal Estimation Pipeline"),
+                layout: Some(&normal_pipeline_layout),
+                module: &normal_shader,
+                entry_point: "main",
+            });
+
         // Create lookup table buffers
         let marching_cubes_lut = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("MC LUT"),
@@ -263,18 +272,22 @@ impl GpuMeshifier {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        
+
         let edge_table = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Edge Table"),
             size: (12 * 2 * 4) as u64, // 12 edges * 2 vertices * 4 bytes
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        
+
         // Upload lookup tables
-        queue.write_buffer(&marching_cubes_lut, 0, bytemuck::cast_slice(get_gpu_tri_table()));
+        queue.write_buffer(
+            &marching_cubes_lut,
+            0,
+            bytemuck::cast_slice(get_gpu_tri_table()),
+        );
         queue.write_buffer(&edge_table, 0, bytemuck::cast_slice(&EDGE_CONNECTION));
-        
+
         Ok(Self {
             device,
             queue,
@@ -289,7 +302,7 @@ impl GpuMeshifier {
             config,
         })
     }
-    
+
     /// Process a meshification job on GPU
     pub async fn process(
         &self,
@@ -297,7 +310,7 @@ impl GpuMeshifier {
         bounds: &BoundingBox3D,
     ) -> Result<MeshData, GpuMeshError> {
         let start = std::time::Instant::now();
-        
+
         // Calculate grid dimensions
         let size = bounds.size();
         let dims = [
@@ -306,32 +319,37 @@ impl GpuMeshifier {
             ((size.z / self.config.voxel_size).ceil() as u32).max(1),
         ];
         let total_voxels = dims[0] * dims[1] * dims[2];
-        
+
         // Create GPU buffers
-        let gaussian_data: Vec<GpuGaussian> = gaussians.iter().map(|g| GpuGaussian {
-            position: [g.center.x, g.center.y, g.center.z, 1.0],
-            color: [g.color[0], g.color[1], g.color[2], g.opacity],
-            covariance: [
-                g.covariance.to_matrix()[(0, 0)],
-                g.covariance.to_matrix()[(1, 1)],
-                g.covariance.to_matrix()[(2, 2)],
-                g.covariance.to_matrix()[(0, 1)],
-            ],
-        }).collect();
-        
-        let gaussian_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Gaussians"),
-            contents: bytemuck::cast_slice(&gaussian_data),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        
+        let gaussian_data: Vec<GpuGaussian> = gaussians
+            .iter()
+            .map(|g| GpuGaussian {
+                position: [g.center.x, g.center.y, g.center.z, 1.0],
+                color: [g.color[0], g.color[1], g.color[2], g.opacity],
+                covariance: [
+                    g.covariance.to_matrix()[(0, 0)],
+                    g.covariance.to_matrix()[(1, 1)],
+                    g.covariance.to_matrix()[(2, 2)],
+                    g.covariance.to_matrix()[(0, 1)],
+                ],
+            })
+            .collect();
+
+        let gaussian_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Gaussians"),
+                contents: bytemuck::cast_slice(&gaussian_data),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
         let voxel_density_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Voxel Density"),
             size: (total_voxels * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        
+
         let uniforms = VoxelUniforms {
             grid_dims: [dims[0], dims[1], dims[2], 0],
             grid_origin: [bounds.min.x, bounds.min.y, bounds.min.z, 0.0],
@@ -340,13 +358,15 @@ impl GpuMeshifier {
             gaussian_count: gaussians.len() as u32,
             _padding: 0,
         };
-        
-        let uniform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Uniforms"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        
+
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Uniforms"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
         // Max vertices (conservative estimate)
         let max_vertices = total_voxels * 15; // Up to 5 triangles per voxel
         let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -355,13 +375,17 @@ impl GpuMeshifier {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        
-        let counter_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Counters"),
-            contents: bytemuck::bytes_of(&[0u32, 0u32]),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        });
-        
+
+        let counter_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Counters"),
+                contents: bytemuck::bytes_of(&[0u32, 0u32]),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            });
+
         // Create bind groups
         let voxel_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Voxel BG"),
@@ -381,7 +405,7 @@ impl GpuMeshifier {
                 },
             ],
         });
-        
+
         let mc_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("MC BG"),
             layout: &self.marching_cubes_bind_group_layout,
@@ -404,12 +428,14 @@ impl GpuMeshifier {
                 },
             ],
         });
-        
+
         // Encode and submit
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Meshification"),
-        });
-        
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Meshification"),
+            });
+
         // Pass 1: Voxel accumulation
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -418,13 +444,9 @@ impl GpuMeshifier {
             });
             pass.set_pipeline(&self.voxel_accumulate_pipeline);
             pass.set_bind_group(0, &voxel_bind_group, &[]);
-            pass.dispatch_workgroups(
-                (gaussians.len() as u32 + 255) / 256,
-                1,
-                1,
-            );
+            pass.dispatch_workgroups((gaussians.len() as u32 + 255) / 256, 1, 1);
         }
-        
+
         // Pass 2: Marching cubes
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -433,13 +455,9 @@ impl GpuMeshifier {
             });
             pass.set_pipeline(&self.marching_cubes_pipeline);
             pass.set_bind_group(0, &mc_bind_group, &[]);
-            pass.dispatch_workgroups(
-                (dims[0] + 7) / 8,
-                (dims[1] + 7) / 8,
-                (dims[2] + 7) / 8,
-            );
+            pass.dispatch_workgroups((dims[0] + 7) / 8, (dims[1] + 7) / 8, (dims[2] + 7) / 8);
         }
-        
+
         // Read back results
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging"),
@@ -447,22 +465,22 @@ impl GpuMeshifier {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        
+
         encoder.copy_buffer_to_buffer(&counter_buffer, 0, &staging_buffer, 0, 8);
-        
+
         self.queue.submit(std::iter::once(encoder.finish()));
-        
+
         // Wait and read counters
         let slice = staging_buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(wgpu::Maintain::Wait);
-        
+
         let data = slice.get_mapped_range();
         let counters: &[u32] = bytemuck::cast_slice(&data);
         let vertex_count = counters[0] as usize;
         drop(data);
         staging_buffer.unmap();
-        
+
         // Read vertices
         let vertex_staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Staging"),
@@ -470,7 +488,7 @@ impl GpuMeshifier {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        
+
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(
             &vertex_buffer,
@@ -480,30 +498,37 @@ impl GpuMeshifier {
             (vertex_count * std::mem::size_of::<GpuVertex>()) as u64,
         );
         self.queue.submit(std::iter::once(encoder.finish()));
-        
+
         let slice = vertex_staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(wgpu::Maintain::Wait);
-        
+
         let data = slice.get_mapped_range();
         let gpu_vertices: &[GpuVertex] = bytemuck::cast_slice(&data);
-        
+
         // Convert to CPU format
-        let vertices: Vec<Vertex> = gpu_vertices.iter().map(|v| Vertex {
-            position: [v.position[0], v.position[1], v.position[2]],
-            normal: [v.normal[0], v.normal[1], v.normal[2]],
-            uv: [v.uv[0], v.uv[1]],
-            color: [1.0, 1.0, 1.0, 1.0],
-        }).collect();
-        
+        let vertices: Vec<Vertex> = gpu_vertices
+            .iter()
+            .map(|v| Vertex {
+                position: [v.position[0], v.position[1], v.position[2]],
+                normal: [v.normal[0], v.normal[1], v.normal[2]],
+                uv: [v.uv[0], v.uv[1]],
+                color: [1.0, 1.0, 1.0, 1.0],
+            })
+            .collect();
+
         let indices: Vec<u32> = (0..vertex_count as u32).collect();
-        
+
         drop(data);
         vertex_staging.unmap();
-        
+
         let elapsed = start.elapsed();
-        eprintln!("GPU meshification: {} vertices in {:.1}ms", vertex_count, elapsed.as_secs_f32() * 1000.0);
-        
+        eprintln!(
+            "GPU meshification: {} vertices in {:.1}ms",
+            vertex_count,
+            elapsed.as_secs_f32() * 1000.0
+        );
+
         Ok(MeshData {
             vertices,
             indices,
@@ -780,9 +805,8 @@ fn generate_gpu_tri_table() -> [i32; 4096] {
 }
 
 // Lazy static for the GPU-formatted table
-static GPU_MC_TABLE: std::sync::LazyLock<[i32; 4096]> = std::sync::LazyLock::new(|| {
-    generate_gpu_tri_table()
-});
+static GPU_MC_TABLE: std::sync::LazyLock<[i32; 4096]> =
+    std::sync::LazyLock::new(|| generate_gpu_tri_table());
 
 /// Get the GPU marching cubes triangle table
 pub fn get_gpu_tri_table() -> &'static [i32; 4096] {
@@ -790,9 +814,18 @@ pub fn get_gpu_tri_table() -> &'static [i32; 4096] {
 }
 
 const EDGE_CONNECTION: [[u32; 2]; 12] = [
-    [0, 1], [1, 2], [2, 3], [3, 0],
-    [4, 5], [5, 6], [6, 7], [7, 4],
-    [0, 4], [1, 5], [2, 6], [3, 7],
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
 ];
 
 // Re-export for wgpu buffer initialization
@@ -801,12 +834,12 @@ use wgpu::util::DeviceExt;
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_gpu_gaussian_size() {
         assert_eq!(std::mem::size_of::<GpuGaussian>(), 48);
     }
-    
+
     #[test]
     fn test_gpu_vertex_size() {
         assert_eq!(std::mem::size_of::<GpuVertex>(), 48);

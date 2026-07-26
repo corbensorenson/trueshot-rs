@@ -63,7 +63,10 @@ pub fn ensure_cached_model(
 
     let rollback = update_active_record(&cache_dir, &record)?;
 
-    Ok(Some(CachedModelPaths { primary: record, rollback }))
+    Ok(Some(CachedModelPaths {
+        primary: record,
+        rollback,
+    }))
 }
 
 fn cache_dir() -> Result<PathBuf> {
@@ -76,7 +79,10 @@ fn cache_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(".trueshot").join("model_cache"))
 }
 
-fn update_active_record(cache_dir: &Path, record: &CachedModelRecord) -> Result<Option<CachedModelRecord>> {
+fn update_active_record(
+    cache_dir: &Path,
+    record: &CachedModelRecord,
+) -> Result<Option<CachedModelRecord>> {
     let active_path = cache_dir.join("active.json");
     let rollback_path = cache_dir.join("rollback.json");
 
@@ -107,7 +113,8 @@ fn write_record(path: &Path, record: &CachedModelRecord) -> Result<()> {
     }
     let payload = serde_json::to_vec_pretty(record)?;
     let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, payload).with_context(|| format!("Failed to write {}", tmp_path.display()))?;
+    fs::write(&tmp_path, payload)
+        .with_context(|| format!("Failed to write {}", tmp_path.display()))?;
     fs::rename(&tmp_path, path).with_context(|| format!("Failed to move {}", path.display()))?;
     Ok(())
 }

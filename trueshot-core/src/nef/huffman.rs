@@ -1,6 +1,6 @@
 /// LJPEG (Lossless JPEG) decoder for compression tag 6
 /// Based on LibRaw implementation
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 /// LJPEG header structure
 #[derive(Debug)]
@@ -28,59 +28,67 @@ impl Default for LjpegHeader {
             psv: 0,
             restart: 0,
             vpred: [0; 6],
-            huff: [None, None, None, None, None, None, None, None, None, None,
-                   None, None, None, None, None, None, None, None, None, None],
+            huff: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None,
+            ],
             quant: [0; 64],
         }
     }
 }
 
 // LJPEG marker constants
-const SOI: u16 = 0xffd8;   // Start of Image
-const SOF3: u16 = 0xffc3;  // Start of Frame (lossless)
-const DHT: u16 = 0xffc4;   // Define Huffman Table
-const SOS: u16 = 0xffda;   // Start of Scan
-const DQT: u16 = 0xffdb;   // Define Quantization Table
-const DRI: u16 = 0xffdd;   // Define Restart Interval
+const SOI: u16 = 0xffd8; // Start of Image
+const SOF3: u16 = 0xffc3; // Start of Frame (lossless)
+const DHT: u16 = 0xffc4; // Define Huffman Table
+const SOS: u16 = 0xffda; // Start of Scan
+const DQT: u16 = 0xffdb; // Define Quantization Table
+const DRI: u16 = 0xffdd; // Define Restart Interval
 
 // Nikon Huffman tables for fallback (if needed)
 const NIKON_TREE: [[[u8; 16]; 3]; 6] = [
-    [ // 12-bit lossy
-        [0,0,1,5,1,1,1,1,1,1,2,0,0,0,0,0],
-        [5,4,3,6,2,7,1,0,8,9,11,10,12,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0, 0, 0, 0,0,0,0],
+    [
+        // 12-bit lossy
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ],
-    [ // 12-bit lossy after split
-        [0,0,1,5,1,1,1,1,1,1,2,0,0,0,0,0],
-        [6,5,5,5,5,5,4,3,2,1,0,11,12,12,0,0],
-        [3,5,3,2,1,0,0,0,0,0, 0, 0, 0,0,0,0],
+    [
+        // 12-bit lossy after split
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [6, 5, 5, 5, 5, 5, 4, 3, 2, 1, 0, 11, 12, 12, 0, 0],
+        [3, 5, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ],
-    [ // 12-bit lossless
-        [0,0,1,4,2,3,1,2,0,0,0,0,0,0,0,0],
-        [5,4,6,3,7,2,8,1,9,0,10,11,12,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0, 0, 0, 0,0,0,0],
+    [
+        // 12-bit lossless
+        [0, 0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+        [5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ],
-    [ // 14-bit lossy
-        [0,0,1,4,3,1,1,1,1,1,2,0,0,0,0,0],
-        [5,6,4,7,8,3,9,2,1,0,10,11,12,13,14,0],
-        [0,0,0,0,0,0,0,0,0,0, 0, 0, 0, 0, 0,0],
+    [
+        // 14-bit lossy
+        [0, 0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ],
-    [ // 14-bit lossy after split
-        [0,0,1,5,1,1,1,1,1,1,1,2,0,0,0,0],
-        [8,7,7,7,7,7,6,5,4,3,2,1,0,13,14,0],
-        [0,5,4,3,2,0,0,0,0,0,0,0,0, 0, 0,0],
+    [
+        // 14-bit lossy after split
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0],
+        [8, 7, 7, 7, 7, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14, 0],
+        [0, 5, 4, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ],
-    [ // 14-bit lossless
-        [0,0,1,4,2,2,3,1,2,0,0,0,0,0,0,0],
-        [7,6,8,5,9,4,10,3,11,12,2,0,1,13,14,0],
-        [0,0,0,0,0,0, 0,0, 0, 0,0,0,0, 0, 0,0],
+    [
+        // 14-bit lossless
+        [0, 0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+        [7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ],
 ];
 
 #[derive(Debug)]
 pub struct HuffTable {
     pub bits: [u32; 16],
-    pub huffval: [u32; 16], 
+    pub huffval: [u32; 16],
     pub shiftval: [u32; 16],
     // Lookup tables for fast decoding
     pub maxcode: [i32; 17],
@@ -104,11 +112,11 @@ impl HuffTable {
         // Build the Huffman lookup tables
         let mut huffsize = [0u8; 257];
         let mut huffcode = [0u16; 257];
-        
+
         // Generate size table
         let mut k = 0;
         for i in 1..=16 {
-            for _ in 0..self.bits[i-1] {
+            for _ in 0..self.bits[i - 1] {
                 if k >= 256 {
                     return Err(anyhow!("Huffman table too large"));
                 }
@@ -122,7 +130,7 @@ impl HuffTable {
         let mut code = 0u16;
         let mut si = huffsize[0];
         let mut p = 0;
-        
+
         while huffsize[p] != 0 {
             while huffsize[p] == si {
                 huffcode[p] = code;
@@ -135,13 +143,13 @@ impl HuffTable {
 
         // Generate lookup tables
         for l in 1..=16 {
-            if self.bits[l-1] != 0 {
+            if self.bits[l - 1] != 0 {
                 if p >= huffcode.len() {
                     return Err(anyhow!("Huffman table index out of bounds"));
                 }
                 self.valptr[l] = p as i32;
                 self.mincode[l] = huffcode[p] as i32;
-                p += self.bits[l-1] as usize - 1;
+                p += self.bits[l - 1] as usize - 1;
                 if p >= huffcode.len() {
                     return Err(anyhow!("Huffman table index out of bounds"));
                 }
@@ -174,32 +182,32 @@ impl HuffTable {
 
     pub fn huff_decode(&self, pump: &mut BitPumpMSB) -> Result<i32> {
         let mut code = 0i32;
-        
+
         for l in 1..=16 {
             code = (code << 1) | pump.get_bits(1)? as i32;
-            
+
             if code <= self.maxcode[l] {
                 let index = (self.valptr[l] + code - self.mincode[l]) as usize;
                 if index < 16 {
                     let val = self.huffval[index] as i32;
                     let shift = self.shiftval[index] as i32;
-                    
+
                     if val == 0 {
                         return Ok(0);
                     }
-                    
+
                     let diff = pump.get_bits(val as u32)? as i32;
                     let result = if diff < (1 << (val - 1)) {
                         diff - (1 << val) + 1
                     } else {
                         diff
                     };
-                    
+
                     return Ok(result << shift);
                 }
             }
         }
-        
+
         Err(anyhow!("Invalid Huffman code"))
     }
 
@@ -248,7 +256,7 @@ impl BitPumpMSB {
             if self.pos >= self.data.len() {
                 return Err(anyhow!("End of data reached"));
             }
-            
+
             self.bits = (self.bits << 8) | (self.data[self.pos] as u32);
             self.pos += 1;
             self.nbits += 8;
@@ -256,7 +264,7 @@ impl BitPumpMSB {
 
         let result = (self.bits >> (self.nbits - n)) & ((1 << n) - 1);
         self.nbits -= n;
-        
+
         Ok(result)
     }
 
@@ -297,13 +305,13 @@ pub fn create_huffman_table(table_index: usize) -> Result<HuffTable> {
     }
 
     let mut htable = HuffTable::empty();
-    
+
     for i in 0..15 {
         htable.bits[i] = NIKON_TREE[table_index][0][i] as u32;
         htable.huffval[i] = NIKON_TREE[table_index][1][i] as u32;
         htable.shiftval[i] = NIKON_TREE[table_index][2][i] as u32;
     }
-    
+
     htable.initialize()?;
     Ok(htable)
 }
@@ -371,17 +379,17 @@ pub fn parse_ljpeg_header(data: &[u8]) -> Result<LjpegHeader> {
                 // Start of Scan
                 if segment_data.len() >= 4 {
                     header.psv = segment_data[1 + segment_data[0] as usize * 2];
-                    header.bits = header.bits.saturating_sub(segment_data[3 + segment_data[0] as usize * 2] & 15);
+                    header.bits = header
+                        .bits
+                        .saturating_sub(segment_data[3 + segment_data[0] as usize * 2] & 15);
                 }
                 break; // End of header
             }
             DQT => {
                 // Define Quantization Table
                 for i in 0..64.min(segment_data.len() / 2) {
-                    header.quant[i] = u16::from_be_bytes([
-                        segment_data[i * 2],
-                        segment_data[i * 2 + 1]
-                    ]);
+                    header.quant[i] =
+                        u16::from_be_bytes([segment_data[i * 2], segment_data[i * 2 + 1]]);
                 }
             }
             DRI => {
@@ -472,7 +480,7 @@ impl LookupTable {
         // Simple dithering implementation
         *random = random.wrapping_mul(1103515245).wrapping_add(12345);
         let dither = (*random >> 16) & 0xff;
-        
+
         let index = value as usize;
         if index < self.table.len() {
             let base = self.table[index];

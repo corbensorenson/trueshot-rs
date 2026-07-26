@@ -1,12 +1,12 @@
-use async_trait::async_trait;
-use tokio::sync::mpsc;
-use anyhow::Result;
-use std::path::PathBuf;
-use crate::scheduler::Job;
-use crate::reconstruction::unified::UnifiedReconstruction;
 use crate::reconstruction::livescan::PosePriors;
+use crate::reconstruction::unified::UnifiedReconstruction;
+use crate::scheduler::Job;
 use crate::scheduler::RemoteJobPayload;
+use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::json;
+use std::path::PathBuf;
+use tokio::sync::mpsc;
 
 pub enum UnifiedJobType {
     GaussianSplatting,
@@ -29,12 +29,12 @@ impl UnifiedJob {
             job_type,
         }
     }
-    
+
     pub fn with_livescan(mut self, path: PathBuf) -> Self {
         self.livescan_path = Some(path);
         self
     }
-    
+
     pub fn with_dslr(mut self, path: PathBuf) -> Self {
         self.dslr_path = Some(path);
         self
@@ -52,53 +52,63 @@ impl Job for UnifiedJob {
 
     async fn execute(&self, progress_tx: mpsc::Sender<f32>) -> Result<()> {
         let _ = progress_tx.send(0.05).await;
-        
+
         // Check paths
         let unified = UnifiedReconstruction::new(self.workspace_path.clone());
-        
+
         // 1. Synchronize (if DSLR + LiveScan)
         let mut priors: Option<PosePriors> = None;
         if let (Some(dslr), Some(livescan)) = (&self.dslr_path, &self.livescan_path) {
-             let _ = progress_tx.send(0.1).await;
-             tracing::info!("🔄 Synchronizing DSLR images from {:?}...", dslr);
-             
-             // Run sync logic
-             // Ideally `unified` methods should be async or we wrap in blocking?
-             // `synchronize_dslr_images` is synchronous.
-             let unified_clone = UnifiedReconstruction::new(self.workspace_path.clone()); // lightweight
-             let dslr_path = dslr.clone();
-             let livescan_path = livescan.clone();
-             
-             let reconstruction = tokio::task::spawn_blocking(move || {
-                 unified_clone.synchronize_dslr_images(&dslr_path, &livescan_path)
-             }).await??;
-             priors = Some(reconstruction);
+            let _ = progress_tx.send(0.1).await;
+            tracing::info!("🔄 Synchronizing DSLR images from {:?}...", dslr);
+
+            // Run sync logic
+            // Ideally `unified` methods should be async or we wrap in blocking?
+            // `synchronize_dslr_images` is synchronous.
+            let unified_clone = UnifiedReconstruction::new(self.workspace_path.clone()); // lightweight
+            let dslr_path = dslr.clone();
+            let livescan_path = livescan.clone();
+
+            let reconstruction = tokio::task::spawn_blocking(move || {
+                unified_clone.synchronize_dslr_images(&dslr_path, &livescan_path)
+            })
+            .await??;
+            priors = Some(reconstruction);
         }
-        
+
         let _ = progress_tx.send(0.2).await;
-        
+
         let unified_clone = UnifiedReconstruction::new(self.workspace_path.clone());
         let livescan_clone = self.livescan_path.clone();
         let priors_clone = priors.clone();
         let job_type = match self.job_type {
-             UnifiedJobType::GaussianSplatting => crate::reconstruction::pipeline::ReconstructionType::GaussianSplatting,
-             UnifiedJobType::Photogrammetry => crate::reconstruction::pipeline::ReconstructionType::PhotogrammetryHighQuality,
+            UnifiedJobType::GaussianSplatting => {
+                crate::reconstruction::pipeline::ReconstructionType::GaussianSplatting
+            }
+            UnifiedJobType::Photogrammetry => {
+                crate::reconstruction::pipeline::ReconstructionType::PhotogrammetryHighQuality
+            }
         };
-        
+
         // We need to call the pipeline manually because `UnifiedReconstruction::process_...` are specific helpers.
         // Or I can call `process_gaussian_splatting`.
-        
+
         tokio::task::spawn_blocking(move || -> Result<()> {
-             match job_type {
-                 crate::reconstruction::pipeline::ReconstructionType::GaussianSplatting => {
-                     unified_clone.process_gaussian_splatting(livescan_clone, priors_clone)?;
-                 },
-                 _ => {
-                     unified_clone.process_photogrammetry("high".to_string(), livescan_clone, priors_clone)?;
-                 }
-             }
-             Ok(())
-        }).await??;
+            match job_type {
+                crate::reconstruction::pipeline::ReconstructionType::GaussianSplatting => {
+                    unified_clone.process_gaussian_splatting(livescan_clone, priors_clone)?;
+                }
+                _ => {
+                    unified_clone.process_photogrammetry(
+                        "high".to_string(),
+                        livescan_clone,
+                        priors_clone,
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .await??;
 
         let _ = progress_tx.send(1.0).await;
         Ok(())

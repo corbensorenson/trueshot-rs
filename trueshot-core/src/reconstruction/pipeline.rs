@@ -1,18 +1,18 @@
-use anyhow::{Result, Context};
-use std::path::{Path, PathBuf};
-use image::{DynamicImage, GrayImage, RgbImage, imageops::FilterType};
-use nalgebra as na;
-use crate::reconstruction::livescan::PosePriors;
-use crate::reconstruction::multicam_sfm::{
-    SfmPipeline, SfmConfig, FeatureType, PatchMatchConfig, DepthMap, MvsInput,
-    patchmatch_stereo, CameraPose, CameraIntrinsics, SparseReconstruction,
-};
-use crate::reconstruction::QualityLevel;
-use crate::gaussian_splatting::{GaussianSplatTrainer, TrainingConfig, Camera as GsCamera};
 use crate::export::{export_point_cloud_ply, write_provenance_for_export};
+use crate::gaussian_splatting::{Camera as GsCamera, GaussianSplatTrainer, TrainingConfig};
 use crate::intrinsics::estimate_intrinsics;
 use crate::photogrammetry::heatmap::{apply_heatmap_to_points, CoverageVoxelGrid};
+use crate::reconstruction::livescan::PosePriors;
+use crate::reconstruction::multicam_sfm::{
+    patchmatch_stereo, CameraIntrinsics, CameraPose, DepthMap, FeatureType, MvsInput,
+    PatchMatchConfig, SfmConfig, SfmPipeline, SparseReconstruction,
+};
 use crate::reconstruction::ColoredPoint;
+use crate::reconstruction::QualityLevel;
+use anyhow::{Context, Result};
+use image::{imageops::FilterType, DynamicImage, GrayImage, RgbImage};
+use nalgebra as na;
+use std::path::{Path, PathBuf};
 
 #[derive(Copy, Clone)]
 pub enum ReconstructionType {
@@ -65,7 +65,13 @@ impl ReconstructionPipeline {
                 if let Some(pose) = &prior_pose {
                     prior_poses.push(pose.clone());
                 }
-                pipeline.add_image_with_context(path, intrinsics, prior_pose, rolling_shutter, camera_motion)?;
+                pipeline.add_image_with_context(
+                    path,
+                    intrinsics,
+                    prior_pose,
+                    rolling_shutter,
+                    camera_motion,
+                )?;
             }
         } else {
             pipeline.add_images(&image_paths)?;
@@ -92,7 +98,8 @@ impl ReconstructionPipeline {
             }
         }
 
-        let mut color_images = load_color_images(&image_paths, sparse_color_scale_for_quality(quality))?;
+        let mut color_images =
+            load_color_images(&image_paths, sparse_color_scale_for_quality(quality))?;
         let poses = reconstruction.poses.clone();
         let cameras = reconstruction.cameras.clone();
         colorize_sparse_points(
@@ -106,13 +113,19 @@ impl ReconstructionPipeline {
 
         if !reconstruction.points.is_empty() {
             let voxel_size = quality.voxel_size();
-            let colored_points: Vec<ColoredPoint> = reconstruction.points.iter().map(|p| {
-                ColoredPoint {
-                    position: na::Point3::new(p.position.x as f32, p.position.y as f32, p.position.z as f32),
+            let colored_points: Vec<ColoredPoint> = reconstruction
+                .points
+                .iter()
+                .map(|p| ColoredPoint {
+                    position: na::Point3::new(
+                        p.position.x as f32,
+                        p.position.y as f32,
+                        p.position.z as f32,
+                    ),
                     color: p.color,
                     confidence: 1.0,
-                }
-            }).collect();
+                })
+                .collect();
             let heatmap_points = apply_heatmap_to_points(&colored_points, voxel_size);
             let mut positions: Vec<na::Point3<f32>> = Vec::with_capacity(heatmap_points.len());
             let mut colors: Vec<[u8; 3]> = Vec::with_capacity(heatmap_points.len());
@@ -157,7 +170,10 @@ impl ReconstructionPipeline {
             }
         }
 
-        if matches!(self.config.reconstruction_type, ReconstructionType::GaussianSplatting) {
+        if matches!(
+            self.config.reconstruction_type,
+            ReconstructionType::GaussianSplatting
+        ) {
             let output_dir = self.config.workspace_path.join("output");
             std::fs::create_dir_all(&output_dir)?;
             run_gaussian_splatting(
@@ -264,11 +280,13 @@ fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn is_image_path(path: &Path) -> bool {
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) => matches!(ext.to_lowercase().as_str(), "jpg" | "jpeg" | "png" | "tif" | "tiff" | "nef" | "arw"),
+        Some(ext) => matches!(
+            ext.to_lowercase().as_str(),
+            "jpg" | "jpeg" | "png" | "tif" | "tiff" | "nef" | "arw"
+        ),
         None => false,
     }
 }
-
 
 fn sparse_color_scale_for_quality(quality: QualityLevel) -> f32 {
     match quality {
@@ -289,7 +307,10 @@ fn sparse_color_views_for_quality(quality: QualityLevel) -> usize {
 }
 
 fn should_run_dense(quality: QualityLevel) -> bool {
-    matches!(quality, QualityLevel::Medium | QualityLevel::High | QualityLevel::Ultra)
+    matches!(
+        quality,
+        QualityLevel::Medium | QualityLevel::High | QualityLevel::Ultra
+    )
 }
 
 fn load_color_images(paths: &[PathBuf], scale: f32) -> Result<Vec<RgbImage>> {
@@ -325,7 +346,9 @@ fn colorize_sparse_points(
     for point in &mut reconstruction.points {
         let mut colored = false;
         for view_idx in 0..view_limit {
-            if let Some((x, y)) = project_point(&point.position, &poses[view_idx], &intrinsics[view_idx]) {
+            if let Some((x, y)) =
+                project_point(&point.position, &poses[view_idx], &intrinsics[view_idx])
+            {
                 let pixel = images[view_idx].get_pixel(x, y);
                 point.color = [pixel[0], pixel[1], pixel[2]];
                 colored = true;
@@ -375,16 +398,21 @@ fn run_dense_mvs(
 ) -> Result<Vec<(na::Point3<f64>, [u8; 3])>> {
     let scale = dense_scale_for_quality(quality);
     let images = load_mvs_images(image_paths, intrinsics, scale)?;
-    let adjusted_intrinsics: Vec<CameraIntrinsics> = images.iter().map(|img| img.intrinsics.clone()).collect();
+    let adjusted_intrinsics: Vec<CameraIntrinsics> =
+        images.iter().map(|img| img.intrinsics.clone()).collect();
 
     let patch_config = patchmatch_config_from_quality(quality);
     let mut depth_maps: Vec<DepthMap> = Vec::with_capacity(images.len());
 
     for (i, image) in images.iter().enumerate() {
         let src_indices = select_source_indices(i, images.len(), max_source_views(quality));
-        let src_images: Vec<&GrayImage> = src_indices.iter().map(|&idx| &images[idx].gray).collect();
+        let src_images: Vec<&GrayImage> =
+            src_indices.iter().map(|&idx| &images[idx].gray).collect();
         let src_poses: Vec<&CameraPose> = src_indices.iter().map(|&idx| &poses[idx]).collect();
-        let src_intrinsics: Vec<&CameraIntrinsics> = src_indices.iter().map(|&idx| &adjusted_intrinsics[idx]).collect();
+        let src_intrinsics: Vec<&CameraIntrinsics> = src_indices
+            .iter()
+            .map(|&idx| &adjusted_intrinsics[idx])
+            .collect();
 
         let input = MvsInput {
             ref_image: &image.gray,
@@ -422,7 +450,11 @@ fn load_mvs_images(
             .with_context(|| format!("Failed to open image {}", path.display()))?;
         let (rgb, gray) = downscale_image_pair(&img, scale);
         let intr = scale_intrinsics(&intrinsics[idx], scale, rgb.width(), rgb.height());
-        images.push(MvsImage { rgb, gray, intrinsics: intr });
+        images.push(MvsImage {
+            rgb,
+            gray,
+            intrinsics: intr,
+        });
     }
     Ok(images)
 }
@@ -579,7 +611,8 @@ fn fuse_depth_maps_colored(
                     }
                     let src_pose = &poses[src_idx];
                     let src_intr = &intrinsics[src_idx];
-                    if let Some((sx, sy, sz)) = project_to_camera(&point_world, src_pose, src_intr) {
+                    if let Some((sx, sy, sz)) = project_to_camera(&point_world, src_pose, src_intr)
+                    {
                         if let Some((src_depth, src_conf, _)) = src_depth_map.get(sx, sy) {
                             if src_conf > 0.5 {
                                 let depth_diff = (src_depth as f64 - sz).abs();
@@ -695,7 +728,14 @@ fn run_gaussian_splatting(
         }
     } else {
         for p in sparse_points {
-            initial_points.push((na::Point3::new(p.position.x as f32, p.position.y as f32, p.position.z as f32), p.color));
+            initial_points.push((
+                na::Point3::new(
+                    p.position.x as f32,
+                    p.position.y as f32,
+                    p.position.z as f32,
+                ),
+                p.color,
+            ));
         }
     }
 
@@ -709,15 +749,23 @@ fn run_gaussian_splatting(
         let intr = &intrinsics[idx];
         let rotation = pose.rotation.to_rotation_matrix();
         let mut transform = na::Matrix4::<f32>::identity();
-        transform.fixed_view_mut::<3, 3>(0, 0).copy_from(&rotation.matrix().map(|v| v as f32));
+        transform
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&rotation.matrix().map(|v| v as f32));
         transform[(0, 3)] = pose.translation.x as f32;
         transform[(1, 3)] = pose.translation.y as f32;
         transform[(2, 3)] = pose.translation.z as f32;
 
         let intr_matrix = na::Matrix3::<f32>::new(
-            intr.fx as f32, 0.0, intr.cx as f32,
-            0.0, intr.fy as f32, intr.cy as f32,
-            0.0, 0.0, 1.0,
+            intr.fx as f32,
+            0.0,
+            intr.cx as f32,
+            0.0,
+            intr.fy as f32,
+            intr.cy as f32,
+            0.0,
+            0.0,
+            1.0,
         );
 
         cameras.push(GsCamera {

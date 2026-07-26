@@ -34,7 +34,10 @@ pub fn gpu_compute_sharpness_masks(
     if num_frames < min_frames_for_gpu || pixels_per_frame < min_pixels_for_gpu {
         tracing::info!(
             "Workload too small for GPU ({} frames, {}x{} = {} pixels/frame), falling back to CPU",
-            num_frames, width, height, pixels_per_frame
+            num_frames,
+            width,
+            height,
+            pixels_per_frame
         );
         return Ok(None);
     }
@@ -55,7 +58,15 @@ pub fn gpu_compute_sharpness_masks(
 
     tracing::info!(
         "GPU sharpness: {} frames ({}x{}), {}×{} tiles of {}×{} (+{} overlap) = {} total tiles",
-        num_frames, width, height, tiles_x, tiles_y, tile_size, tile_size, overlap, total_tiles
+        num_frames,
+        width,
+        height,
+        tiles_x,
+        tiles_y,
+        tile_size,
+        tile_size,
+        overlap,
+        total_tiles
     );
 
     // Process each frame
@@ -66,12 +77,7 @@ pub fn gpu_compute_sharpness_masks(
             tracing::debug!("GPU processing frame {}/{}", frame_idx + 1, num_frames);
 
             // Compute variance map for this frame using tile-based GPU processing
-            let variance_map = compute_variance_map_tiled(
-                gpu_ctx,
-                frame,
-                tile_size,
-                overlap,
-            )?;
+            let variance_map = compute_variance_map_tiled(gpu_ctx, frame, tile_size, overlap)?;
 
             // Threshold variance to create mask (same as CPU version)
             let mask = threshold_variance_to_mask(&variance_map, noise_sigma);
@@ -120,9 +126,7 @@ fn compute_variance_map_tiled(
         // Extract tiles with overlap
         let tiles_data: Vec<_> = batch_tiles
             .iter()
-            .map(|&(tx, ty)| {
-                extract_tile_with_overlap(frame, tx, ty, tile_size, overlap)
-            })
+            .map(|&(tx, ty)| extract_tile_with_overlap(frame, tx, ty, tile_size, overlap))
             .collect();
 
         // Process batch on GPU
@@ -190,10 +194,7 @@ struct TileData {
 }
 
 /// Process a batch of tiles on GPU
-fn process_tiles_on_gpu(
-    gpu_ctx: &Arc<GpuContext>,
-    tiles: &[TileData],
-) -> Result<Vec<Array2<f64>>> {
+fn process_tiles_on_gpu(gpu_ctx: &Arc<GpuContext>, tiles: &[TileData]) -> Result<Vec<Array2<f64>>> {
     if tiles.is_empty() {
         return Ok(Vec::new());
     }
@@ -215,18 +216,16 @@ fn process_tiles_on_gpu(
     for ((width, height), indices) in tiles_by_size.iter() {
         // Create shader once for this size
         let shader_source = generate_tile_shader(*width, *height);
-        let shader = gpu_ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sharpness Tile Shader"),
-            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-        });
+        let shader = gpu_ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Sharpness Tile Shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
 
         // Process all tiles of this size
         for &idx in indices {
-            let variance_map = process_single_tile_with_shader(
-                gpu_ctx,
-                &tiles[idx],
-                &shader,
-            )?;
+            let variance_map = process_single_tile_with_shader(gpu_ctx, &tiles[idx], &shader)?;
             results[idx] = Some(variance_map);
         }
     }
@@ -285,34 +284,39 @@ fn process_single_tile_with_shader(
     });
 
     // Upload tile data
-    gpu_ctx.queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&tile.data));
+    gpu_ctx
+        .queue
+        .write_buffer(&input_buffer, 0, bytemuck::cast_slice(&tile.data));
 
     // Create bind group layouts and pipelines for each pass
-    let bind_group_layout = gpu_ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Tile Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
+    let bind_group_layout =
+        gpu_ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Tile Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
     // Pass 1: Extract green channel
     let extract_green_pipeline = create_compute_pipeline(
@@ -322,20 +326,22 @@ fn process_single_tile_with_shader(
         "extract_green",
     );
 
-    let extract_green_bind_group = gpu_ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Extract Green Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: green_buffer.as_entire_binding(),
-            },
-        ],
-    });
+    let extract_green_bind_group = gpu_ctx
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Extract Green Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: green_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
     // Pass 2: Compute Laplacian
     let laplacian_pipeline = create_compute_pipeline(
@@ -345,20 +351,22 @@ fn process_single_tile_with_shader(
         "compute_laplacian",
     );
 
-    let laplacian_bind_group = gpu_ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Laplacian Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: green_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: laplacian_buffer.as_entire_binding(),
-            },
-        ],
-    });
+    let laplacian_bind_group = gpu_ctx
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Laplacian Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: green_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: laplacian_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
     // Pass 3: Compute variance
     let variance_pipeline = create_compute_pipeline(
@@ -368,25 +376,29 @@ fn process_single_tile_with_shader(
         "compute_variance",
     );
 
-    let variance_bind_group = gpu_ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Variance Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: laplacian_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: variance_buffer.as_entire_binding(),
-            },
-        ],
-    });
+    let variance_bind_group = gpu_ctx
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Variance Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: laplacian_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: variance_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
     // Execute compute passes
-    let mut encoder = gpu_ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Tile Compute Encoder"),
-    });
+    let mut encoder = gpu_ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Tile Compute Encoder"),
+        });
 
     let workgroup_size = 16;
     let dispatch_x = (width as u32 + workgroup_size - 1) / workgroup_size;
@@ -526,7 +538,8 @@ fn threshold_variance_to_mask(variance_map: &Array2<f64>, noise_sigma: f64) -> A
 /// Generate WGSL shader for tile-based sharpness computation with specific dimensions
 /// OPTIMIZED: Single fused pass instead of 3 separate passes (~30% GPU perf gain)
 fn generate_tile_shader(width: usize, height: usize) -> String {
-    format!(r#"
+    format!(
+        r#"
 // Tile dimensions
 const WIDTH: u32 = {}u;
 const HEIGHT: u32 = {}u;
@@ -706,5 +719,7 @@ fn compute_variance(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
     output[y * WIDTH + x] = variance / count;
 }}
-"#, width, height)
+"#,
+        width, height
+    )
 }

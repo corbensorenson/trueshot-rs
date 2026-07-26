@@ -5,11 +5,11 @@
 //! - Textured meshes for static objects
 //! - Animated avatars for tracked humans
 
+use nalgebra as na;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
 use uuid::Uuid;
-use nalgebra as na;
-use serde::{Deserialize, Serialize};
 
 use crate::gaussian_splatting::gaussian_4d::Dynamic4DScene;
 
@@ -34,11 +34,11 @@ impl MeshData {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn vertex_count(&self) -> usize {
         self.vertices.len()
     }
-    
+
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
@@ -108,20 +108,20 @@ impl HybridSceneNode {
             children: Vec::new(),
         }
     }
-    
+
     /// Update motion score with smoothing
     pub fn update_motion_score(&mut self, new_score: f32) {
         self.motion_history.push(new_score);
         if self.motion_history.len() > 30 {
             self.motion_history.remove(0);
         }
-        
+
         // Exponential moving average
         let alpha = 0.3;
         self.motion_score = self.motion_score * (1.0 - alpha) + new_score * alpha;
         self.last_updated = Instant::now();
     }
-    
+
     /// Get average motion score over history
     pub fn average_motion_score(&self) -> f32 {
         if self.motion_history.is_empty() {
@@ -129,7 +129,7 @@ impl HybridSceneNode {
         }
         self.motion_history.iter().sum::<f32>() / self.motion_history.len() as f32
     }
-    
+
     /// Check if object has been stable (low motion) for a duration
     pub fn is_stable_for(&self, frames: usize) -> bool {
         if self.motion_history.len() < frames {
@@ -149,14 +149,14 @@ pub enum ObjectRepresentation {
         /// Indices of Gaussians belonging to this object
         gaussian_indices: Vec<usize>,
     },
-    
+
     /// Textured mesh for static objects
     Mesh {
         geometry: MeshData,
         texture_id: Option<Uuid>,
         lod_levels: Vec<MeshLOD>,
     },
-    
+
     /// Avatar with skeletal animation
     Avatar {
         avatar_id: Uuid,
@@ -164,7 +164,7 @@ pub enum ObjectRepresentation {
         bone_transforms: Vec<na::Matrix4<f32>>,
         blendshape_weights: Vec<f32>,
     },
-    
+
     /// Transitioning between representations
     Transitioning {
         from: Box<ObjectRepresentation>,
@@ -172,7 +172,7 @@ pub enum ObjectRepresentation {
         progress: f32,
         start_time: Instant,
     },
-    
+
     /// Placeholder for objects being processed
     Pending,
 }
@@ -215,7 +215,7 @@ impl HybridScene {
             source_4dgs: None,
         }
     }
-    
+
     /// Add a node to the scene
     pub fn add_node(&mut self, node: HybridSceneNode) -> Uuid {
         let id = node.id;
@@ -225,17 +225,17 @@ impl HybridScene {
         self.nodes.insert(id, node);
         id
     }
-    
+
     /// Get a node by ID
     pub fn get_node(&self, id: Uuid) -> Option<&HybridSceneNode> {
         self.nodes.get(&id)
     }
-    
+
     /// Get a mutable node by ID
     pub fn get_node_mut(&mut self, id: Uuid) -> Option<&mut HybridSceneNode> {
         self.nodes.get_mut(&id)
     }
-    
+
     /// Remove a node from the scene
     pub fn remove_node(&mut self, id: Uuid) -> Option<HybridSceneNode> {
         if let Some(node) = self.nodes.remove(&id) {
@@ -244,7 +244,7 @@ impl HybridScene {
         }
         None
     }
-    
+
     /// Update a node's representation
     pub fn update_representation(&mut self, id: Uuid, repr: ObjectRepresentation) {
         if let Some(node) = self.nodes.get_mut(&id) {
@@ -252,39 +252,43 @@ impl HybridScene {
             node.last_updated = Instant::now();
         }
     }
-    
+
     /// Get all nodes
     pub fn nodes(&self) -> impl Iterator<Item = &HybridSceneNode> {
         self.nodes.values()
     }
-    
+
     /// Get mutable reference to all nodes
     pub fn nodes_mut(&mut self) -> impl Iterator<Item = &mut HybridSceneNode> {
         self.nodes.values_mut()
     }
-    
+
     /// Get nodes by representation type
     pub fn get_gaussian_nodes(&self) -> Vec<&HybridSceneNode> {
-        self.nodes.values()
+        self.nodes
+            .values()
             .filter(|n| matches!(n.representation, ObjectRepresentation::Gaussian4D { .. }))
             .collect()
     }
-    
+
     pub fn get_mesh_nodes(&self) -> Vec<&HybridSceneNode> {
-        self.nodes.values()
+        self.nodes
+            .values()
             .filter(|n| matches!(n.representation, ObjectRepresentation::Mesh { .. }))
             .collect()
     }
-    
+
     pub fn get_avatar_nodes(&self) -> Vec<&HybridSceneNode> {
-        self.nodes.values()
+        self.nodes
+            .values()
             .filter(|n| matches!(n.representation, ObjectRepresentation::Avatar { .. }))
             .collect()
     }
-    
+
     /// Get nodes that are candidates for meshification
     pub fn get_meshification_candidates(&self, stability_frames: usize) -> Vec<Uuid> {
-        self.nodes.values()
+        self.nodes
+            .values()
             .filter(|n| {
                 matches!(n.representation, ObjectRepresentation::Gaussian4D { .. })
                     && n.is_stable_for(stability_frames)
@@ -292,7 +296,7 @@ impl HybridScene {
             .map(|n| n.id)
             .collect()
     }
-    
+
     /// Count nodes by type
     pub fn stats(&self) -> SceneStats {
         let mut stats = SceneStats::default();
@@ -324,33 +328,33 @@ pub struct SceneStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_scene_creation() {
         let scene = HybridScene::new("Test Scene");
         assert_eq!(scene.name, "Test Scene");
         assert!(scene.nodes.is_empty());
     }
-    
+
     #[test]
     fn test_add_node() {
         let mut scene = HybridScene::new("Test");
         let node = HybridSceneNode::new("Object1", ObjectRepresentation::Pending);
         let id = scene.add_node(node);
-        
+
         assert!(scene.get_node(id).is_some());
         assert_eq!(scene.stats().total_nodes, 1);
     }
-    
+
     #[test]
     fn test_motion_score_smoothing() {
         let mut node = HybridSceneNode::new("Test", ObjectRepresentation::Pending);
-        
+
         // Simulate low motion
         for _ in 0..10 {
             node.update_motion_score(0.05);
         }
-        
+
         assert!(node.motion_score < 0.2);
         assert!(node.average_motion_score() < 0.1);
     }

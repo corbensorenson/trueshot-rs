@@ -6,10 +6,10 @@
 //! Uses the unified tracking module for BoundingBox3D, gaining IoU and other
 //! advanced methods not in the original implementation.
 
-use uuid::Uuid;
 use nalgebra as na;
+use uuid::Uuid;
 
-use crate::gaussian_splatting::gaussian_4d::{Gaussian4D, Dynamic4DScene};
+use crate::gaussian_splatting::gaussian_4d::{Dynamic4DScene, Gaussian4D};
 
 // Re-export unified BoundingBox3D from tracking module
 pub use crate::tracking::BoundingBox3D;
@@ -59,7 +59,7 @@ impl TrackedObject {
             frames_since_update: 0,
         }
     }
-    
+
     pub fn update(&mut self, segment: SegmentedObject, gaussians: Vec<Gaussian4D>) {
         self.previous_gaussians = self.get_current_gaussians_clone();
         self.current = segment;
@@ -70,17 +70,17 @@ impl TrackedObject {
         self.frames_tracked += 1;
         self.frames_since_update = 0;
     }
-    
+
     fn get_current_gaussians_clone(&self) -> Vec<Gaussian4D> {
         // This would normally reference the scene, simplified here
         Vec::new()
     }
-    
+
     /// Check if track is stale (not updated recently)
     pub fn is_stale(&self, max_frames: usize) -> bool {
         self.frames_since_update > max_frames
     }
-    
+
     /// Get velocity estimate from track history
     pub fn estimated_velocity(&self) -> na::Vector3<f32> {
         if self.track_history.len() < 2 {
@@ -119,26 +119,26 @@ impl ObjectSegmenter {
             max_objects,
         }
     }
-    
+
     /// Segment a scene into objects using spatial clustering
     pub fn segment_scene(&self, scene: &Dynamic4DScene) -> Vec<SegmentedObject> {
         let gaussians = &scene.gaussians;
         if gaussians.is_empty() {
             return Vec::new();
         }
-        
+
         // Simple DBSCAN-like clustering
         let mut visited = vec![false; gaussians.len()];
         let mut clusters: Vec<Vec<usize>> = Vec::new();
-        
+
         for i in 0..gaussians.len() {
             if visited[i] {
                 continue;
             }
-            
+
             let mut cluster = Vec::new();
             self.expand_cluster(gaussians, i, &mut cluster, &mut visited);
-            
+
             if cluster.len() >= self.min_gaussians {
                 clusters.push(cluster);
                 if clusters.len() >= self.max_objects {
@@ -146,14 +146,14 @@ impl ObjectSegmenter {
                 }
             }
         }
-        
+
         // Convert clusters to objects
         clusters
             .into_iter()
             .map(|indices| self.create_object(gaussians, indices))
             .collect()
     }
-    
+
     /// Expand cluster using region growing
     fn expand_cluster(
         &self,
@@ -163,21 +163,21 @@ impl ObjectSegmenter {
         visited: &mut [bool],
     ) {
         let mut stack = vec![start];
-        
+
         while let Some(idx) = stack.pop() {
             if visited[idx] {
                 continue;
             }
             visited[idx] = true;
             cluster.push(idx);
-            
+
             // Find neighbors
             let pos = na::Point3::new(
                 gaussians[idx].center.x,
                 gaussians[idx].center.y,
                 gaussians[idx].center.z,
             );
-            
+
             for (j, g) in gaussians.iter().enumerate() {
                 if visited[j] {
                     continue;
@@ -189,21 +189,21 @@ impl ObjectSegmenter {
             }
         }
     }
-    
+
     /// Create a SegmentedObject from cluster indices
     fn create_object(&self, gaussians: &[Gaussian4D], indices: Vec<usize>) -> SegmentedObject {
         let points = indices.iter().map(|&i| {
             let g = &gaussians[i];
             na::Point3::new(g.center.x, g.center.y, g.center.z)
         });
-        
+
         let bbox = BoundingBox3D::from_points(points.clone());
         let centroid = bbox.center();
-        
+
         // Estimate surface area from bounding box
         let s = bbox.size();
         let surface_area = 2.0 * (s.x * s.y + s.y * s.z + s.z * s.x);
-        
+
         SegmentedObject {
             id: Uuid::new_v4(),
             gaussian_indices: indices,
@@ -213,7 +213,7 @@ impl ObjectSegmenter {
             label: None,
         }
     }
-    
+
     /// Track objects across frames
     pub fn track_objects(
         &self,
@@ -222,16 +222,16 @@ impl ObjectSegmenter {
         scene: &Dynamic4DScene,
     ) {
         let mut matched = vec![false; curr_segments.len()];
-        
+
         // Match existing tracks to new segments
         for track in prev_tracks.iter_mut() {
             let mut best_match: Option<(usize, f32)> = None;
-            
+
             for (i, seg) in curr_segments.iter().enumerate() {
                 if matched[i] {
                     continue;
                 }
-                
+
                 let dist = na::distance(&track.current.centroid, &seg.centroid);
                 if dist < self.cluster_distance * 2.0 {
                     if best_match.map_or(true, |(_, d)| dist < d) {
@@ -239,7 +239,7 @@ impl ObjectSegmenter {
                     }
                 }
             }
-            
+
             if let Some((idx, _)) = best_match {
                 matched[idx] = true;
                 let gaussians: Vec<Gaussian4D> = curr_segments[idx]
@@ -252,14 +252,14 @@ impl ObjectSegmenter {
                 track.frames_since_update += 1;
             }
         }
-        
+
         // Create new tracks for unmatched segments
         for (i, seg) in curr_segments.into_iter().enumerate() {
             if !matched[i] {
                 prev_tracks.push(TrackedObject::new(seg));
             }
         }
-        
+
         // Remove stale tracks
         prev_tracks.retain(|t| !t.is_stale(10));
     }
@@ -268,7 +268,7 @@ impl ObjectSegmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_bounding_box() {
         let points = vec![
@@ -276,12 +276,12 @@ mod tests {
             na::Point3::new(1.0, 2.0, 3.0),
         ];
         let bbox = BoundingBox3D::from_points(points.into_iter());
-        
+
         assert_eq!(bbox.min, na::Point3::new(0.0, 0.0, 0.0));
         assert_eq!(bbox.max, na::Point3::new(1.0, 2.0, 3.0));
         assert_eq!(bbox.volume(), 6.0);
     }
-    
+
     #[test]
     fn test_segmenter_empty_scene() {
         let segmenter = ObjectSegmenter::default();

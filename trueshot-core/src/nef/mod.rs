@@ -1,9 +1,9 @@
-pub mod parser;
-pub mod raw_data;
-pub mod tiff;
 pub mod huffman;
 pub mod nikon_compression;
+pub mod parser;
 pub mod preview;
+pub mod raw_data;
+pub mod tiff;
 
 pub use parser::Z9NefParser;
 pub use raw_data::RawBuffer;
@@ -27,4 +27,4 @@ pub const TIFF_TAG_JPEG_INTERCHANGE_FORMAT_LENGTH: u16 = 514;
 // Nikon Specific Tags
 pub const NIKON_TAG_PREVIEW_IMAGE_START: u16 = 0x0201; // Just a guess if not found
 pub const NIKON_TAG_PREVIEW_IMAGE_LENGTH: u16 = 0x0202; // Just a guess
-// Actually, parser uses them, I should check parser lines for usage context if needed, but error said they are missing from super.
+                                                        // Actually, parser uses them, I should check parser lines for usage context if needed, but error said they are missing from super.

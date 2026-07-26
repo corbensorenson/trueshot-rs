@@ -7,8 +7,8 @@
 //! create a merged Bayer mosaic (which has discontinuities that confuse demosaicing).
 //! Instead, we accumulate Bayer pixels directly to RGB channels during fusion.
 
-use ndarray::{Array2, Array3};
 use anyhow::Result;
+use ndarray::{Array2, Array3};
 
 /// Get Bayer color channel for a pixel position (RGGB pattern)
 ///
@@ -16,9 +16,9 @@ use anyhow::Result;
 #[inline]
 pub fn get_bayer_color(y: usize, x: usize) -> usize {
     match (y % 2, x % 2) {
-        (0, 0) => 0,  // R at (even, even)
-        (0, 1) | (1, 0) => 1,  // G at (even, odd) and (odd, even)
-        (1, 1) => 2,  // B at (odd, odd)
+        (0, 0) => 0,          // R at (even, even)
+        (0, 1) | (1, 0) => 1, // G at (even, odd) and (odd, even)
+        (1, 1) => 2,          // B at (odd, odd)
         _ => unreachable!(),
     }
 }
@@ -89,7 +89,7 @@ pub fn joint_demosaic_with_focus_selection(
     // Soft blending parameters
     // blend_radius=0: hard selection (only best plane)
     // blend_radius=1: blend with ±1 adjacent focus planes (only at boundaries)
-    let blend_sigma = 0.8;  // Gaussian sigma for plane distance weighting
+    let blend_sigma = 0.8; // Gaussian sigma for plane distance weighting
 
     // Process each pixel
     let mut process_pixel = |y: usize, x: usize| {
@@ -102,7 +102,9 @@ pub fn joint_demosaic_with_focus_selection(
             let mut has_different_neighbor = false;
             for dy in -1..=1 {
                 for dx in -1..=1 {
-                    if dy == 0 && dx == 0 { continue; }
+                    if dy == 0 && dx == 0 {
+                        continue;
+                    }
                     let ny = (y as i32 + dy).max(0).min(height as i32 - 1) as usize;
                     let nx = (x as i32 + dx).max(0).min(width as i32 - 1) as usize;
                     if best_plane_map[[ny, nx]] != best_plane {
@@ -110,7 +112,9 @@ pub fn joint_demosaic_with_focus_selection(
                         break;
                     }
                 }
-                if has_different_neighbor { break; }
+                if has_different_neighbor {
+                    break;
+                }
             }
             has_different_neighbor
         } else {
@@ -123,7 +127,10 @@ pub fn joint_demosaic_with_focus_selection(
 
         // Blend with adjacent focus planes ONLY at boundaries
         let (plane_start, plane_end) = if is_boundary {
-            (best_plane.saturating_sub(blend_radius), (best_plane + blend_radius + 1).min(num_planes))
+            (
+                best_plane.saturating_sub(blend_radius),
+                (best_plane + blend_radius + 1).min(num_planes),
+            )
         } else {
             // Not at boundary: use only best plane (hard selection)
             (best_plane, best_plane + 1)
@@ -132,7 +139,8 @@ pub fn joint_demosaic_with_focus_selection(
         for plane_idx in plane_start..plane_end {
             // Compute Gaussian weight based on distance from best plane
             let plane_distance = (plane_idx as i32 - best_plane as i32).abs() as f64;
-            let plane_weight = (-plane_distance * plane_distance / (2.0 * blend_sigma * blend_sigma)).exp();
+            let plane_weight =
+                (-plane_distance * plane_distance / (2.0 * blend_sigma * blend_sigma)).exp();
 
             // Process all exposures in this focus plane
             let start_frame = plane_idx * num_exposures;
@@ -228,9 +236,10 @@ pub fn joint_demosaic_with_focus_selection(
 /// This is used for computing sharpness on demosaiced RGB instead of raw Bayer,
 /// which eliminates horizontal banding artifacts from Bayer pattern.
 pub fn demosaic_bayer_frame(
-    frame: &Array3<f64>,  // H×W×1 Bayer frame
-    wb_multipliers: &[f32; 4],  // White balance multipliers [R, G1, G2, B]
-) -> Result<Array3<f64>> {  // H×W×3 RGB frame
+    frame: &Array3<f64>,       // H×W×1 Bayer frame
+    wb_multipliers: &[f32; 4], // White balance multipliers [R, G1, G2, B]
+) -> Result<Array3<f64>> {
+    // H×W×3 RGB frame
     let (height, width, _) = frame.dim();
     let mut rgb = Array3::<f64>::zeros((height, width, 3));
 
@@ -279,7 +288,7 @@ fn get_rgb_from_bayer_frame(
     let direct_value = frame[[y, x, 0]];
 
     let mut rgb = [0.0, 0.0, 0.0];
-    rgb[color] = direct_value;  // Direct channel
+    rgb[color] = direct_value; // Direct channel
 
     // Interpolate the two missing channels using edge-directed interpolation
     match color {
@@ -329,30 +338,36 @@ fn compute_gradient(v1: f64, v2: f64, v3: f64) -> f64 {
 /// Interpolate green channel at red pixel position (edge-directed)
 /// At R pixel (even, even): need to interpolate G
 /// Uses gradient analysis to choose between horizontal and vertical interpolation
-fn interpolate_green_at_red_edge_directed(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_green_at_red_edge_directed(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
     let r_center = get_pixel(frame, yi, xi, height, width);
 
     // Get neighboring green pixels
-    let g_n = get_pixel(frame, yi-1, xi, height, width);  // North
-    let g_s = get_pixel(frame, yi+1, xi, height, width);  // South
-    let g_w = get_pixel(frame, yi, xi-1, height, width);  // West
-    let g_e = get_pixel(frame, yi, xi+1, height, width);  // East
+    let g_n = get_pixel(frame, yi - 1, xi, height, width); // North
+    let g_s = get_pixel(frame, yi + 1, xi, height, width); // South
+    let g_w = get_pixel(frame, yi, xi - 1, height, width); // West
+    let g_e = get_pixel(frame, yi, xi + 1, height, width); // East
 
     // Get neighboring red pixels for gradient computation
-    let r_n = get_pixel(frame, yi-2, xi, height, width);
-    let r_s = get_pixel(frame, yi+2, xi, height, width);
-    let r_w = get_pixel(frame, yi, xi-2, height, width);
-    let r_e = get_pixel(frame, yi, xi+2, height, width);
+    let r_n = get_pixel(frame, yi - 2, xi, height, width);
+    let r_s = get_pixel(frame, yi + 2, xi, height, width);
+    let r_w = get_pixel(frame, yi, xi - 2, height, width);
+    let r_e = get_pixel(frame, yi, xi + 2, height, width);
 
     // Compute gradients in vertical and horizontal directions
     let grad_v = compute_gradient(r_n, r_center, r_s) + (g_n - g_s).abs();
     let grad_h = compute_gradient(r_w, r_center, r_e) + (g_w - g_e).abs();
 
     // Edge-directed interpolation: use direction with smaller gradient
-    let threshold = 1.2;  // Threshold for choosing direction
+    let threshold = 1.2; // Threshold for choosing direction
 
     if grad_v < grad_h / threshold {
         // Vertical edge: interpolate vertically
@@ -372,23 +387,29 @@ fn interpolate_green_at_red_edge_directed(frame: &Array3<f64>, y: usize, x: usiz
 
 /// Interpolate blue channel at red pixel position (edge-directed diagonal)
 /// At R pixel (even, even): need to interpolate B (diagonal neighbors)
-fn interpolate_blue_at_red_edge_directed(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_blue_at_red_edge_directed(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
     let r_center = get_pixel(frame, yi, xi, height, width);
 
     // Get diagonal blue neighbors
-    let b_nw = get_pixel(frame, yi-1, xi-1, height, width);
-    let b_ne = get_pixel(frame, yi-1, xi+1, height, width);
-    let b_sw = get_pixel(frame, yi+1, xi-1, height, width);
-    let b_se = get_pixel(frame, yi+1, xi+1, height, width);
+    let b_nw = get_pixel(frame, yi - 1, xi - 1, height, width);
+    let b_ne = get_pixel(frame, yi - 1, xi + 1, height, width);
+    let b_sw = get_pixel(frame, yi + 1, xi - 1, height, width);
+    let b_se = get_pixel(frame, yi + 1, xi + 1, height, width);
 
     // Get diagonal red neighbors for gradient computation
-    let r_nw = get_pixel(frame, yi-2, xi-2, height, width);
-    let r_ne = get_pixel(frame, yi-2, xi+2, height, width);
-    let r_sw = get_pixel(frame, yi+2, xi-2, height, width);
-    let r_se = get_pixel(frame, yi+2, xi+2, height, width);
+    let r_nw = get_pixel(frame, yi - 2, xi - 2, height, width);
+    let r_ne = get_pixel(frame, yi - 2, xi + 2, height, width);
+    let r_sw = get_pixel(frame, yi + 2, xi - 2, height, width);
+    let r_se = get_pixel(frame, yi + 2, xi + 2, height, width);
 
     // Compute gradients along diagonals
     let grad_nw_se = compute_gradient(r_nw, r_center, r_se) + (b_nw - b_se).abs();
@@ -409,13 +430,20 @@ fn interpolate_blue_at_red_edge_directed(frame: &Array3<f64>, y: usize, x: usize
         let weight_ne_sw = 1.0 / (grad_ne_sw + 1e-10);
         let val_nw_se = (b_nw + b_se) / 2.0 + (2.0 * r_center - r_nw - r_se) / 4.0;
         let val_ne_sw = (b_ne + b_sw) / 2.0 + (2.0 * r_center - r_ne - r_sw) / 4.0;
-        ((weight_nw_se * val_nw_se + weight_ne_sw * val_ne_sw) / (weight_nw_se + weight_ne_sw)).max(0.0)
+        ((weight_nw_se * val_nw_se + weight_ne_sw * val_ne_sw) / (weight_nw_se + weight_ne_sw))
+            .max(0.0)
     }
 }
 
 /// Interpolate red channel at green pixel position (edge-directed)
 /// At G pixel: R is either horizontal or vertical depending on Bayer position
-fn interpolate_red_at_green_edge_directed(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_red_at_green_edge_directed(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
@@ -423,20 +451,38 @@ fn interpolate_red_at_green_edge_directed(frame: &Array3<f64>, y: usize, x: usiz
 
     if y % 2 == 0 {
         // G at (even, odd): R neighbors are horizontal (West/East)
-        let r_w = get_pixel(frame, yi, xi-1, height, width);
-        let r_e = get_pixel(frame, yi, xi+1, height, width);
-        ((r_w + r_e) / 2.0 + (g_center - (get_pixel(frame, yi, xi-2, height, width) + get_pixel(frame, yi, xi+2, height, width)) / 2.0) / 2.0).max(0.0)
+        let r_w = get_pixel(frame, yi, xi - 1, height, width);
+        let r_e = get_pixel(frame, yi, xi + 1, height, width);
+        ((r_w + r_e) / 2.0
+            + (g_center
+                - (get_pixel(frame, yi, xi - 2, height, width)
+                    + get_pixel(frame, yi, xi + 2, height, width))
+                    / 2.0)
+                / 2.0)
+            .max(0.0)
     } else {
         // G at (odd, even): R neighbors are vertical (North/South)
-        let r_n = get_pixel(frame, yi-1, xi, height, width);
-        let r_s = get_pixel(frame, yi+1, xi, height, width);
-        ((r_n + r_s) / 2.0 + (g_center - (get_pixel(frame, yi-2, xi, height, width) + get_pixel(frame, yi+2, xi, height, width)) / 2.0) / 2.0).max(0.0)
+        let r_n = get_pixel(frame, yi - 1, xi, height, width);
+        let r_s = get_pixel(frame, yi + 1, xi, height, width);
+        ((r_n + r_s) / 2.0
+            + (g_center
+                - (get_pixel(frame, yi - 2, xi, height, width)
+                    + get_pixel(frame, yi + 2, xi, height, width))
+                    / 2.0)
+                / 2.0)
+            .max(0.0)
     }
 }
 
 /// Interpolate blue channel at green pixel position (edge-directed)
 /// At G pixel: B is either horizontal or vertical depending on Bayer position
-fn interpolate_blue_at_green_edge_directed(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_blue_at_green_edge_directed(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
@@ -444,36 +490,54 @@ fn interpolate_blue_at_green_edge_directed(frame: &Array3<f64>, y: usize, x: usi
 
     if y % 2 == 0 {
         // G at (even, odd): B neighbors are vertical (North/South)
-        let b_n = get_pixel(frame, yi-1, xi, height, width);
-        let b_s = get_pixel(frame, yi+1, xi, height, width);
-        ((b_n + b_s) / 2.0 + (g_center - (get_pixel(frame, yi-2, xi, height, width) + get_pixel(frame, yi+2, xi, height, width)) / 2.0) / 2.0).max(0.0)
+        let b_n = get_pixel(frame, yi - 1, xi, height, width);
+        let b_s = get_pixel(frame, yi + 1, xi, height, width);
+        ((b_n + b_s) / 2.0
+            + (g_center
+                - (get_pixel(frame, yi - 2, xi, height, width)
+                    + get_pixel(frame, yi + 2, xi, height, width))
+                    / 2.0)
+                / 2.0)
+            .max(0.0)
     } else {
         // G at (odd, even): B neighbors are horizontal (West/East)
-        let b_w = get_pixel(frame, yi, xi-1, height, width);
-        let b_e = get_pixel(frame, yi, xi+1, height, width);
-        ((b_w + b_e) / 2.0 + (g_center - (get_pixel(frame, yi, xi-2, height, width) + get_pixel(frame, yi, xi+2, height, width)) / 2.0) / 2.0).max(0.0)
+        let b_w = get_pixel(frame, yi, xi - 1, height, width);
+        let b_e = get_pixel(frame, yi, xi + 1, height, width);
+        ((b_w + b_e) / 2.0
+            + (g_center
+                - (get_pixel(frame, yi, xi - 2, height, width)
+                    + get_pixel(frame, yi, xi + 2, height, width))
+                    / 2.0)
+                / 2.0)
+            .max(0.0)
     }
 }
 
 /// Interpolate red channel at blue pixel position (edge-directed diagonal)
 /// At B pixel (odd, odd): need to interpolate R (diagonal neighbors)
-fn interpolate_red_at_blue_edge_directed(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_red_at_blue_edge_directed(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
     let b_center = get_pixel(frame, yi, xi, height, width);
 
     // Get diagonal red neighbors
-    let r_nw = get_pixel(frame, yi-1, xi-1, height, width);
-    let r_ne = get_pixel(frame, yi-1, xi+1, height, width);
-    let r_sw = get_pixel(frame, yi+1, xi-1, height, width);
-    let r_se = get_pixel(frame, yi+1, xi+1, height, width);
+    let r_nw = get_pixel(frame, yi - 1, xi - 1, height, width);
+    let r_ne = get_pixel(frame, yi - 1, xi + 1, height, width);
+    let r_sw = get_pixel(frame, yi + 1, xi - 1, height, width);
+    let r_se = get_pixel(frame, yi + 1, xi + 1, height, width);
 
     // Get diagonal blue neighbors for gradient computation
-    let b_nw = get_pixel(frame, yi-2, xi-2, height, width);
-    let b_ne = get_pixel(frame, yi-2, xi+2, height, width);
-    let b_sw = get_pixel(frame, yi+2, xi-2, height, width);
-    let b_se = get_pixel(frame, yi+2, xi+2, height, width);
+    let b_nw = get_pixel(frame, yi - 2, xi - 2, height, width);
+    let b_ne = get_pixel(frame, yi - 2, xi + 2, height, width);
+    let b_sw = get_pixel(frame, yi + 2, xi - 2, height, width);
+    let b_se = get_pixel(frame, yi + 2, xi + 2, height, width);
 
     // Compute gradients along diagonals
     let grad_nw_se = compute_gradient(b_nw, b_center, b_se) + (r_nw - r_se).abs();
@@ -494,29 +558,36 @@ fn interpolate_red_at_blue_edge_directed(frame: &Array3<f64>, y: usize, x: usize
         let weight_ne_sw = 1.0 / (grad_ne_sw + 1e-10);
         let val_nw_se = (r_nw + r_se) / 2.0 + (2.0 * b_center - b_nw - b_se) / 4.0;
         let val_ne_sw = (r_ne + r_sw) / 2.0 + (2.0 * b_center - b_ne - b_sw) / 4.0;
-        ((weight_nw_se * val_nw_se + weight_ne_sw * val_ne_sw) / (weight_nw_se + weight_ne_sw)).max(0.0)
+        ((weight_nw_se * val_nw_se + weight_ne_sw * val_ne_sw) / (weight_nw_se + weight_ne_sw))
+            .max(0.0)
     }
 }
 
 /// Interpolate green channel at blue pixel position (edge-directed)
 /// At B pixel (odd, odd): need to interpolate G (same structure as G at R)
-fn interpolate_green_at_blue_edge_directed(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_green_at_blue_edge_directed(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
     let b_center = get_pixel(frame, yi, xi, height, width);
 
     // Get neighboring green pixels
-    let g_n = get_pixel(frame, yi-1, xi, height, width);
-    let g_s = get_pixel(frame, yi+1, xi, height, width);
-    let g_w = get_pixel(frame, yi, xi-1, height, width);
-    let g_e = get_pixel(frame, yi, xi+1, height, width);
+    let g_n = get_pixel(frame, yi - 1, xi, height, width);
+    let g_s = get_pixel(frame, yi + 1, xi, height, width);
+    let g_w = get_pixel(frame, yi, xi - 1, height, width);
+    let g_e = get_pixel(frame, yi, xi + 1, height, width);
 
     // Get neighboring blue pixels for gradient computation
-    let b_n = get_pixel(frame, yi-2, xi, height, width);
-    let b_s = get_pixel(frame, yi+2, xi, height, width);
-    let b_w = get_pixel(frame, yi, xi-2, height, width);
-    let b_e = get_pixel(frame, yi, xi+2, height, width);
+    let b_n = get_pixel(frame, yi - 2, xi, height, width);
+    let b_s = get_pixel(frame, yi + 2, xi, height, width);
+    let b_w = get_pixel(frame, yi, xi - 2, height, width);
+    let b_e = get_pixel(frame, yi, xi + 2, height, width);
 
     // Compute gradients in vertical and horizontal directions
     let grad_v = compute_gradient(b_n, b_center, b_s) + (g_n - g_s).abs();
@@ -547,35 +618,53 @@ fn interpolate_green_at_blue_edge_directed(frame: &Array3<f64>, y: usize, x: usi
 // ============================================================================
 
 /// Interpolate green at red pixel (simple bilinear)
-fn interpolate_green_at_red_bilinear(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_green_at_red_bilinear(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
     // Average of 4 neighboring green pixels (N, S, W, E)
-    let g_n = get_pixel(frame, yi-1, xi, height, width);
-    let g_s = get_pixel(frame, yi+1, xi, height, width);
-    let g_w = get_pixel(frame, yi, xi-1, height, width);
-    let g_e = get_pixel(frame, yi, xi+1, height, width);
+    let g_n = get_pixel(frame, yi - 1, xi, height, width);
+    let g_s = get_pixel(frame, yi + 1, xi, height, width);
+    let g_w = get_pixel(frame, yi, xi - 1, height, width);
+    let g_e = get_pixel(frame, yi, xi + 1, height, width);
 
     (g_n + g_s + g_w + g_e) / 4.0
 }
 
 /// Interpolate blue at red pixel (simple bilinear)
-fn interpolate_blue_at_red_bilinear(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_blue_at_red_bilinear(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
     // Average of 4 diagonal blue pixels (NW, NE, SW, SE)
-    let b_nw = get_pixel(frame, yi-1, xi-1, height, width);
-    let b_ne = get_pixel(frame, yi-1, xi+1, height, width);
-    let b_sw = get_pixel(frame, yi+1, xi-1, height, width);
-    let b_se = get_pixel(frame, yi+1, xi+1, height, width);
+    let b_nw = get_pixel(frame, yi - 1, xi - 1, height, width);
+    let b_ne = get_pixel(frame, yi - 1, xi + 1, height, width);
+    let b_sw = get_pixel(frame, yi + 1, xi - 1, height, width);
+    let b_se = get_pixel(frame, yi + 1, xi + 1, height, width);
 
     (b_nw + b_ne + b_sw + b_se) / 4.0
 }
 
 /// Interpolate red at green pixel (simple bilinear)
-fn interpolate_red_at_green_bilinear(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_red_at_green_bilinear(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
@@ -583,19 +672,25 @@ fn interpolate_red_at_green_bilinear(frame: &Array3<f64>, y: usize, x: usize, he
     // At Gb (odd row, even col): R is at N and S
     if y % 2 == 0 {
         // Gr: average horizontal neighbors
-        let r_w = get_pixel(frame, yi, xi-1, height, width);
-        let r_e = get_pixel(frame, yi, xi+1, height, width);
+        let r_w = get_pixel(frame, yi, xi - 1, height, width);
+        let r_e = get_pixel(frame, yi, xi + 1, height, width);
         (r_w + r_e) / 2.0
     } else {
         // Gb: average vertical neighbors
-        let r_n = get_pixel(frame, yi-1, xi, height, width);
-        let r_s = get_pixel(frame, yi+1, xi, height, width);
+        let r_n = get_pixel(frame, yi - 1, xi, height, width);
+        let r_s = get_pixel(frame, yi + 1, xi, height, width);
         (r_n + r_s) / 2.0
     }
 }
 
 /// Interpolate blue at green pixel (simple bilinear)
-fn interpolate_blue_at_green_bilinear(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_blue_at_green_bilinear(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
@@ -603,27 +698,33 @@ fn interpolate_blue_at_green_bilinear(frame: &Array3<f64>, y: usize, x: usize, h
     // At Gb (odd row, even col): B is at W and E
     if y % 2 == 0 {
         // Gr: average vertical neighbors
-        let b_n = get_pixel(frame, yi-1, xi, height, width);
-        let b_s = get_pixel(frame, yi+1, xi, height, width);
+        let b_n = get_pixel(frame, yi - 1, xi, height, width);
+        let b_s = get_pixel(frame, yi + 1, xi, height, width);
         (b_n + b_s) / 2.0
     } else {
         // Gb: average horizontal neighbors
-        let b_w = get_pixel(frame, yi, xi-1, height, width);
-        let b_e = get_pixel(frame, yi, xi+1, height, width);
+        let b_w = get_pixel(frame, yi, xi - 1, height, width);
+        let b_e = get_pixel(frame, yi, xi + 1, height, width);
         (b_w + b_e) / 2.0
     }
 }
 
 /// Interpolate red at blue pixel (simple bilinear)
-fn interpolate_red_at_blue_bilinear(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_red_at_blue_bilinear(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
     // Average of 4 diagonal red pixels (NW, NE, SW, SE)
-    let r_nw = get_pixel(frame, yi-1, xi-1, height, width);
-    let r_ne = get_pixel(frame, yi-1, xi+1, height, width);
-    let r_sw = get_pixel(frame, yi+1, xi-1, height, width);
-    let r_se = get_pixel(frame, yi+1, xi+1, height, width);
+    let r_nw = get_pixel(frame, yi - 1, xi - 1, height, width);
+    let r_ne = get_pixel(frame, yi - 1, xi + 1, height, width);
+    let r_sw = get_pixel(frame, yi + 1, xi - 1, height, width);
+    let r_se = get_pixel(frame, yi + 1, xi + 1, height, width);
 
     (r_nw + r_ne + r_sw + r_se) / 4.0
 }
@@ -651,16 +752,21 @@ fn compute_pixel_mertens_weight(
 }
 
 /// Interpolate green at blue pixel (simple bilinear)
-fn interpolate_green_at_blue_bilinear(frame: &Array3<f64>, y: usize, x: usize, height: usize, width: usize) -> f64 {
+fn interpolate_green_at_blue_bilinear(
+    frame: &Array3<f64>,
+    y: usize,
+    x: usize,
+    height: usize,
+    width: usize,
+) -> f64 {
     let yi = y as isize;
     let xi = x as isize;
 
     // Average of 4 neighboring green pixels (N, S, W, E)
-    let g_n = get_pixel(frame, yi-1, xi, height, width);
-    let g_s = get_pixel(frame, yi+1, xi, height, width);
-    let g_w = get_pixel(frame, yi, xi-1, height, width);
-    let g_e = get_pixel(frame, yi, xi+1, height, width);
+    let g_n = get_pixel(frame, yi - 1, xi, height, width);
+    let g_s = get_pixel(frame, yi + 1, xi, height, width);
+    let g_w = get_pixel(frame, yi, xi - 1, height, width);
+    let g_e = get_pixel(frame, yi, xi + 1, height, width);
 
     (g_n + g_s + g_w + g_e) / 4.0
 }
-

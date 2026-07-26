@@ -1,11 +1,9 @@
-use anyhow::Result;
-use std::path::PathBuf;
-use std::collections::HashMap;
-use nalgebra as na;
-use crate::reconstruction::multicam_sfm::{
-    SfmPipeline, SfmConfig, FeatureType, CameraPose,
-};
 use crate::intrinsics::estimate_intrinsics;
+use crate::reconstruction::multicam_sfm::{CameraPose, FeatureType, SfmConfig, SfmPipeline};
+use anyhow::Result;
+use nalgebra as na;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Represents the solved configuration of the scanner rig at a specific time (Angle 0).
 /// Camera poses are stored as camera-to-world transforms in the rig coordinate frame.
@@ -33,15 +31,17 @@ impl ScannerRig {
         let mut poses = Vec::with_capacity(self.camera_order.len());
         for name in &self.camera_order {
             if let Some(base_pose) = self.camera_poses.get(name) {
-                let rotation = na::UnitQuaternion::from_rotation_matrix(
-                    &na::Rotation3::from_matrix(
+                let rotation =
+                    na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_matrix(
                         &(rot_y * base_pose.rotation.to_rotation_matrix()).into_inner(),
-                    ),
-                );
+                    ));
                 let translation = rot_y * base_pose.translation;
                 poses.push(RigCameraPose {
                     name: name.clone(),
-                    pose: CameraPose { rotation, translation },
+                    pose: CameraPose {
+                        rotation,
+                        translation,
+                    },
                 });
             }
         }

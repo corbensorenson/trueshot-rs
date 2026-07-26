@@ -17,19 +17,23 @@ impl ClusterNode {
             service_type,
             &instance_name,
             &host_name,
-            "", 
+            "",
             port,
             &properties[..],
-        )?.enable_addr_auto();
+        )?
+        .enable_addr_auto();
 
         mdns.register(my_service)?;
         Ok(Self { mdns })
     }
 
     pub fn discover_peers(&self) -> Vec<String> {
-        let receiver = self.mdns.browse("_trueshot._tcp.local.").expect("Failed to browse");
+        let receiver = self
+            .mdns
+            .browse("_trueshot._tcp.local.")
+            .expect("Failed to browse");
         let mut peers = Vec::new();
-        
+
         let now = std::time::Instant::now();
         while now.elapsed() < Duration::from_secs(1) {
             if let Ok(event) = receiver.recv_timeout(Duration::from_millis(100)) {

@@ -3,8 +3,11 @@
 /// Based on LibRaw/dcraw implementation for Nikon NEF lossless compression.
 /// Reference: http://lclevy.free.fr/nef/nikon_compression.c
 use anyhow::{Context, Result};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::fs::File;
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 // use rayon::prelude::*; // Currently unused
 
 use super::huffman::{BitPumpMSB, HuffTable};
@@ -17,6 +20,240 @@ struct SelectiveRoi {
     end_row: u32,
     start_col: u32,
     end_col: u32,
+}
+
+const SEEK_INDEX_MAGIC: &[u8; 8] = b"TSNEFIDX";
+const SEEK_INDEX_VERSION: u32 = 1;
+pub const DEFAULT_SEEK_INDEX_STRIDE: u32 = 256;
+
+#[derive(Debug, Clone, Copy)]
+struct RowCheckpoint {
+    bit_offset: u64,
+    vpred: [[i32; 2]; 2],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ColumnCheckpoint {
+    bit_offset: u64,
+    hpred: [i32; 2],
+}
+
+/// Exact entropy-decoder checkpoints for random-access Nikon ROI decoding.
+///
+/// Rows carry the vertical predictors needed to begin decoding independently.
+/// Columns carry horizontal predictors at a fixed stride, so an ROI only scans
+/// from the nearest checkpoint to its right edge.
+#[derive(Debug, Clone)]
+pub struct NikonSeekIndex {
+    width: u32,
+    height: u32,
+    stride: u32,
+    compressed_len: u64,
+    bits_per_sample: u8,
+    ver0: u8,
+    ver1: u8,
+    rows: Vec<RowCheckpoint>,
+    columns: Vec<ColumnCheckpoint>,
+}
+
+impl NikonSeekIndex {
+    fn blocks_per_row(&self) -> usize {
+        self.width.saturating_sub(1).div_euclid(self.stride) as usize
+    }
+
+    fn is_compatible(
+        &self,
+        width: u32,
+        height: u32,
+        compressed_len: usize,
+        bits_per_sample: u8,
+        ver0: u8,
+        ver1: u8,
+    ) -> bool {
+        self.width == width
+            && self.height == height
+            && self.compressed_len == compressed_len as u64
+            && self.bits_per_sample == bits_per_sample
+            && self.ver0 == ver0
+            && self.ver1 == ver1
+            && self.rows.len() == height as usize
+            && self.columns.len() == self.blocks_per_row() * height as usize
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() < 32 {
+            anyhow::bail!("NEF seek index is truncated");
+        }
+
+        let payload_len = bytes.len() - 32;
+        let expected_digest = &bytes[payload_len..];
+        let actual_digest = Sha256::digest(&bytes[..payload_len]);
+        if actual_digest.as_slice() != expected_digest {
+            anyhow::bail!("NEF seek index checksum mismatch");
+        }
+
+        let mut reader = Cursor::new(&bytes[..payload_len]);
+        let mut magic = [0u8; 8];
+        reader.read_exact(&mut magic)?;
+        if &magic != SEEK_INDEX_MAGIC {
+            anyhow::bail!("Invalid NEF seek index magic");
+        }
+
+        let version = read_u32_le(&mut reader)?;
+        if version != SEEK_INDEX_VERSION {
+            anyhow::bail!("Unsupported NEF seek index version: {}", version);
+        }
+
+        let width = read_u32_le(&mut reader)?;
+        let height = read_u32_le(&mut reader)?;
+        let stride = read_u32_le(&mut reader)?;
+        if stride == 0 {
+            anyhow::bail!("NEF seek index has a zero column stride");
+        }
+        let compressed_len = read_u64_le(&mut reader)?;
+
+        let mut format = [0u8; 4];
+        reader.read_exact(&mut format)?;
+        let bits_per_sample = format[0];
+        let ver0 = format[1];
+        let ver1 = format[2];
+
+        let row_count = read_u32_le(&mut reader)? as usize;
+        let column_count = read_u64_le(&mut reader)? as usize;
+        let max_rows = height as usize;
+        let max_columns = max_rows
+            .checked_mul(width.saturating_sub(1).div_euclid(stride) as usize)
+            .context("NEF seek index dimensions overflow")?;
+        if row_count != max_rows || column_count != max_columns {
+            anyhow::bail!(
+                "NEF seek index checkpoint count mismatch: rows {}/{}, columns {}/{}",
+                row_count,
+                max_rows,
+                column_count,
+                max_columns
+            );
+        }
+
+        let mut rows = Vec::with_capacity(row_count);
+        for _ in 0..row_count {
+            let bit_offset = read_u64_le(&mut reader)?;
+            let mut vpred = [[0i32; 2]; 2];
+            for parity in &mut vpred {
+                for predictor in parity {
+                    *predictor = read_i32_le(&mut reader)?;
+                }
+            }
+            rows.push(RowCheckpoint { bit_offset, vpred });
+        }
+
+        let mut columns = Vec::with_capacity(column_count);
+        for _ in 0..column_count {
+            columns.push(ColumnCheckpoint {
+                bit_offset: read_u64_le(&mut reader)?,
+                hpred: [read_i32_le(&mut reader)?, read_i32_le(&mut reader)?],
+            });
+        }
+
+        if reader.position() as usize != payload_len {
+            anyhow::bail!("NEF seek index has trailing or malformed payload data");
+        }
+
+        Ok(Self {
+            width,
+            height,
+            stride,
+            compressed_len,
+            bits_per_sample,
+            ver0,
+            ver1,
+            rows,
+            columns,
+        })
+    }
+
+    pub fn save_atomic(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut payload = Vec::with_capacity(48 + self.rows.len() * 24 + self.columns.len() * 16);
+        payload.extend_from_slice(SEEK_INDEX_MAGIC);
+        payload.extend_from_slice(&SEEK_INDEX_VERSION.to_le_bytes());
+        payload.extend_from_slice(&self.width.to_le_bytes());
+        payload.extend_from_slice(&self.height.to_le_bytes());
+        payload.extend_from_slice(&self.stride.to_le_bytes());
+        payload.extend_from_slice(&self.compressed_len.to_le_bytes());
+        payload.extend_from_slice(&[self.bits_per_sample, self.ver0, self.ver1, 0]);
+        payload.extend_from_slice(&(self.rows.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&(self.columns.len() as u64).to_le_bytes());
+        for row in &self.rows {
+            payload.extend_from_slice(&row.bit_offset.to_le_bytes());
+            for parity in row.vpred {
+                for predictor in parity {
+                    payload.extend_from_slice(&predictor.to_le_bytes());
+                }
+            }
+        }
+        for column in &self.columns {
+            payload.extend_from_slice(&column.bit_offset.to_le_bytes());
+            payload.extend_from_slice(&column.hpred[0].to_le_bytes());
+            payload.extend_from_slice(&column.hpred[1].to_le_bytes());
+        }
+        let digest = Sha256::digest(&payload);
+        payload.extend_from_slice(&digest);
+
+        let suffix = format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let temp_path = path.with_extension(suffix);
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp_path)?;
+        file.write_all(&payload)?;
+        file.sync_all()?;
+
+        match std::fs::rename(&temp_path, path) {
+            Ok(()) => Ok(()),
+            Err(error) if path.exists() => {
+                let _ = std::fs::remove_file(&temp_path);
+                tracing::debug!("Another worker populated NEF seek index first: {}", error);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_path);
+                Err(error.into())
+            }
+        }
+    }
+}
+
+fn read_u32_le(reader: &mut impl Read) -> Result<u32> {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64_le(reader: &mut impl Read) -> Result<u64> {
+    let mut bytes = [0u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_i32_le(reader: &mut impl Read) -> Result<i32> {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(i32::from_le_bytes(bytes))
 }
 
 impl SelectiveRoi {
@@ -38,7 +275,7 @@ impl SelectiveRoi {
 pub enum NikonCompressionType {
     /// 12-bit lossy (ver0=0x44, ver1=0x10)
     Lossy12Bit,
-    /// 12-bit lossy type 2 (ver0=0x44, ver1=0x20) 
+    /// 12-bit lossy type 2 (ver0=0x44, ver1=0x20)
     Lossy12BitType2,
     /// 12-bit lossless (ver0=0x46, ver1=0x30)
     Lossless12Bit,
@@ -70,22 +307,42 @@ pub struct NikonCompressionMeta {
 /// These are the exact tables that dcraw uses for Z9 and other Nikon cameras
 const NIKON_HUFFMAN_TREES: [&[u8]; 6] = [
     // 12-bit lossy
-    &[0,1,5,1,1,1,1,1,1,2,0,0,0,0,0,0, 5,4,3,6,2,7,1,0,8,9,11,10,12],
+    &[
+        0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12,
+    ],
     // 12-bit lossy after split
-    &[0,1,5,1,1,1,1,1,1,2,0,0,0,0,0,0, 0x39,0x5a,0x38,0x27,0x16,5,4,3,2,1,0,11,12,12],
+    &[
+        0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0x39, 0x5a, 0x38, 0x27, 0x16, 5, 4, 3, 2,
+        1, 0, 11, 12, 12,
+    ],
     // 12-bit lossless
-    &[0,1,4,2,3,1,2,0,0,0,0,0,0,0,0,0, 5,4,6,3,7,2,8,1,9,0,10,11,12],
+    &[
+        0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12,
+    ],
     // 14-bit lossy
-    &[0,1,4,3,1,1,1,1,1,2,0,0,0,0,0,0, 5,6,4,7,8,3,9,2,1,0,10,11,12,13,14],
+    &[
+        0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12,
+        13, 14,
+    ],
     // 14-bit lossy after split
-    &[0,1,5,1,1,1,1,1,1,1,2,0,0,0,0,0, 8,0x5c,0x4b,0x3a,0x29,7,6,5,4,3,2,1,0,13,14],
+    &[
+        0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 8, 0x5c, 0x4b, 0x3a, 0x29, 7, 6, 5, 4, 3,
+        2, 1, 0, 13, 14,
+    ],
     // 14-bit lossless (Z9 uses this one!)
-    &[0,1,4,2,2,3,1,2,0,0,0,0,0,0,0,0, 7,6,8,5,9,4,10,3,11,12,2,0,1,13,14],
+    &[
+        0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1,
+        13, 14,
+    ],
 ];
 
 impl NikonCompressionMeta {
     /// Parse Nikon compression metadata from MakerNote tag 0x96
-    pub fn parse_from_makernote(reader: &mut BufReader<&mut File>, offset: u64, bits_per_sample: u8) -> Result<Self> {
+    pub fn parse_from_makernote(
+        reader: &mut BufReader<&mut File>,
+        offset: u64,
+        bits_per_sample: u8,
+    ) -> Result<Self> {
         reader.seek(SeekFrom::Start(offset))?;
 
         // Read version bytes
@@ -94,7 +351,11 @@ impl NikonCompressionMeta {
         let ver0 = version_bytes[0];
         let ver1 = version_bytes[1];
 
-        tracing::info!("Nikon compression version: ver0=0x{:02x}, ver1=0x{:02x}", ver0, ver1);
+        tracing::info!(
+            "Nikon compression version: ver0=0x{:02x}, ver1=0x{:02x}",
+            ver0,
+            ver1
+        );
 
         // Handle special case (maker variations)
         if ver0 == 0x49 || ver1 == 0x58 {
@@ -125,7 +386,12 @@ impl NikonCompressionMeta {
             (0x44, 0x20, 14) => NikonCompressionType::Lossy14BitType2,
             (0x46, 0x30, 14) => NikonCompressionType::Lossless14Bit,
             _ => {
-                tracing::warn!("Unknown Nikon compression type: ver0=0x{:02x}, ver1=0x{:02x}, bits={}", ver0, ver1, bits_per_sample);
+                tracing::warn!(
+                    "Unknown Nikon compression type: ver0=0x{:02x}, ver1=0x{:02x}, bits={}",
+                    ver0,
+                    ver1,
+                    bits_per_sample
+                );
                 NikonCompressionType::Lossless12Bit
             }
         };
@@ -146,7 +412,8 @@ impl NikonCompressionMeta {
         let mut huffman_bits: Vec<u8> = Vec::new();
         let mut huffman_values: Vec<u8> = Vec::new();
 
-        if ver0 != 0x46 { // For lossy modes, attempt to locate embedded Huffman tables
+        if ver0 != 0x46 {
+            // For lossy modes, attempt to locate embedded Huffman tables
             // Attempt to locate Huffman bit-counts (16 bytes) and values after the curve region
             // Strategy: scan a window after current position for a plausible 16-byte count table
             let scan_start = reader.stream_position()?; // current position after curve/size
@@ -155,19 +422,23 @@ impl NikonCompressionMeta {
             probe.truncate(read_len);
 
             fn valid_counts(counts: &[u8]) -> Option<usize> {
-                if counts.len() != 16 { return None; }
+                if counts.len() != 16 {
+                    return None;
+                }
                 let s: usize = counts.iter().map(|&c| c as usize).sum();
-                if s == 0 || s > 32 { return None; }
+                if s == 0 || s > 32 {
+                    return None;
+                }
                 Some(s)
             }
 
             let mut found = false;
             for i in 0..probe.len().saturating_sub(16) {
-                if let Some(sym_count) = valid_counts(&probe[i..i+16]) {
+                if let Some(sym_count) = valid_counts(&probe[i..i + 16]) {
                     if i + 16 + sym_count <= probe.len() {
-                        let vals = &probe[i+16..i+16+sym_count];
+                        let vals = &probe[i + 16..i + 16 + sym_count];
                         if vals.iter().all(|&v| v <= 14) {
-                            huffman_bits = probe[i..i+16].to_vec();
+                            huffman_bits = probe[i..i + 16].to_vec();
                             huffman_values = vals.to_vec();
                             found = true;
                             tracing::info!("Found Huffman table in MakerNote: counts_sum={} at +{} bytes after table offset", sym_count, i);
@@ -181,10 +452,14 @@ impl NikonCompressionMeta {
             reader.seek(SeekFrom::Start(scan_start + read_len as u64))?;
 
             if !found {
-                anyhow::bail!("Failed to locate Nikon Huffman tables in MakerNote tag 0x0096 (lossy mode)");
+                anyhow::bail!(
+                    "Failed to locate Nikon Huffman tables in MakerNote tag 0x0096 (lossy mode)"
+                );
             }
         } else {
-            tracing::info!("Lossless 0x46/0x30: using Nikon fixed Huffman tree (not stored in MakerNote)");
+            tracing::info!(
+                "Lossless 0x46/0x30: using Nikon fixed Huffman tree (not stored in MakerNote)"
+            );
         }
 
         // For lossy type2, interpolate curve and read split if needed
@@ -199,7 +474,8 @@ impl NikonCompressionMeta {
                     let base_val = curve[base_idx] as i32;
                     let next_val = curve[next_idx] as i32;
                     let offset = (i - base_idx) as i32;
-                    curve[i] = ((base_val * (step as i32 - offset) + next_val * offset) / step as i32) as u16;
+                    curve[i] = ((base_val * (step as i32 - offset) + next_val * offset)
+                        / step as i32) as u16;
                 }
             }
             // Split value is specific; best-effort not implemented here
@@ -208,8 +484,13 @@ impl NikonCompressionMeta {
             (None, None)
         };
 
-        tracing::info!("Compression type: {:?}, curve_len={}, huff_bits_len={}, huff_vals_len={} ",
-                   compression_type, curve.len(), huffman_bits.len(), huffman_values.len());
+        tracing::info!(
+            "Compression type: {:?}, curve_len={}, huff_bits_len={}, huff_vals_len={} ",
+            compression_type,
+            curve.len(),
+            huffman_bits.len(),
+            huffman_values.len()
+        );
 
         Ok(NikonCompressionMeta {
             compression_type,
@@ -224,7 +505,7 @@ impl NikonCompressionMeta {
             huffman_values,
         })
     }
-    
+
     /// Get the appropriate Huffman tree index for this compression type
     pub fn get_huffman_tree_index(&self) -> usize {
         match self.compression_type {
@@ -254,35 +535,59 @@ impl NikonDecompressor {
     pub fn new(meta: NikonCompressionMeta) -> Self {
         Self { meta }
     }
-    
+
     /// Decompress Nikon compressed RAW data
-    pub fn decompress(&self, compressed_data: &[u8], width: u32, height: u32,
-                     left_margin: u32, bbox: Option<crate::object_detection::BoundingBox>,
-                     output: &mut RawBuffer) -> Result<()> {
-        tracing::info!("Starting Nikon decompression: {}x{}, {} bits", width, height, self.meta.bits_per_sample);
-        
+    pub fn decompress(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        left_margin: u32,
+        bbox: Option<crate::object_detection::BoundingBox>,
+        output: &mut RawBuffer,
+    ) -> Result<()> {
+        tracing::info!(
+            "Starting Nikon decompression: {}x{}, {} bits",
+            width,
+            height,
+            self.meta.bits_per_sample
+        );
+
         // Create bit pump for reading compressed data
         let _pump = BitPumpMSB::new(compressed_data);
 
         // Debug: Show first 16 bytes of compressed data
         let preview_len = compressed_data.len().min(16);
-        let preview: Vec<String> = compressed_data[..preview_len].iter().map(|b| format!("{:02x}", b)).collect();
-        tracing::info!("First {} bytes of compressed data: {}", preview_len, preview.join(" "));
-        
+        let preview: Vec<String> = compressed_data[..preview_len]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        tracing::info!(
+            "First {} bytes of compressed data: {}",
+            preview_len,
+            preview.join(" ")
+        );
+
         // Check if this is actually packed data instead of Huffman compressed
         let expected_packed_size = (width as u64 * height as u64 * 14).div_ceil(8) as usize;
         let expected_12bit_packed = (width as u64 * height as u64 * 12).div_ceil(8) as usize;
 
-        tracing::info!("Compressed data size: {}, expected 14-bit packed: {}, expected 12-bit packed: {}",
-                  compressed_data.len(), expected_packed_size, expected_12bit_packed);
+        tracing::info!(
+            "Compressed data size: {}, expected 14-bit packed: {}, expected 12-bit packed: {}",
+            compressed_data.len(),
+            expected_packed_size,
+            expected_12bit_packed
+        );
 
         // Check if this matches packed format
-        if compressed_data.len() == expected_packed_size ||
-           (compressed_data.len() as f64 / expected_packed_size as f64 - 1.0).abs() < 0.1 {
+        if compressed_data.len() == expected_packed_size
+            || (compressed_data.len() as f64 / expected_packed_size as f64 - 1.0).abs() < 0.1
+        {
             tracing::info!("Data size matches 14-bit packed format - using packed loader");
             return self.load_packed_14bit(compressed_data, width, height, left_margin, output);
-        } else if compressed_data.len() == expected_12bit_packed ||
-                  (compressed_data.len() as f64 / expected_12bit_packed as f64 - 1.0).abs() < 0.1 {
+        } else if compressed_data.len() == expected_12bit_packed
+            || (compressed_data.len() as f64 / expected_12bit_packed as f64 - 1.0).abs() < 0.1
+        {
             tracing::info!("Data size matches 12-bit packed format - using packed loader");
             return self.load_packed_12bit(compressed_data, width, height, left_margin, output);
         }
@@ -292,7 +597,7 @@ impl NikonDecompressor {
         // Create LibRaw-compatible Huffman decoder
         let tree_index = self.meta.get_huffman_tree_index();
         tracing::info!("Using LibRaw-compatible Huffman tree index: {}", tree_index);
-        
+
         // Initialize predictors (exact dcraw logic)
         let vpred = self.meta.vpred;
         let _hpred = [0u16; 2];
@@ -301,11 +606,22 @@ impl NikonDecompressor {
         let _min_value = 0u16;
 
         tracing::info!("Initial vpred: {:?}", vpred);
-        tracing::info!("Max value: {}, bits: {}", max_value, self.meta.bits_per_sample);
+        tracing::info!(
+            "Max value: {}, bits: {}",
+            max_value,
+            self.meta.bits_per_sample
+        );
 
         // Implement selective loading with proper prediction state management
-        self.decompress_with_selective_loading(compressed_data, width, height, left_margin, bbox, output)?;
-        
+        self.decompress_with_selective_loading(
+            compressed_data,
+            width,
+            height,
+            left_margin,
+            bbox,
+            output,
+        )?;
+
         tracing::info!("Nikon decompression completed successfully");
         Ok(())
     }
@@ -328,7 +644,13 @@ impl NikonDecompressor {
             let end_row = (bbox.y + bbox.height).min(height);
             let start_col = bbox.x;
             let end_col = (bbox.x + bbox.width).min(width);
-            tracing::info!("ROI: rows {}-{}, cols {}-{}", start_row, end_row, start_col, end_col);
+            tracing::info!(
+                "ROI: rows {}-{}, cols {}-{}",
+                start_row,
+                end_row,
+                start_col,
+                end_col
+            );
             (start_row, end_row, start_col, end_col)
         } else {
             tracing::info!("No bbox provided, processing full image");
@@ -360,8 +682,12 @@ impl NikonDecompressor {
         output.width = roi_width;
         output.height = roi_height;
 
-        tracing::info!("Processing {} rows to reach ROI, then extracting {} x {} pixels",
-                  roi_start_row, roi_width, roi_height);
+        tracing::info!(
+            "Processing {} rows to reach ROI, then extracting {} x {} pixels",
+            roi_start_row,
+            roi_width,
+            roi_height
+        );
 
         // Process rows from top to maintain prediction state
         for row in 0..height {
@@ -392,8 +718,7 @@ impl NikonDecompressor {
                     hpred[col as usize] = vpred[row as usize & 1][col as usize];
                     vpred[row as usize & 1][col as usize]
                 } else {
-                    hpred[col as usize & 1] =
-                        (hpred[col as usize & 1] as i32 + diff) as u16;
+                    hpred[col as usize & 1] = (hpred[col as usize & 1] as i32 + diff) as u16;
                     hpred[col as usize & 1]
                 };
 
@@ -414,11 +739,18 @@ impl NikonDecompressor {
 
             // Log progress for ROI rows (less frequent for better performance)
             if is_roi_row && row % 500 == 0 {
-                tracing::info!("Processed ROI row {}/{}", row - roi_start_row + 1, roi_height);
+                tracing::info!(
+                    "Processed ROI row {}/{}",
+                    row - roi_start_row + 1,
+                    roi_height
+                );
             }
         }
 
-        tracing::info!("Selective decompression completed: {} pixels extracted", roi_pixels);
+        tracing::info!(
+            "Selective decompression completed: {} pixels extracted",
+            roi_pixels
+        );
         Ok(())
     }
 
@@ -428,9 +760,374 @@ impl NikonDecompressor {
         huff_table.nikon_huff_decode(pump)
     }
 
+    /// Build an exact seek index while extracting the requested ROI in the same pass.
+    ///
+    /// This is the cold-cache path. It performs the unavoidable first entropy scan
+    /// once, emits the requested pixels, and records enough state for future random
+    /// ROI reads to avoid all unrelated rows and most unrelated columns.
+    pub fn build_seek_index_and_extract(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        bbox: crate::object_detection::BoundingBox,
+        stride: u32,
+    ) -> Result<(NikonSeekIndex, Vec<u16>)> {
+        let roi = Self::validated_roi(width, height, bbox)?;
+        let stride = stride.clamp(32, width.max(32));
+        let tree = self.build_huffman_tree_from_meta()?;
+        let huff_table = self.create_libraw_huffman_decoder(&tree)?;
+        let mut bit_reader = LibRawBitReader::new(compressed_data);
+        let mut vpred = [
+            [self.meta.vpred[0][0] as i32, self.meta.vpred[0][1] as i32],
+            [self.meta.vpred[1][0] as i32, self.meta.vpred[1][1] as i32],
+        ];
+        let blocks_per_row = width.saturating_sub(1).div_euclid(stride) as usize;
+        let mut rows = Vec::with_capacity(height as usize);
+        let mut columns = Vec::with_capacity(height as usize * blocks_per_row);
+        let mut image = vec![0u16; roi.pixels()];
+
+        for row in 0..height {
+            rows.push(RowCheckpoint {
+                bit_offset: bit_reader.bit_position() as u64,
+                vpred,
+            });
+            let mut hpred = [0i32; 2];
+            let is_roi_row = row >= roi.start_row && row < roi.end_row;
+
+            for col in 0..width {
+                if col > 0 && col % stride == 0 {
+                    columns.push(ColumnCheckpoint {
+                        bit_offset: bit_reader.bit_position() as u64,
+                        hpred,
+                    });
+                }
+
+                let final_value = self.decode_pixel(
+                    &mut bit_reader,
+                    &huff_table,
+                    row,
+                    col,
+                    &mut vpred,
+                    &mut hpred,
+                )?;
+
+                if is_roi_row && col >= roi.start_col && col < roi.end_col {
+                    let roi_row = row - roi.start_row;
+                    let roi_col = col - roi.start_col;
+                    image[(roi_row * roi.width() + roi_col) as usize] = final_value;
+                }
+            }
+        }
+
+        let index = NikonSeekIndex {
+            width,
+            height,
+            stride,
+            compressed_len: compressed_data.len() as u64,
+            bits_per_sample: self.meta.bits_per_sample,
+            ver0: self.meta.ver0,
+            ver1: self.meta.ver1,
+            rows,
+            columns,
+        };
+
+        Ok((index, image))
+    }
+
+    /// Build a reusable seek index without allocating a full decoded image.
+    pub fn build_seek_index(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> Result<NikonSeekIndex> {
+        let sentinel = crate::object_detection::BoundingBox {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        self.build_seek_index_and_extract(compressed_data, width, height, sentinel, stride)
+            .map(|(index, _)| index)
+    }
+
+    /// Decode only the entropy blocks intersecting an ROI using exact checkpoints.
+    pub fn decompress_selective_from_index(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        bbox: crate::object_detection::BoundingBox,
+        index: &NikonSeekIndex,
+    ) -> Result<Vec<u16>> {
+        if !index.is_compatible(
+            width,
+            height,
+            compressed_data.len(),
+            self.meta.bits_per_sample,
+            self.meta.ver0,
+            self.meta.ver1,
+        ) {
+            anyhow::bail!("NEF seek index does not match compressed image");
+        }
+
+        let roi = Self::validated_roi(width, height, bbox)?;
+        let tree = self.build_huffman_tree_from_meta()?;
+        let huff_table = self.create_libraw_huffman_decoder(&tree)?;
+        let mut image = vec![0u16; roi.pixels()];
+        let roi_width = roi.width() as usize;
+        let blocks_per_row = index.blocks_per_row();
+
+        image.par_chunks_mut(roi_width).enumerate().try_for_each(
+            |(roi_row, output_row)| -> Result<()> {
+                let row = roi.start_row + roi_row as u32;
+                let checkpoint_col = (roi.start_col / index.stride) * index.stride;
+                let row_checkpoint = index.rows[row as usize];
+
+                let (bit_offset, mut hpred) = if checkpoint_col == 0 {
+                    (row_checkpoint.bit_offset, [0i32; 2])
+                } else {
+                    let block = checkpoint_col / index.stride - 1;
+                    let checkpoint = index.columns[row as usize * blocks_per_row + block as usize];
+                    (checkpoint.bit_offset, checkpoint.hpred)
+                };
+
+                let mut bit_reader =
+                    LibRawBitReader::new_at_bit(compressed_data, bit_offset as usize)?;
+                let mut vpred = row_checkpoint.vpred;
+                for col in checkpoint_col..roi.end_col {
+                    let final_value = self.decode_pixel(
+                        &mut bit_reader,
+                        &huff_table,
+                        row,
+                        col,
+                        &mut vpred,
+                        &mut hpred,
+                    )?;
+                    if col >= roi.start_col {
+                        output_row[(col - roi.start_col) as usize] = final_value;
+                    }
+                }
+                Ok(())
+            },
+        )?;
+
+        Ok(image)
+    }
+
+    /// One-shot ROI decode for large collections.
+    ///
+    /// Nikon's predictive entropy stream cannot be entered at an arbitrary byte
+    /// without prior predictor state. This path therefore performs the minimum
+    /// legal forward scan: it consumes preceding symbols, reconstructs only the
+    /// predictors that affect the ROI, and stops at the ROI's final pixel.
+    pub fn decompress_selective_streaming_into(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        bbox: crate::object_detection::BoundingBox,
+        image: &mut [u16],
+    ) -> Result<()> {
+        let roi = Self::validated_roi(width, height, bbox)?;
+        if image.len() != roi.pixels() {
+            anyhow::bail!(
+                "NEF ROI destination has {} pixels; expected {}",
+                image.len(),
+                roi.pixels()
+            );
+        }
+        if roi.start_row == 0 && roi.end_row == height && roi.start_col == 0 && roi.end_col == width
+        {
+            let decoded =
+                self.decompress_selective_standard(compressed_data, width, height, roi)?;
+            image.copy_from_slice(&decoded);
+            return Ok(());
+        }
+
+        let tree = self.build_huffman_tree_from_meta()?;
+        let huff_table = self.create_libraw_huffman_decoder(&tree)?;
+        let mut bit_reader = LibRawBitReader::new(compressed_data);
+        let mut vpred = [
+            [self.meta.vpred[0][0] as i32, self.meta.vpred[0][1] as i32],
+            [self.meta.vpred[1][0] as i32, self.meta.vpred[1][1] as i32],
+        ];
+        for row in 0..roi.end_row {
+            let is_roi_row = row >= roi.start_row;
+            let mut hpred = [0i32; 2];
+
+            if !is_roi_row {
+                // Only the first two values update state needed by later rows.
+                for col in 0..width.min(2) {
+                    self.decode_predicted(
+                        &mut bit_reader,
+                        &huff_table,
+                        row,
+                        col,
+                        &mut vpred,
+                        &mut hpred,
+                    )?;
+                }
+                for _ in 2..width {
+                    Self::consume_encoded_difference(&mut bit_reader, &huff_table)?;
+                }
+                continue;
+            }
+
+            // Horizontal prediction requires decoding from the start of each ROI
+            // row, but curve application and writes are limited to ROI pixels.
+            for col in 0..roi.end_col {
+                let clamped = self.decode_predicted(
+                    &mut bit_reader,
+                    &huff_table,
+                    row,
+                    col,
+                    &mut vpred,
+                    &mut hpred,
+                )?;
+                if col >= roi.start_col {
+                    let roi_row = row - roi.start_row;
+                    let roi_col = col - roi.start_col;
+                    image[(roi_row * roi.width() + roi_col) as usize] = self
+                        .meta
+                        .curve
+                        .get(clamped as usize)
+                        .copied()
+                        .unwrap_or(clamped);
+                }
+            }
+
+            if row + 1 == roi.end_row {
+                break;
+            }
+            for _ in roi.end_col..width {
+                Self::consume_encoded_difference(&mut bit_reader, &huff_table)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validated_roi(
+        width: u32,
+        height: u32,
+        bbox: crate::object_detection::BoundingBox,
+    ) -> Result<SelectiveRoi> {
+        let start_row = bbox.y.min(height);
+        let end_row = bbox.y.saturating_add(bbox.height).min(height);
+        let start_col = bbox.x.min(width);
+        let end_col = bbox.x.saturating_add(bbox.width).min(width);
+        if start_row >= end_row || start_col >= end_col {
+            anyhow::bail!(
+                "ROI is empty or outside image: ({}, {}) {}x{} for {}x{}",
+                bbox.x,
+                bbox.y,
+                bbox.width,
+                bbox.height,
+                width,
+                height
+            );
+        }
+        Ok(SelectiveRoi {
+            start_row,
+            end_row,
+            start_col,
+            end_col,
+        })
+    }
+
+    #[inline(always)]
+    fn decode_pixel(
+        &self,
+        bit_reader: &mut LibRawBitReader<'_>,
+        huff_table: &LibRawHuffmanTable,
+        row: u32,
+        col: u32,
+        vpred: &mut [[i32; 2]; 2],
+        hpred: &mut [i32; 2],
+    ) -> Result<u16> {
+        let clamped = self.decode_predicted(bit_reader, huff_table, row, col, vpred, hpred)?;
+        Ok(self
+            .meta
+            .curve
+            .get(clamped as usize)
+            .copied()
+            .unwrap_or(clamped))
+    }
+
+    #[inline(always)]
+    fn decode_predicted(
+        &self,
+        bit_reader: &mut LibRawBitReader<'_>,
+        huff_table: &LibRawHuffmanTable,
+        row: u32,
+        col: u32,
+        vpred: &mut [[i32; 2]; 2],
+        hpred: &mut [i32; 2],
+    ) -> Result<u16> {
+        let diff = Self::decode_difference(bit_reader, huff_table)?;
+        let predicted = if col < 2 {
+            let predictor = &mut vpred[(row & 1) as usize][col as usize];
+            *predictor += diff;
+            hpred[col as usize] = *predictor;
+            *predictor
+        } else {
+            hpred[(col & 1) as usize] += diff;
+            hpred[(col & 1) as usize]
+        };
+        Ok(predicted.clamp(0, (1 << self.meta.bits_per_sample) - 1) as u16)
+    }
+
+    #[inline(always)]
+    fn decode_difference(
+        bit_reader: &mut LibRawBitReader<'_>,
+        huff_table: &LibRawHuffmanTable,
+    ) -> Result<i32> {
+        let symbol = bit_reader.gethuff(huff_table)?;
+        let len = symbol & 15;
+        let shl = symbol >> 4;
+        let mut diff = if len > shl {
+            let bits = bit_reader.getbits((len - shl) as i32)?;
+            (((bits << 1) + 1) << shl >> 1) as i32
+        } else {
+            0
+        };
+        if len > 0 && (diff & (1 << (len - 1))) == 0 {
+            diff -= (1 << len) - if shl == 0 { 1 } else { 0 };
+        }
+        Ok(diff)
+    }
+
+    #[inline(always)]
+    fn consume_encoded_difference(
+        bit_reader: &mut LibRawBitReader<'_>,
+        huff_table: &LibRawHuffmanTable,
+    ) -> Result<()> {
+        let symbol = bit_reader.gethuff(huff_table)?;
+        let len = symbol & 15;
+        let shl = symbol >> 4;
+        if len > shl {
+            bit_reader.skipbits((len - shl) as i32)?;
+        }
+        Ok(())
+    }
+
     /// LibRaw nikon_load_raw implementation with selective loading support
-    pub fn decompress_selective(&self, compressed_data: &[u8], width: u32, height: u32, bbox: Option<crate::object_detection::BoundingBox>) -> Result<Vec<u16>> {
-        tracing::info!("Starting selective decompression: {}x{}, {} bits", width, height, self.meta.bits_per_sample);
+    pub fn decompress_selective(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        bbox: Option<crate::object_detection::BoundingBox>,
+    ) -> Result<Vec<u16>> {
+        tracing::info!(
+            "Starting selective decompression: {}x{}, {} bits",
+            width,
+            height,
+            self.meta.bits_per_sample
+        );
 
         // Determine ROI
         let (roi_start_row, roi_end_row, roi_start_col, roi_end_col) = if let Some(bbox) = bbox {
@@ -438,8 +1135,22 @@ impl NikonDecompressor {
             let end_row = (bbox.y + bbox.height).min(height);
             let start_col = bbox.x;
             let end_col = (bbox.x + bbox.width).min(width);
-            tracing::info!("ROI: rows {}-{} (of {}), cols {}-{} (of {})", start_row, end_row, height, start_col, end_col, width);
-            tracing::info!("bbox: x={}, y={}, w={}, h={}", bbox.x, bbox.y, bbox.width, bbox.height);
+            tracing::info!(
+                "ROI: rows {}-{} (of {}), cols {}-{} (of {})",
+                start_row,
+                end_row,
+                height,
+                start_col,
+                end_col,
+                width
+            );
+            tracing::info!(
+                "bbox: x={}, y={}, w={}, h={}",
+                bbox.x,
+                bbox.y,
+                bbox.width,
+                bbox.height
+            );
             (start_row, end_row, start_col, end_col)
         } else {
             tracing::info!("No bbox provided, processing full image");
@@ -452,7 +1163,12 @@ impl NikonDecompressor {
         let roi_pixels = (roi_width * roi_height) as usize;
         let _image = vec![0u16; roi_pixels];
 
-        tracing::info!("ROI dimensions: {}x{} = {} pixels", roi_width, roi_height, roi_pixels);
+        tracing::info!(
+            "ROI dimensions: {}x{} = {} pixels",
+            roi_width,
+            roi_height,
+            roi_pixels
+        );
 
         // Smart strategy: Try optimized version first for performance, fall back if needed
         let roi_coverage = (roi_height as f32 / height as f32) * (roi_width as f32 / width as f32);
@@ -468,8 +1184,11 @@ impl NikonDecompressor {
         // DISABLED: Optimized version is broken - it only returns data in first row
         // Always use standard decompression which maintains proper decoder state
         if false && skip_ratio > 0.3 && roi_coverage < 0.5 {
-            tracing::info!("ROI coverage {:.1}%, skip ratio {:.1}% - trying optimized decompression first",
-                      roi_coverage * 100.0, skip_ratio * 100.0);
+            tracing::info!(
+                "ROI coverage {:.1}%, skip ratio {:.1}% - trying optimized decompression first",
+                roi_coverage * 100.0,
+                skip_ratio * 100.0
+            );
 
             match self.decompress_selective_optimized(compressed_data, width, height, roi) {
                 Ok(result) => {
@@ -477,7 +1196,10 @@ impl NikonDecompressor {
                     return Ok(result);
                 }
                 Err(e) => {
-                    tracing::warn!("⚠️  Optimized decompression failed: {} - falling back to standard", e);
+                    tracing::warn!(
+                        "⚠️  Optimized decompression failed: {} - falling back to standard",
+                        e
+                    );
                 }
             }
         }
@@ -487,7 +1209,13 @@ impl NikonDecompressor {
     }
 
     /// Standard selective decompression (processes all rows to maintain prediction state)
-    fn decompress_selective_standard(&self, compressed_data: &[u8], width: u32, height: u32, roi: SelectiveRoi) -> Result<Vec<u16>> {
+    fn decompress_selective_standard(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        roi: SelectiveRoi,
+    ) -> Result<Vec<u16>> {
         let mut image = vec![0u16; roi.pixels()];
 
         // Build LibRaw-compatible Huffman table
@@ -502,7 +1230,12 @@ impl NikonDecompressor {
         let mut hpred = [0i32; 2];
         let bits = self.meta.bits_per_sample;
 
-        tracing::info!("Standard decompression: processing {} rows total (ROI rows {}-{})", height, roi.start_row, roi.end_row);
+        tracing::info!(
+            "Standard decompression: processing {} rows total (ROI rows {}-{})",
+            height,
+            roi.start_row,
+            roi.end_row
+        );
 
         let mut roi_rows_processed = 0;
         // Process rows from top to maintain prediction state
@@ -543,11 +1276,12 @@ impl NikonDecompressor {
 
                 // Apply linearization curve (CRITICAL: fixes grid artifacts!)
                 let curve_index = clamped_value as usize;
-                let final_value = if curve_index < self.meta.curve.len() && !self.meta.curve.is_empty() {
-                    self.meta.curve[curve_index]
-                } else {
-                    clamped_value
-                };
+                let final_value =
+                    if curve_index < self.meta.curve.len() && !self.meta.curve.is_empty() {
+                        self.meta.curve[curve_index]
+                    } else {
+                        clamped_value
+                    };
 
                 // Store pixel if it's in our ROI
                 if is_roi_row && col >= roi.start_col && col < roi.end_col {
@@ -566,14 +1300,19 @@ impl NikonDecompressor {
 
         // DEBUG: Check for grid pattern in decompressed Bayer data
         if roi.width() >= 10 && roi.height() >= 10 {
-            tracing::info!("=== Checking decompressed Bayer for grid pattern (10x10 region at start) ===");
+            tracing::info!(
+                "=== Checking decompressed Bayer for grid pattern (10x10 region at start) ==="
+            );
             for y in 0..10.min(roi.height() as usize) {
                 let mut row_str = String::new();
                 for x in 0..10.min(roi.width() as usize) {
                     let pixel_idx = y * roi.width() as usize + x;
                     if pixel_idx < image.len() {
                         let val = image[pixel_idx];
-                        let color = match ((y + roi.start_row as usize) % 2, (x + roi.start_col as usize) % 2) {
+                        let color = match (
+                            (y + roi.start_row as usize) % 2,
+                            (x + roi.start_col as usize) % 2,
+                        ) {
                             (0, 0) => "R",
                             (0, 1) | (1, 0) => "G",
                             (1, 1) => "B",
@@ -590,10 +1329,20 @@ impl NikonDecompressor {
     }
 
     /// Optimized selective decompression with row-skipping for small ROIs
-    fn decompress_selective_optimized(&self, compressed_data: &[u8], width: u32, height: u32, roi: SelectiveRoi) -> Result<Vec<u16>> {
+    fn decompress_selective_optimized(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        roi: SelectiveRoi,
+    ) -> Result<Vec<u16>> {
         let mut image = vec![0u16; roi.pixels()];
 
-        tracing::info!("Optimized decompression: skipping to row {}, processing {} rows", roi.start_row, roi.height());
+        tracing::info!(
+            "Optimized decompression: skipping to row {}, processing {} rows",
+            roi.start_row,
+            roi.height()
+        );
 
         // Build LibRaw-compatible Huffman table
         let tree = self.build_huffman_tree_from_meta()?;
@@ -617,8 +1366,12 @@ impl NikonDecompressor {
         let safe_offset = (estimated_bit_offset as f32 * safety_factor) as usize;
         let skip_bytes = safe_offset.min(compressed_data.len() / 3);
 
-        tracing::info!("Estimated {:.2} bits/pixel, skipping {} bytes ({:.1}% of data)",
-                  approx_bits_per_pixel, skip_bytes, skip_bytes as f32 / compressed_data.len() as f32 * 100.0);
+        tracing::info!(
+            "Estimated {:.2} bits/pixel, skipping {} bytes ({:.1}% of data)",
+            approx_bits_per_pixel,
+            skip_bytes,
+            skip_bytes as f32 / compressed_data.len() as f32 * 100.0
+        );
 
         // Initialize bit reader with offset
         let mut bit_reader = LibRawBitReader::new(&compressed_data[skip_bytes..]);
@@ -676,7 +1429,8 @@ impl NikonDecompressor {
 
                         // Apply prediction
                         let predicted = if col < 2 {
-                            hpred[col as usize] = vpred[row as usize & 1][col as usize] as i32 + diff;
+                            hpred[col as usize] =
+                                vpred[row as usize & 1][col as usize] as i32 + diff;
                             vpred[row as usize & 1][col as usize] = hpred[col as usize] as u16;
                             hpred[col as usize]
                         } else {
@@ -722,20 +1476,38 @@ impl NikonDecompressor {
         }
 
         let success_rate = successful_rows as f32 / roi.height() as f32 * 100.0;
-        tracing::info!("Optimized decompression completed: {}/{} rows decoded successfully ({:.1}%)",
-                  successful_rows, roi.height(), success_rate);
+        tracing::info!(
+            "Optimized decompression completed: {}/{} rows decoded successfully ({:.1}%)",
+            successful_rows,
+            roi.height(),
+            success_rate
+        );
 
         // If success rate is too low, return error to trigger fallback
         if success_rate < 80.0 {
-            return Err(anyhow::anyhow!("Low success rate ({:.1}%) in optimized decompression", success_rate));
+            return Err(anyhow::anyhow!(
+                "Low success rate ({:.1}%) in optimized decompression",
+                success_rate
+            ));
         }
 
         Ok(image)
     }
 
     /// Parallel selective decompression for large ROIs
-    pub fn decompress_selective_parallel(&self, compressed_data: &[u8], width: u32, height: u32, bbox: Option<crate::object_detection::BoundingBox>) -> Result<Vec<u16>> {
-        tracing::info!("Starting parallel selective decompression: {}x{}, {} bits", width, height, self.meta.bits_per_sample);
+    pub fn decompress_selective_parallel(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        bbox: Option<crate::object_detection::BoundingBox>,
+    ) -> Result<Vec<u16>> {
+        tracing::info!(
+            "Starting parallel selective decompression: {}x{}, {} bits",
+            width,
+            height,
+            self.meta.bits_per_sample
+        );
 
         // Determine ROI
         let (roi_start_row, roi_end_row, roi_start_col, roi_end_col) = if let Some(bbox) = bbox {
@@ -743,7 +1515,13 @@ impl NikonDecompressor {
             let end_row = (bbox.y + bbox.height).min(height);
             let start_col = bbox.x;
             let end_col = (bbox.x + bbox.width).min(width);
-            tracing::info!("ROI: rows {}-{}, cols {}-{}", start_row, end_row, start_col, end_col);
+            tracing::info!(
+                "ROI: rows {}-{}, cols {}-{}",
+                start_row,
+                end_row,
+                start_col,
+                end_col
+            );
             (start_row, end_row, start_col, end_col)
         } else {
             tracing::info!("No bbox provided, processing full image");
@@ -769,8 +1547,8 @@ impl NikonDecompressor {
             // This is the exact Huffman table that LibRaw uses for Z9 lossless compression
             // From LibRaw source: nikon_load_raw() for Z9 files
             return Ok([
-                0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0,  // Length counts
-                7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0  // Symbol values
+                0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, // Length counts
+                7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0, // Symbol values
             ]);
         }
 
@@ -781,7 +1559,10 @@ impl NikonDecompressor {
         if self.meta.huffman_bits.len() >= 16 {
             tree[0..16].copy_from_slice(&self.meta.huffman_bits[0..16]);
         } else {
-            return Err(anyhow::anyhow!("Insufficient Huffman bits data: {} bytes", self.meta.huffman_bits.len()));
+            return Err(anyhow::anyhow!(
+                "Insufficient Huffman bits data: {} bytes",
+                self.meta.huffman_bits.len()
+            ));
         }
 
         // Copy symbol values (next bytes) for lossy modes; lossless uses fixed tree and ignores this
@@ -789,10 +1570,13 @@ impl NikonDecompressor {
         if self.meta.ver0 != 0x46 {
             if self.meta.huffman_values.len() >= symbols_needed {
                 let copy_len = symbols_needed.min(16);
-                tree[16..16+copy_len].copy_from_slice(&self.meta.huffman_values[0..copy_len]);
+                tree[16..16 + copy_len].copy_from_slice(&self.meta.huffman_values[0..copy_len]);
             } else {
-                return Err(anyhow::anyhow!("Insufficient Huffman values data: need {}, have {}",
-                                         symbols_needed, self.meta.huffman_values.len()));
+                return Err(anyhow::anyhow!(
+                    "Insufficient Huffman values data: need {}, have {}",
+                    symbols_needed,
+                    self.meta.huffman_values.len()
+                ));
             }
         }
 
@@ -802,18 +1586,21 @@ impl NikonDecompressor {
     /// Create Huffman table from Nikon tree definition
     fn create_huffman_table(&self, tree_index: usize) -> Result<HuffTable> {
         if tree_index >= NIKON_HUFFMAN_TREES.len() {
-            return Err(anyhow::anyhow!("Invalid Huffman tree index: {}", tree_index));
+            return Err(anyhow::anyhow!(
+                "Invalid Huffman tree index: {}",
+                tree_index
+            ));
         }
-        
+
         let tree_data = NIKON_HUFFMAN_TREES[tree_index];
         let mut huff_table = HuffTable::empty();
-        
+
         // Parse tree data (first 16 bytes are bit counts, rest are values)
         let bits = &tree_data[0..16];
         let values = &tree_data[16..];
-        
+
         huff_table.build_from_counts_and_values(bits, values)?;
-        
+
         Ok(huff_table)
     }
 
@@ -827,7 +1614,12 @@ impl NikonDecompressor {
         output: &mut RawBuffer,
     ) -> Result<()> {
         tracing::info!("Starting Z9 lossless decompression");
-        tracing::info!("Image dimensions: {}x{}, left_margin: {}", width, height, left_margin);
+        tracing::info!(
+            "Image dimensions: {}x{}, left_margin: {}",
+            width,
+            height,
+            left_margin
+        );
         tracing::info!("Vertical predictors: {:?}", self.meta.vpred);
         tracing::info!("Linearization curve size: {}", self.meta.curve.len());
 
@@ -928,45 +1720,54 @@ impl NikonDecompressor {
         let mut huff_table = HuffTable::empty();
 
         // Use the real Huffman data from MakerNote
-        huff_table.build_from_counts_and_values(&self.meta.huffman_bits, &self.meta.huffman_values)?;
+        huff_table
+            .build_from_counts_and_values(&self.meta.huffman_bits, &self.meta.huffman_values)?;
 
         tracing::info!("Successfully created Huffman table from MakerNote");
         Ok(huff_table)
     }
 
     /// Decode a single Nikon Huffman value
-    fn decode_nikon_value(&self, pump: &mut BitPumpMSB, huff_table: &HuffTable) -> Result<(u32, u32, i32)> {
+    fn decode_nikon_value(
+        &self,
+        pump: &mut BitPumpMSB,
+        huff_table: &HuffTable,
+    ) -> Result<(u32, u32, i32)> {
         // Decode Huffman symbol using LibRaw-compatible method
-        let symbol = huff_table.nikon_huff_decode(pump)
+        let symbol = huff_table
+            .nikon_huff_decode(pump)
             .with_context(|| "Failed to decode Nikon Huffman value")?;
-        
+
         // Extract length and shift from symbol
         let len = symbol & 15;
         let shl = symbol >> 4;
-        
+
         if len == 0 {
             return Ok((len, shl, 0));
         }
-        
+
         // Read additional bits
         let mut diff = if len > shl {
             ((pump.get_bits(len - shl)? << 1) + 1) << shl >> 1
         } else {
             0
         } as i32;
-        
+
         // Convert to signed value (exact LibRaw logic)
         if len > 0 && (diff & (1 << (len - 1))) == 0 {
-            diff -= (1 << len) - if shl == 0 { 1 } else { 0 };  // LibRaw: !shl
+            diff -= (1 << len) - if shl == 0 { 1 } else { 0 }; // LibRaw: !shl
         }
-        
+
         Ok((len, shl, diff))
     }
 
     /// Create LibRaw-compatible Huffman table (exact LibRaw make_decoder implementation)
     fn create_libraw_huffman_table(&self, tree_index: usize) -> Result<Vec<u16>> {
         if tree_index >= NIKON_HUFFMAN_TREES.len() {
-            return Err(anyhow::anyhow!("Invalid Huffman tree index: {}", tree_index));
+            return Err(anyhow::anyhow!(
+                "Invalid Huffman tree index: {}",
+                tree_index
+            ));
         }
 
         let source = NIKON_HUFFMAN_TREES[tree_index];
@@ -979,7 +1780,11 @@ impl NikonDecompressor {
         let total_codes: usize = count.iter().map(|&x| x as usize).sum();
 
         if total_codes != values.len() {
-            return Err(anyhow::anyhow!("Mismatch: expected {} codes, got {} values", total_codes, values.len()));
+            return Err(anyhow::anyhow!(
+                "Mismatch: expected {} codes, got {} values",
+                total_codes,
+                values.len()
+            ));
         }
 
         // LibRaw: for (max = 16; max && !count[max]; max--);
@@ -991,8 +1796,6 @@ impl NikonDecompressor {
         if max == 0 {
             return Err(anyhow::anyhow!("Invalid Huffman table - no codes"));
         }
-
-
 
         // LibRaw: huff = (ushort *)calloc(1 + (1 << max), sizeof *huff);
         let table_size = 1 + (1 << max);
@@ -1007,7 +1810,11 @@ impl NikonDecompressor {
             // for (i = 0; i < count[len]; i++, ++source)
             for _ in 0..count[len - 1] {
                 if value_idx >= values.len() {
-                    return Err(anyhow::anyhow!("Not enough values in Huffman table at len={}, value_idx={}", len, value_idx));
+                    return Err(anyhow::anyhow!(
+                        "Not enough values in Huffman table at len={}, value_idx={}",
+                        len,
+                        value_idx
+                    ));
                 }
 
                 let symbol = values[value_idx];
@@ -1024,7 +1831,6 @@ impl NikonDecompressor {
             }
         }
 
-
         Ok(huff)
     }
 
@@ -1036,7 +1842,8 @@ impl NikonDecompressor {
         let huff_table = self.create_huffman_table(tree_index)?;
 
         // Use our existing nikon_huff_decode which works
-        let symbol = huff_table.nikon_huff_decode(pump)
+        let symbol = huff_table
+            .nikon_huff_decode(pump)
             .with_context(|| "Failed to decode Nikon Huffman value")?;
 
         Ok(symbol)
@@ -1064,7 +1871,13 @@ impl NikonDecompressor {
                 tracing::info!("No LJPEG SOI marker found - this might be raw LJPEG scan data");
                 // Z9 files might contain raw LJPEG scan data without headers
                 // Raw LJPEG scan data decompression can be added for enhanced format support
-                return self.try_raw_ljpeg_scan_data(compressed_data, width, height, left_margin, output);
+                return self.try_raw_ljpeg_scan_data(
+                    compressed_data,
+                    width,
+                    height,
+                    left_margin,
+                    output,
+                );
             }
         }
 
@@ -1097,7 +1910,12 @@ impl NikonDecompressor {
         // Initialize LJPEG-style predictors
         let mut vpred = [1 << (self.meta.bits_per_sample - 1); 6]; // LJPEG uses 6 predictors
 
-        tracing::info!("Starting LJPEG-style decompression: {}x{}, {} bits", width, height, self.meta.bits_per_sample);
+        tracing::info!(
+            "Starting LJPEG-style decompression: {}x{}, {} bits",
+            width,
+            height,
+            self.meta.bits_per_sample
+        );
 
         // Process each row using LJPEG differential decoding
         for row in 0..height {
@@ -1106,7 +1924,11 @@ impl NikonDecompressor {
                 let diff = match self.ljpeg_diff(&mut pump, &huff_table) {
                     Ok(d) => d,
                     Err(_) => {
-                        tracing::warn!("LJPEG decoding failed at ({}, {}) - using test pattern", row, col);
+                        tracing::warn!(
+                            "LJPEG decoding failed at ({}, {}) - using test pattern",
+                            row,
+                            col
+                        );
                         return self.implement_z9_test_pattern(width, height, left_margin, output);
                     }
                 };
@@ -1157,7 +1979,14 @@ impl NikonDecompressor {
     }
 
     /// Load 14-bit packed data (LibRaw packed_load_raw equivalent)
-    fn load_packed_14bit(&self, data: &[u8], width: u32, height: u32, left_margin: u32, output: &mut RawBuffer) -> Result<()> {
+    fn load_packed_14bit(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        left_margin: u32,
+        output: &mut RawBuffer,
+    ) -> Result<()> {
         tracing::info!("Loading 14-bit packed data: {}x{}", width, height);
 
         // 14-bit packed: 4 pixels in 7 bytes
@@ -1177,15 +2006,22 @@ impl NikonDecompressor {
                 // Unpack 4 pixels (14-bit packed format)
                 let pixels = [
                     ((bytes[0] as u16) << 6) | (((bytes[6] & 0xFC) >> 2) as u16),
-                    ((bytes[1] as u16) << 6) | (((bytes[6] & 0x03) << 4) as u16) | (((bytes[4] & 0xF0) >> 4) as u16),
-                    ((bytes[2] as u16) << 6) | (((bytes[4] & 0x0F) << 2) as u16) | (((bytes[5] & 0xC0) >> 6) as u16),
+                    ((bytes[1] as u16) << 6)
+                        | (((bytes[6] & 0x03) << 4) as u16)
+                        | (((bytes[4] & 0xF0) >> 4) as u16),
+                    ((bytes[2] as u16) << 6)
+                        | (((bytes[4] & 0x0F) << 2) as u16)
+                        | (((bytes[5] & 0xC0) >> 6) as u16),
                     ((bytes[3] as u16) << 6) | ((bytes[5] & 0x3F) as u16),
                 ];
 
                 // Store pixels in output buffer
                 for (i, &pixel) in pixels.iter().enumerate() {
                     let output_col = col + i as u32;
-                    if output_col >= left_margin && (output_col - left_margin) < output.width && row < output.height {
+                    if output_col >= left_margin
+                        && (output_col - left_margin) < output.width
+                        && row < output.height
+                    {
                         output.set_pixel(output_col - left_margin, row, pixel);
                     }
                 }
@@ -1197,7 +2033,14 @@ impl NikonDecompressor {
     }
 
     /// Load 12-bit packed data (LibRaw packed_load_raw equivalent)
-    fn load_packed_12bit(&self, data: &[u8], width: u32, height: u32, left_margin: u32, output: &mut RawBuffer) -> Result<()> {
+    fn load_packed_12bit(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        left_margin: u32,
+        output: &mut RawBuffer,
+    ) -> Result<()> {
         tracing::info!("Loading 12-bit packed data: {}x{}", width, height);
 
         // 12-bit packed: 2 pixels in 3 bytes
@@ -1223,7 +2066,10 @@ impl NikonDecompressor {
                 // Store pixels in output buffer
                 for (i, &pixel) in pixels.iter().enumerate() {
                     let output_col = col + i as u32;
-                    if output_col >= left_margin && (output_col - left_margin) < output.width && row < output.height {
+                    if output_col >= left_margin
+                        && (output_col - left_margin) < output.width
+                        && row < output.height
+                    {
                         output.set_pixel(output_col - left_margin, row, pixel);
                     }
                 }
@@ -1235,7 +2081,14 @@ impl NikonDecompressor {
     }
 
     /// Generate realistic Z9 image data based on compressed data characteristics
-    fn generate_realistic_z9_image(&self, compressed_data: &[u8], width: u32, height: u32, left_margin: u32, output: &mut RawBuffer) -> Result<()> {
+    fn generate_realistic_z9_image(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        left_margin: u32,
+        output: &mut RawBuffer,
+    ) -> Result<()> {
         tracing::info!("Generating realistic Z9 image data based on compressed data");
 
         // Use compressed data to seed realistic image generation
@@ -1272,32 +2125,60 @@ impl NikonDecompressor {
     }
 
     /// Implement exact LibRaw nikon_load_raw algorithm
-    fn libraw_nikon_load_raw(&self, compressed_data: &[u8], width: u32, height: u32, left_margin: u32, output: &mut RawBuffer) -> Result<()> {
+    fn libraw_nikon_load_raw(
+        &self,
+        compressed_data: &[u8],
+        width: u32,
+        height: u32,
+        left_margin: u32,
+        output: &mut RawBuffer,
+    ) -> Result<()> {
         tracing::info!("Using exact LibRaw nikon_load_raw algorithm");
 
         // LibRaw nikon_tree tables (exact copy from LibRaw source)
         let _nikon_tree: [[u8; 32]; 6] = [
-            [0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 12-bit lossy
-             5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12, 0, 0, 0],
-            [0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 12-bit lossy after split
-             0x39, 0x5a, 0x38, 0x27, 0x16, 5, 4, 3, 2, 1, 0, 11, 12, 12, 0, 0],
-            [0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 12-bit lossless
-             5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12, 0, 0, 0],
-            [0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 14-bit lossy
-             5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14, 0],
-            [0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, // 14-bit lossy after split
-             8, 0x5c, 0x4b, 0x3a, 0x29, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14, 0],
-            [0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, // 14-bit lossless
-             7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0],
+            [
+                0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 12-bit lossy
+                5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12, 0, 0, 0,
+            ],
+            [
+                0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 12-bit lossy after split
+                0x39, 0x5a, 0x38, 0x27, 0x16, 5, 4, 3, 2, 1, 0, 11, 12, 12, 0, 0,
+            ],
+            [
+                0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 12-bit lossless
+                5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12, 0, 0, 0,
+            ],
+            [
+                0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 14-bit lossy
+                5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14, 0,
+            ],
+            [
+                0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, // 14-bit lossy after split
+                8, 0x5c, 0x4b, 0x3a, 0x29, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14, 0,
+            ],
+            [
+                0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, // 14-bit lossless
+                7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0,
+            ],
         ];
 
         // Determine tree index based on ver0/ver1 and bits per sample (exact LibRaw logic)
         let mut tree = 0;
-        if self.meta.ver0 == 0x46 { tree = 2; }
-        if self.meta.bits_per_sample == 14 { tree += 3; }
+        if self.meta.ver0 == 0x46 {
+            tree = 2;
+        }
+        if self.meta.bits_per_sample == 14 {
+            tree += 3;
+        }
 
-        tracing::info!("Using Huffman tree index: {} (ver0: 0x{:02x}, ver1: 0x{:02x}, bits: {})",
-                  tree, self.meta.ver0, self.meta.ver1, self.meta.bits_per_sample);
+        tracing::info!(
+            "Using Huffman tree index: {} (ver0: 0x{:02x}, ver1: 0x{:02x}, bits: {})",
+            tree,
+            self.meta.ver0,
+            self.meta.ver1,
+            self.meta.bits_per_sample
+        );
 
         // Build LibRaw-compatible Huffman table from tree (handles 0x46/0x30 via fixed Nikon table)
         let tree = self.build_huffman_tree_from_meta()?;
@@ -1308,12 +2189,19 @@ impl NikonDecompressor {
         bit_reader.getbits(-1)?; // reset
 
         // Predictors from MakerNote
-        let mut vpred = [[self.meta.vpred[0][0] as i32, self.meta.vpred[0][1] as i32],
-                         [self.meta.vpred[1][0] as i32, self.meta.vpred[1][1] as i32]];
+        let mut vpred = [
+            [self.meta.vpred[0][0] as i32, self.meta.vpred[0][1] as i32],
+            [self.meta.vpred[1][0] as i32, self.meta.vpred[1][1] as i32],
+        ];
         let mut hpred = [0i32; 2];
 
-        tracing::info!("Initial vpred from metadata: [{}, {}, {}, {}]",
-                  vpred[0][0], vpred[0][1], vpred[1][0], vpred[1][1]);
+        tracing::info!(
+            "Initial vpred from metadata: [{}, {}, {}, {}]",
+            vpred[0][0],
+            vpred[0][1],
+            vpred[1][0],
+            vpred[1][1]
+        );
 
         let _max_value = (1 << self.meta.bits_per_sample) - 1;
         let mut _min_value = 0;
@@ -1321,8 +2209,13 @@ impl NikonDecompressor {
         // Check for split (LibRaw logic)
         let split = self.meta.split_value.unwrap_or(0);
 
-        tracing::info!("Starting LibRaw nikon_load_raw: {}x{}, {} bits, split: {}",
-                  width, height, self.meta.bits_per_sample, split);
+        tracing::info!(
+            "Starting LibRaw nikon_load_raw: {}x{}, {} bits, split: {}",
+            width,
+            height,
+            self.meta.bits_per_sample,
+            split
+        );
 
         // Process each row (exact LibRaw algorithm)
         for row in 0..height {
@@ -1419,7 +2312,10 @@ impl NikonDecompressor {
             // LibRaw: for (i = 0; i < count[len]; i++, ++*source)
             for _i in 0..count {
                 if symbol_idx >= tree.len() {
-                    return Err(anyhow::anyhow!("Huffman tree data truncated at symbol_idx={}", symbol_idx));
+                    return Err(anyhow::anyhow!(
+                        "Huffman tree data truncated at symbol_idx={}",
+                        symbol_idx
+                    ));
                 }
 
                 let symbol = tree[symbol_idx];
@@ -1433,7 +2329,11 @@ impl NikonDecompressor {
                         huff_table[h] = entry;
                         h += 1;
                     } else {
-                        return Err(anyhow::anyhow!("Huffman table overflow: h={} > {}", h, 1 << max_len));
+                        return Err(anyhow::anyhow!(
+                            "Huffman table overflow: h={} > {}",
+                            h,
+                            1 << max_len
+                        ));
                     }
                 }
             }
@@ -1460,7 +2360,10 @@ impl LibRawHuffmanTable {
 
         let max_len = self.table[0] as u32;
         if max_len > 25 {
-            return Err(anyhow::anyhow!("Invalid Huffman table max length: {}", max_len));
+            return Err(anyhow::anyhow!(
+                "Invalid Huffman table max length: {}",
+                max_len
+            ));
         }
 
         // LibRaw: c = vbits == 0 ? 0 : bitbuf << (32 - vbits) >> (32 - nbits);
@@ -1470,7 +2373,11 @@ impl LibRawHuffmanTable {
         // LibRaw uses the bits directly as index (after shifting)
         let index = bits as usize;
         if index >= self.table.len() {
-            return Err(anyhow::anyhow!("Huffman table index out of bounds: {} (table size: {})", index, self.table.len()));
+            return Err(anyhow::anyhow!(
+                "Huffman table index out of bounds: {} (table size: {})",
+                index,
+                self.table.len()
+            ));
         }
 
         let entry = self.table[index];
@@ -1478,7 +2385,11 @@ impl LibRawHuffmanTable {
         // LibRaw: vbits -= huff[c] >> 8;
         let code_len = (entry >> 8) as u32;
         if code_len == 0 {
-            return Err(anyhow::anyhow!("Invalid Huffman code at index {}: entry = 0x{:04x}", index, entry));
+            return Err(anyhow::anyhow!(
+                "Invalid Huffman code at index {}: entry = 0x{:04x}",
+                index,
+                entry
+            ));
         }
 
         // LibRaw: c = (uchar)huff[c];
@@ -1492,24 +2403,49 @@ impl LibRawHuffmanTable {
 }
 
 /// LibRaw-compatible bit reader that works with byte buffers
-struct LibRawBitReader {
-    data: Vec<u8>,
+struct LibRawBitReader<'a> {
+    data: &'a [u8],
     pos: usize,
     bitbuf: u32,
     vbits: i32,
 }
 
-impl LibRawBitReader {
-    fn new(data: &[u8]) -> Self {
+impl<'a> LibRawBitReader<'a> {
+    #[inline(always)]
+    fn new(data: &'a [u8]) -> Self {
         Self {
-            data: data.to_vec(),
+            data,
             pos: 0,
             bitbuf: 0,
             vbits: 0,
         }
     }
 
+    fn new_at_bit(data: &'a [u8], bit_offset: usize) -> Result<Self> {
+        if bit_offset > data.len().saturating_mul(8) {
+            anyhow::bail!("Bit offset {} exceeds compressed stream", bit_offset);
+        }
+        let mut reader = Self {
+            data,
+            pos: bit_offset / 8,
+            bitbuf: 0,
+            vbits: 0,
+        };
+        let intra_byte_offset = bit_offset % 8;
+        if intra_byte_offset > 0 {
+            reader.getbits(intra_byte_offset as i32)?;
+        }
+        Ok(reader)
+    }
+
+    fn bit_position(&self) -> usize {
+        self.pos
+            .saturating_mul(8)
+            .saturating_sub(self.vbits.max(0) as usize)
+    }
+
     /// LibRaw getbits function (when huff is null)
+    #[inline(always)]
     fn getbits(&mut self, nbits: i32) -> Result<u32> {
         if nbits > 25 {
             return Ok(0);
@@ -1550,7 +2486,27 @@ impl LibRawBitReader {
         Ok(c)
     }
 
+    #[inline(always)]
+    fn skipbits(&mut self, nbits: i32) -> Result<()> {
+        if !(0..=25).contains(&nbits) {
+            anyhow::bail!("Invalid bit skip length: {}", nbits);
+        }
+        while self.vbits < nbits {
+            let byte = self
+                .data
+                .get(self.pos)
+                .copied()
+                .context("Unexpected end of Nikon entropy stream")?;
+            self.pos += 1;
+            self.bitbuf = (self.bitbuf << 8) | byte as u32;
+            self.vbits += 8;
+        }
+        self.vbits -= nbits;
+        Ok(())
+    }
+
     /// LibRaw gethuff function (getbithuff with huff table) - EXACT LibRaw implementation
+    #[inline(always)]
     fn gethuff(&mut self, huff_table: &LibRawHuffmanTable) -> Result<u32> {
         if huff_table.table.is_empty() {
             return Err(anyhow::anyhow!("Empty Huffman table"));
@@ -1558,7 +2514,10 @@ impl LibRawBitReader {
 
         let max_len = huff_table.table[0] as i32;
         if max_len > 25 {
-            return Err(anyhow::anyhow!("Invalid Huffman table max length: {}", max_len));
+            return Err(anyhow::anyhow!(
+                "Invalid Huffman table max length: {}",
+                max_len
+            ));
         }
 
         // LibRaw: while (!reset && vbits < nbits && (c = fgetc(ifp)) != EOF)
@@ -1583,7 +2542,11 @@ impl LibRawBitReader {
         // Look up in Huffman table - LibRaw uses 1-based indexing: huff[c+1]
         let lookup_idx = (c + 1) as usize;
         if lookup_idx >= huff_table.table.len() {
-            return Err(anyhow::anyhow!("Huffman table index out of bounds: {} >= {}", lookup_idx, huff_table.table.len()));
+            return Err(anyhow::anyhow!(
+                "Huffman table index out of bounds: {} >= {}",
+                lookup_idx,
+                huff_table.table.len()
+            ));
         }
 
         let entry = huff_table.table[lookup_idx];
@@ -1591,7 +2554,13 @@ impl LibRawBitReader {
         let value = (entry & 0xFF) as u32;
 
         if code_len == 0 {
-            return Err(anyhow::anyhow!("Invalid Huffman code at index {}: entry={:04x}, len={}, value={}", lookup_idx, entry, code_len, value));
+            return Err(anyhow::anyhow!(
+                "Invalid Huffman code at index {}: entry={:04x}, len={}, value={}",
+                lookup_idx,
+                entry,
+                code_len,
+                value
+            ));
         }
 
         // LibRaw: vbits -= huff[c] >> 8; c = (uchar)huff[c];
@@ -1601,5 +2570,35 @@ impl LibRawBitReader {
         }
 
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LibRawBitReader;
+
+    #[test]
+    fn skipbits_matches_discarded_getbits() {
+        let data = [
+            0x9d, 0x42, 0xf1, 0x07, 0xaa, 0x5c, 0xe3, 0x18, 0x6b, 0xd4, 0x20, 0xff,
+        ];
+        for skipped in [0, 1, 3, 7, 8, 13, 21, 25] {
+            let mut extracting = LibRawBitReader::new(&data);
+            let mut skipping = LibRawBitReader::new(&data);
+            assert_eq!(extracting.getbits(5).unwrap(), skipping.getbits(5).unwrap());
+            extracting.getbits(skipped).unwrap();
+            skipping.skipbits(skipped).unwrap();
+            assert_eq!(
+                extracting.getbits(19).unwrap(),
+                skipping.getbits(19).unwrap(),
+                "mismatch after skipping {skipped} bits"
+            );
+        }
+    }
+
+    #[test]
+    fn skipbits_rejects_truncated_streams() {
+        let mut reader = LibRawBitReader::new(&[0xff]);
+        assert!(reader.skipbits(9).is_err());
     }
 }

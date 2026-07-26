@@ -1,4 +1,4 @@
-use gphoto2::{Context, Camera, widget::Widget};
+use gphoto2::{widget::Widget, Context};
 
 fn main() {
     let context = Context::new().unwrap();
@@ -17,8 +17,7 @@ fn main() {
                 radio.set_choice("test");
             },
             Widget::Toggle(toggle) => {
-                // Try guessing toggle setters
-                toggle.toggle(); 
+                toggle.set_toggled(true);
             },
             Widget::Range(range) => {
                 range.set_value(1.0);

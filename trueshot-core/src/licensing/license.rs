@@ -1,10 +1,10 @@
 //! License data structures and cryptographic verification
-//! 
+//!
 //! Ed25519 signed licenses with device activation tracking.
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 
 use super::error::LicenseError;
 
@@ -30,7 +30,7 @@ impl LicenseTier {
             LicenseTier::Pro => 10,
         }
     }
-    
+
     /// Get tier display name
     pub fn display_name(&self) -> &'static str {
         match self {
@@ -39,7 +39,6 @@ impl LicenseTier {
             LicenseTier::Pro => "Pro",
         }
     }
-    
 }
 
 /// Per-device activation record
@@ -99,7 +98,7 @@ impl LicenseFeatures {
             LicenseTier::Hobby => Self {
                 max_resolution: 2000,
                 scans_per_month: Some(20),
-                enable_4dgs: has_4dgs_addon,  // $50 addon
+                enable_4dgs: has_4dgs_addon, // $50 addon
                 enable_webxr_scanning: true,
                 enable_commercial: false,
                 enable_beta: false,
@@ -114,7 +113,7 @@ impl LicenseFeatures {
             LicenseTier::Education => Self {
                 max_resolution: 4000,
                 scans_per_month: None,
-                enable_4dgs: has_4dgs_addon,  // $50 addon
+                enable_4dgs: has_4dgs_addon, // $50 addon
                 enable_webxr_scanning: true,
                 enable_commercial: false,
                 enable_beta: false,
@@ -129,7 +128,7 @@ impl LicenseFeatures {
             LicenseTier::Pro => Self {
                 max_resolution: 8000,
                 scans_per_month: None,
-                enable_4dgs: has_4dgs_addon,  // Add-on unless explicitly provisioned
+                enable_4dgs: has_4dgs_addon, // Add-on unless explicitly provisioned
                 enable_webxr_scanning: true,
                 enable_commercial: true,
                 enable_beta: true,
@@ -171,7 +170,7 @@ impl LicenseFeatures {
 }
 
 /// License payload for signature verification
-/// 
+///
 /// This is what gets signed - excludes signature itself and mutable fields
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LicensePayload {
@@ -208,59 +207,58 @@ pub struct License {
 impl License {
     /// Grace period for offline operation (90 days)
     pub const OFFLINE_GRACE_DAYS: i64 = 90;
-    
+
     /// Verify license signature using public key
     pub fn verify_signature(&self, public_key: &VerifyingKey) -> Result<(), LicenseError> {
         // Serialize payload for verification
         let payload_bytes = serde_json::to_vec(&self.payload)
             .map_err(|e| LicenseError::SerializationError(e.to_string()))?;
-        
+
         // Decode signature from base64
-        let sig_bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &self.signature
-        ).map_err(|e| LicenseError::InvalidSignature(e.to_string()))?;
-        
+        let sig_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &self.signature)
+                .map_err(|e| LicenseError::InvalidSignature(e.to_string()))?;
+
         // Parse signature
         let signature = Signature::from_slice(&sig_bytes)
             .map_err(|e| LicenseError::InvalidSignature(e.to_string()))?;
-        
+
         // Verify
         public_key
             .verify(&payload_bytes, &signature)
             .map_err(|_| LicenseError::SignatureVerificationFailed)?;
-        
+
         Ok(())
     }
-    
+
     /// Check if license is expired
     pub fn is_expired(&self) -> bool {
         if let Some(expires) = self.payload.expires_at {
             Utc::now() > expires
         } else {
-            false  // Perpetual license
+            false // Perpetual license
         }
     }
-    
+
     /// Check if device is activated on this license
     pub fn is_device_activated(&self, fingerprint_hash: &str) -> bool {
         self.activated_devices
             .iter()
             .any(|d| d.fingerprint_hash == fingerprint_hash)
     }
-    
+
     /// Check if more devices can be activated
     pub fn can_activate_device(&self) -> bool {
         (self.activated_devices.len() as u32) < self.payload.max_devices
     }
-    
+
     /// Get device activation if exists
     pub fn get_device_activation(&self, fingerprint_hash: &str) -> Option<&ActivatedDevice> {
         self.activated_devices
             .iter()
             .find(|d| d.fingerprint_hash == fingerprint_hash)
     }
-    
+
     /// Check if device is within offline grace period
     pub fn is_within_grace_period(&self, fingerprint_hash: &str) -> bool {
         if let Some(device) = self.get_device_activation(fingerprint_hash) {
@@ -270,14 +268,14 @@ impl License {
             false
         }
     }
-    
+
     /// Check if a specific feature is enabled
     pub fn is_feature_enabled(&self, feature: super::Feature) -> bool {
         use super::Feature;
-        
+
         match feature {
-            Feature::BasicScanning => true,  // Always enabled
-            Feature::GaussianSplatting => true,  // Core feature
+            Feature::BasicScanning => true,     // Always enabled
+            Feature::GaussianSplatting => true, // Core feature
             Feature::Resolution4K => self.payload.features.max_resolution >= 4000,
             Feature::Resolution8K => self.payload.features.max_resolution >= 8000,
             Feature::FourDGS => self.payload.features.enable_4dgs,
@@ -288,7 +286,9 @@ impl License {
             Feature::UnlimitedScans => self.payload.features.scans_per_month.is_none(),
             Feature::RoomReconstruction => self.payload.features.enable_room_reconstruction,
             Feature::AvatarReconstruction => self.payload.features.enable_avatar_reconstruction,
-            Feature::AdvancedCaptureAutomation => self.payload.features.enable_advanced_capture_automation,
+            Feature::AdvancedCaptureAutomation => {
+                self.payload.features.enable_advanced_capture_automation
+            }
             Feature::CloudSyncBackup => self.payload.features.enable_cloud_sync_backup,
             Feature::TeamCollaboration => self.payload.features.enable_team_collaboration,
             Feature::PipelineAutomation => self.payload.features.enable_pipeline_automation,
@@ -299,24 +299,24 @@ impl License {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_tier_max_devices() {
         assert_eq!(LicenseTier::Hobby.max_devices(), 1);
         assert_eq!(LicenseTier::Education.max_devices(), 3);
         assert_eq!(LicenseTier::Pro.max_devices(), 10);
     }
-    
+
     #[test]
     fn test_features_for_tier() {
         let hobby = LicenseFeatures::for_tier(&LicenseTier::Hobby, false);
         assert_eq!(hobby.max_resolution, 2000);
         assert!(!hobby.enable_4dgs);
         assert!(!hobby.enable_commercial);
-        
+
         let hobby_4dgs = LicenseFeatures::for_tier(&LicenseTier::Hobby, true);
         assert!(hobby_4dgs.enable_4dgs);
-        
+
         let pro = LicenseFeatures::for_tier(&LicenseTier::Pro, false);
         assert_eq!(pro.max_resolution, 8000);
         assert!(!pro.enable_4dgs);
@@ -326,7 +326,7 @@ mod tests {
         let pro_4dgs = LicenseFeatures::for_tier(&LicenseTier::Pro, true);
         assert!(pro_4dgs.enable_4dgs);
     }
-    
+
     #[test]
     fn test_license_expiry() {
         let payload = LicensePayload {
@@ -339,13 +339,13 @@ mod tests {
             customer_email: "test@example.com".to_string(),
             has_4dgs_addon: false,
         };
-        
+
         let license = License {
             payload,
             activated_devices: vec![],
             signature: String::new(),
         };
-        
-        assert!(!license.is_expired());  // Perpetual
+
+        assert!(!license.is_expired()); // Perpetual
     }
 }

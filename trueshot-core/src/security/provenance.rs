@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey, Signature, Verifier};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -78,8 +78,9 @@ impl ProvenanceSigner {
         if let Some(path) = path {
             if path.exists() {
                 enforce_key_permissions(path)?;
-                let bytes = std::fs::read(path)
-                    .with_context(|| format!("Failed to read provenance key: {}", path.display()))?;
+                let bytes = std::fs::read(path).with_context(|| {
+                    format!("Failed to read provenance key: {}", path.display())
+                })?;
                 if bytes.len() != 32 {
                     anyhow::bail!("Invalid provenance key length: expected 32 bytes");
                 }
@@ -96,9 +97,8 @@ impl ProvenanceSigner {
                 })?;
             }
             let signing_key = SigningKey::generate(&mut OsRng);
-            std::fs::write(path, signing_key.to_bytes()).with_context(|| {
-                format!("Failed to write provenance key: {}", path.display())
-            })?;
+            std::fs::write(path, signing_key.to_bytes())
+                .with_context(|| format!("Failed to write provenance key: {}", path.display()))?;
             set_key_permissions(path)?;
             return Ok(Self { signing_key });
         }
@@ -240,13 +240,8 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-pub fn verify_signature(
-    public_key_hex: &str,
-    payload: &str,
-    signature_hex: &str,
-) -> Result<bool> {
-    let key_bytes = hex::decode(public_key_hex)
-        .with_context(|| "Invalid public key hex")?;
+pub fn verify_signature(public_key_hex: &str, payload: &str, signature_hex: &str) -> Result<bool> {
+    let key_bytes = hex::decode(public_key_hex).with_context(|| "Invalid public key hex")?;
     if key_bytes.len() != 32 {
         anyhow::bail!("Invalid public key length: expected 32 bytes");
     }
@@ -254,8 +249,7 @@ pub fn verify_signature(
     key_arr.copy_from_slice(&key_bytes);
     let verifying_key = VerifyingKey::from_bytes(&key_arr)?;
 
-    let sig_bytes = hex::decode(signature_hex)
-        .with_context(|| "Invalid signature hex")?;
+    let sig_bytes = hex::decode(signature_hex).with_context(|| "Invalid signature hex")?;
     if sig_bytes.len() != 64 {
         anyhow::bail!("Invalid signature length: expected 64 bytes");
     }
@@ -378,9 +372,8 @@ pub fn write_provenance_sidecar(asset_path: &Path, options: ProvenanceOptions) -
         })?;
     }
     let json = serde_json::to_string_pretty(&record)?;
-    std::fs::write(&provenance_path, json).with_context(|| {
-        format!("Failed to write provenance: {}", provenance_path.display())
-    })?;
+    std::fs::write(&provenance_path, json)
+        .with_context(|| format!("Failed to write provenance: {}", provenance_path.display()))?;
 
     append_export_audit(asset_path, &record)?;
     Ok(provenance_path)

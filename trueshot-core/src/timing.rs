@@ -31,9 +31,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::Result;
 #[cfg(feature = "timing")]
 use anyhow::Context;
+use anyhow::Result;
 
 /// Statistics for a timed scope
 #[derive(Debug, Clone, serde::Serialize)]
@@ -211,7 +211,9 @@ impl HierarchicalTimer {
             let parts: Vec<&str> = label.split('.').collect();
             if parts.len() > 1 {
                 let parent = parts[..parts.len() - 1].join(".");
-                tree.entry(parent).or_insert_with(Vec::new).push(label.clone());
+                tree.entry(parent)
+                    .or_insert_with(Vec::new)
+                    .push(label.clone());
             }
         }
 
@@ -298,8 +300,8 @@ impl HierarchicalTimer {
         use std::io::Write;
 
         let report = self.aggregate();
-        let json = serde_json::to_string(&report)
-            .with_context(|| "Failed to serialize timing report")?;
+        let json =
+            serde_json::to_string(&report).with_context(|| "Failed to serialize timing report")?;
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -307,8 +309,7 @@ impl HierarchicalTimer {
             .open(path)
             .with_context(|| format!("Failed to open timing log: {:?}", path))?;
 
-        writeln!(file, "{}", json)
-            .with_context(|| "Failed to write timing log")?;
+        writeln!(file, "{}", json).with_context(|| "Failed to write timing log")?;
 
         Ok(())
     }
@@ -490,4 +491,3 @@ mod tests {
         assert!(report.timings["half_time"].pct_total < 60.0);
     }
 }
-

@@ -5,5 +5,4 @@
 pub mod provenance;
 pub mod token_store;
 
-pub use token_store::{TokenStore, StoredToken, TokenStoreError};
-
+pub use token_store::{StoredToken, TokenStore, TokenStoreError};

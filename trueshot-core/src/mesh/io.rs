@@ -1,10 +1,10 @@
+use crate::reconstruction::{Face, Mesh};
 use anyhow::{Context, Result};
 use nalgebra as na;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use crate::reconstruction::{Face, Mesh};
 
 pub fn load_mesh(path: &Path) -> Result<Mesh> {
     let ext = path
@@ -53,8 +53,8 @@ pub fn ensure_vertex_normals(mesh: &mut Mesh) {
 }
 
 fn load_obj(path: &Path) -> Result<Mesh> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open OBJ: {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open OBJ: {}", path.display()))?;
     let reader = BufReader::new(file);
 
     let mut positions: Vec<na::Point3<f32>> = Vec::new();
@@ -84,7 +84,9 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                 let x: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
                 let y: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
                 let z: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
-                let color = if let (Some(r), Some(g), Some(b)) = (parts.next(), parts.next(), parts.next()) {
+                let color = if let (Some(r), Some(g), Some(b)) =
+                    (parts.next(), parts.next(), parts.next())
+                {
                     let r: f32 = r.parse().unwrap_or(1.0);
                     let g: f32 = g.parse().unwrap_or(1.0);
                     let b: f32 = b.parse().unwrap_or(1.0);
@@ -119,9 +121,24 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                 let mut face_indices = Vec::new();
                 for idx in &indices[0..3] {
                     let comps: Vec<&str> = idx.split('/').collect();
-                    let v_idx: i32 = comps.get(0).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
-                    let vt_idx: Option<i32> = comps.get(1).and_then(|v| if v.is_empty() { None } else { v.parse::<i32>().ok() });
-                    let vn_idx: Option<i32> = comps.get(2).and_then(|v| if v.is_empty() { None } else { v.parse::<i32>().ok() });
+                    let v_idx: i32 = comps
+                        .get(0)
+                        .and_then(|v| v.parse::<i32>().ok())
+                        .unwrap_or(0);
+                    let vt_idx: Option<i32> = comps.get(1).and_then(|v| {
+                        if v.is_empty() {
+                            None
+                        } else {
+                            v.parse::<i32>().ok()
+                        }
+                    });
+                    let vn_idx: Option<i32> = comps.get(2).and_then(|v| {
+                        if v.is_empty() {
+                            None
+                        } else {
+                            v.parse::<i32>().ok()
+                        }
+                    });
                     let key = (v_idx, vt_idx, vn_idx);
                     let out_idx = if let Some(existing) = index_map.get(&key) {
                         *existing
@@ -130,7 +147,10 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                             let idx = (positions.len() as i32 + v_idx) as usize;
                             positions.get(idx).copied().unwrap_or(na::Point3::origin())
                         } else {
-                            positions.get((v_idx - 1).max(0) as usize).copied().unwrap_or(na::Point3::origin())
+                            positions
+                                .get((v_idx - 1).max(0) as usize)
+                                .copied()
+                                .unwrap_or(na::Point3::origin())
                         };
                         out_positions.push(vpos);
 
@@ -139,7 +159,9 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                                 let idx = (position_colors.len() as i32 + v_idx) as usize;
                                 position_colors.get(idx).and_then(|c| *c)
                             } else {
-                                position_colors.get((v_idx - 1).max(0) as usize).and_then(|c| *c)
+                                position_colors
+                                    .get((v_idx - 1).max(0) as usize)
+                                    .and_then(|c| *c)
                             };
                             out_colors.push(c.unwrap_or([255, 255, 255]));
                         }
@@ -149,7 +171,9 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                                 let idx = (uvs.len() as i32 + vt) as usize;
                                 uvs.get(idx).copied().unwrap_or([0.0, 0.0])
                             } else {
-                                uvs.get((vt - 1).max(0) as usize).copied().unwrap_or([0.0, 0.0])
+                                uvs.get((vt - 1).max(0) as usize)
+                                    .copied()
+                                    .unwrap_or([0.0, 0.0])
                             };
                             out_uvs.push(uv);
                         }
@@ -159,7 +183,10 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                                 let idx = (normals.len() as i32 + vn) as usize;
                                 normals.get(idx).copied().unwrap_or(na::Vector3::z())
                             } else {
-                                normals.get((vn - 1).max(0) as usize).copied().unwrap_or(na::Vector3::z())
+                                normals
+                                    .get((vn - 1).max(0) as usize)
+                                    .copied()
+                                    .unwrap_or(na::Vector3::z())
                             };
                             out_normals.push(n);
                         }
@@ -170,7 +197,9 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                     face_indices.push(out_idx);
                 }
                 if face_indices.len() == 3 {
-                    faces.push(Face { vertices: [face_indices[0], face_indices[1], face_indices[2]] });
+                    faces.push(Face {
+                        vertices: [face_indices[0], face_indices[1], face_indices[2]],
+                    });
                 }
             }
             _ => {}
@@ -187,8 +216,8 @@ fn load_obj(path: &Path) -> Result<Mesh> {
 }
 
 fn load_ply(path: &Path) -> Result<Mesh> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open PLY: {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open PLY: {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     let mut vertex_count = 0usize;
@@ -266,28 +295,61 @@ fn load_ply(path: &Path) -> Result<Mesh> {
         if parts.len() <= z_idx {
             continue;
         }
-        let x = parts.get(x_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-        let y = parts.get(y_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-        let z = parts.get(z_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+        let x = parts
+            .get(x_idx)
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let y = parts
+            .get(y_idx)
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let z = parts
+            .get(z_idx)
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
         vertices.push(na::Point3::new(x, y, z));
 
         if let (Some(nx_idx), Some(ny_idx), Some(nz_idx)) = (nx_idx, ny_idx, nz_idx) {
-            let nx = parts.get(nx_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-            let ny = parts.get(ny_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-            let nz = parts.get(nz_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            let nx = parts
+                .get(nx_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let ny = parts
+                .get(ny_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let nz = parts
+                .get(nz_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
             normals.push(na::Vector3::new(nx, ny, nz));
         }
 
         if let (Some(u_idx), Some(v_idx)) = (u_idx, v_idx) {
-            let u = parts.get(u_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-            let v = parts.get(v_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            let u = parts
+                .get(u_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let v = parts
+                .get(v_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
             uvs.push([u, v]);
         }
 
         if let (Some(r_idx), Some(g_idx), Some(b_idx)) = (r_idx, g_idx, b_idx) {
-            let r = parts.get(r_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(255.0);
-            let g = parts.get(g_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(255.0);
-            let b = parts.get(b_idx).and_then(|v| v.parse::<f32>().ok()).unwrap_or(255.0);
+            let r = parts
+                .get(r_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(255.0);
+            let g = parts
+                .get(g_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(255.0);
+            let b = parts
+                .get(b_idx)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(255.0);
             colors.push([
                 if r <= 1.0 { (r * 255.0) as u8 } else { r as u8 },
                 if g <= 1.0 { (g * 255.0) as u8 } else { g as u8 },
@@ -312,7 +374,10 @@ fn load_ply(path: &Path) -> Result<Mesh> {
         }
         let mut indices: Vec<usize> = Vec::with_capacity(count);
         for idx in 0..count {
-            let value = parts.get(idx + 1).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+            let value = parts
+                .get(idx + 1)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
             indices.push(value);
         }
         for tri in 1..(indices.len() - 1) {

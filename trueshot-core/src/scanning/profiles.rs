@@ -1,9 +1,9 @@
+use crate::scanning::QualityLevel;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use anyhow::{Result, Context};
-use crate::scanning::QualityLevel;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ShutterSpeed {
@@ -32,7 +32,7 @@ pub struct ScanProfile {
     pub name: String,
     pub description: String,
     pub quality: QualityLevel,
-    
+
     // Camera Settings
     pub iso: Option<u32>,
     pub shutter_speed: Option<ShutterSpeed>, // e.g., "1/60"
@@ -42,7 +42,7 @@ pub struct ScanProfile {
     // Turntable Settings
     pub turntable_speed: u32, // 1-3 typically
     pub acceleration: u32,
-    
+
     // Processing Settings
     pub hdr_enabled: bool,
     pub focus_stacking_enabled: bool,

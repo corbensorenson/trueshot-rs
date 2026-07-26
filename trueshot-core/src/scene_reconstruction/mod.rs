@@ -8,13 +8,13 @@
 //! - Confidence/uncertainty mapping for reconstruction quality
 //! - Spatial audio reconstruction from multiple sources
 
-use nalgebra as na;
+use crate::reconstruction::Mesh;
 use anyhow::{Context, Result};
-use rustfft::{FftPlanner, num_complex::Complex};
+use nalgebra as na;
+use rustfft::{num_complex::Complex, FftPlanner};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use crate::reconstruction::Mesh;
 
 // ============================================================================
 // Video Source Types
@@ -227,9 +227,9 @@ impl ConfidenceField {
             ((bounds_max.z - bounds_min.z) / voxel_size).ceil() as usize,
         );
         let t_dims = ((time_range.1 - time_range.0) / time_step as f64).ceil() as usize;
-        
+
         let total = t_dims * dims.2 * dims.1 * dims.0;
-        
+
         Self {
             voxel_size,
             time_step,
@@ -240,26 +240,28 @@ impl ConfidenceField {
             dimensions: (t_dims, dims.2, dims.1, dims.0),
         }
     }
-    
+
     /// Get confidence at space-time point
     pub fn sample(&self, position: na::Point3<f32>, time: f64) -> f32 {
         let t_idx = ((time - self.time_range.0) / self.time_step as f64) as usize;
         let x_idx = ((position.x - self.bounds_min.x) / self.voxel_size) as usize;
         let y_idx = ((position.y - self.bounds_min.y) / self.voxel_size) as usize;
         let z_idx = ((position.z - self.bounds_min.z) / self.voxel_size) as usize;
-        
-        if t_idx >= self.dimensions.0 ||
-           z_idx >= self.dimensions.1 ||
-           y_idx >= self.dimensions.2 ||
-           x_idx >= self.dimensions.3 {
+
+        if t_idx >= self.dimensions.0
+            || z_idx >= self.dimensions.1
+            || y_idx >= self.dimensions.2
+            || x_idx >= self.dimensions.3
+        {
             return 0.0;
         }
-        
-        let idx = ((t_idx * self.dimensions.1 + z_idx) * self.dimensions.2 + y_idx) 
-                  * self.dimensions.3 + x_idx;
+
+        let idx = ((t_idx * self.dimensions.1 + z_idx) * self.dimensions.2 + y_idx)
+            * self.dimensions.3
+            + x_idx;
         self.values.get(idx).copied().unwrap_or(0.0)
     }
-    
+
     /// Accumulate view coverage
     pub fn accumulate_view(
         &mut self,
@@ -273,11 +275,11 @@ impl ConfidenceField {
         if t_idx >= self.dimensions.0 {
             return;
         }
-        
+
         // Simple frustum-based confidence accumulation
         let half_fov = fov / 2.0;
         let cos_half_fov = half_fov.cos();
-        
+
         for z in 0..self.dimensions.1 {
             for y in 0..self.dimensions.2 {
                 for x in 0..self.dimensions.3 {
@@ -286,17 +288,18 @@ impl ConfidenceField {
                         self.bounds_min.y + y as f32 * self.voxel_size,
                         self.bounds_min.z + z as f32 * self.voxel_size,
                     );
-                    
+
                     let dir_to_point = (pos - camera_pos).normalize();
                     let angle_cos = dir_to_point.dot(&camera_dir);
-                    
+
                     if angle_cos > cos_half_fov {
                         let distance = (pos - camera_pos).norm();
                         let dist_weight = (1.0 / (1.0 + distance * 0.1)).min(1.0);
                         let view_weight = (angle_cos - cos_half_fov) / (1.0 - cos_half_fov);
-                        
-                        let idx = ((t_idx * self.dimensions.1 + z) * self.dimensions.2 + y) 
-                                  * self.dimensions.3 + x;
+
+                        let idx = ((t_idx * self.dimensions.1 + z) * self.dimensions.2 + y)
+                            * self.dimensions.3
+                            + x;
                         if idx < self.values.len() {
                             self.values[idx] += weight * dist_weight * view_weight;
                         }
@@ -305,7 +308,7 @@ impl ConfidenceField {
             }
         }
     }
-    
+
     /// Normalize confidence values
     pub fn normalize(&mut self) {
         let max_val = self.values.iter().cloned().fold(0.0f32, f32::max);
@@ -411,7 +414,10 @@ pub struct GeoReference {
     pub crs: Option<String>,
 }
 
-pub fn extract_floorplan_from_mesh(mesh: &Mesh, options: &FloorPlanOptions) -> Result<FloorPlanOutput> {
+pub fn extract_floorplan_from_mesh(
+    mesh: &Mesh,
+    options: &FloorPlanOptions,
+) -> Result<FloorPlanOutput> {
     if mesh.vertices.is_empty() {
         anyhow::bail!("Cannot extract floorplan from empty mesh");
     }
@@ -639,8 +645,12 @@ pub fn export_floorplan_bundle_with_reference(
     plan: &FloorPlanOutput,
     geo_reference: Option<&GeoReference>,
 ) -> Result<FloorPlanExportPaths> {
-    std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create floorplan output dir: {}", output_dir.display()))?;
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "Failed to create floorplan output dir: {}",
+            output_dir.display()
+        )
+    })?;
     let geojson_path = output_dir.join("floorplan.geojson");
     let csv_path = output_dir.join("measurements.csv");
     export_floorplan_geojson_with_reference(plan, geo_reference, &geojson_path)?;
@@ -654,7 +664,11 @@ pub fn export_floorplan_bundle_with_reference(
     } else {
         None
     };
-    Ok(FloorPlanExportPaths { geojson_path, csv_path, prj_path })
+    Ok(FloorPlanExportPaths {
+        geojson_path,
+        csv_path,
+        prj_path,
+    })
 }
 
 #[cfg(test)]
@@ -788,7 +802,11 @@ fn build_wall_segments(points: &[na::Point2<f32>]) -> Vec<WallSegment> {
         let dx = end[0] - start[0];
         let dy = end[1] - start[1];
         let length = (dx * dx + dy * dy).sqrt();
-        walls.push(WallSegment { start, end, length_m: length });
+        walls.push(WallSegment {
+            start,
+            end,
+            length_m: length,
+        });
     }
     walls
 }
@@ -804,10 +822,26 @@ fn build_measurements(
     let width = max_x - min_x;
     let depth = max_z - min_z;
     vec![
-        Measurement { name: "area".to_string(), value: area_m2, unit: "m2".to_string() },
-        Measurement { name: "perimeter".to_string(), value: perimeter_m, unit: "m".to_string() },
-        Measurement { name: "width".to_string(), value: width, unit: "m".to_string() },
-        Measurement { name: "depth".to_string(), value: depth, unit: "m".to_string() },
+        Measurement {
+            name: "area".to_string(),
+            value: area_m2,
+            unit: "m2".to_string(),
+        },
+        Measurement {
+            name: "perimeter".to_string(),
+            value: perimeter_m,
+            unit: "m".to_string(),
+        },
+        Measurement {
+            name: "width".to_string(),
+            value: width,
+            unit: "m".to_string(),
+        },
+        Measurement {
+            name: "depth".to_string(),
+            value: depth,
+            unit: "m".to_string(),
+        },
     ]
 }
 
@@ -938,7 +972,7 @@ impl AudioSynchronizer {
             hop_size: 512,
         }
     }
-    
+
     /// Set reference audio (from official source or best quality)
     pub fn set_reference(&mut self, track: AudioTrack) {
         let mut track = track;
@@ -948,7 +982,7 @@ impl AudioSynchronizer {
         }
         self.reference = Some(track);
     }
-    
+
     /// Compute audio fingerprint
     pub fn compute_fingerprint(&self, samples: &[f32]) -> AudioFingerprint {
         let peaks = self.extract_peaks(samples);
@@ -956,13 +990,20 @@ impl AudioSynchronizer {
         if hashes.is_empty() {
             if let Some(first) = peaks.first() {
                 let hash = (first.freq.min(1023) << 12) | ((first.time as u32) & 0xFFF);
-                hashes.push(FingerprintHash { hash, time: first.time });
+                hashes.push(FingerprintHash {
+                    hash,
+                    time: first.time,
+                });
             }
         }
         let hash = hashes.iter().map(|h| h.hash).collect();
-        AudioFingerprint { hash, peaks, hashes }
+        AudioFingerprint {
+            hash,
+            peaks,
+            hashes,
+        }
     }
-    
+
     /// Find temporal offset using cross-correlation
     pub fn find_offset(&self, source: &AudioTrack) -> Option<TemporalAlignment> {
         let reference = self.reference.as_ref()?;
@@ -996,7 +1037,8 @@ impl AudioSynchronizer {
         }
 
         if offset_hist.is_empty() {
-            let (offset_samples, correlation) = self.cross_correlate(&ref_track.samples, &src_track.samples);
+            let (offset_samples, correlation) =
+                self.cross_correlate(&ref_track.samples, &src_track.samples);
             let offset_secs = offset_samples as f64 / self.sample_rate as f64;
             let confidence = (correlation / 2.0 + 0.5).clamp(0.0, 1.0);
             return Some(TemporalAlignment {
@@ -1034,30 +1076,30 @@ impl AudioSynchronizer {
             drift_corrections: Vec::new(),
         })
     }
-    
+
     /// Cross-correlation to find best offset
     fn cross_correlate(&self, a: &[f32], b: &[f32]) -> (i64, f32) {
         let max_lag = (a.len().min(b.len()) / 4) as i64;
         let mut best_lag = 0i64;
         let mut best_corr = 0.0f32;
-        
+
         // Subsample for efficiency
         let step = 16;
-        
+
         for lag in -max_lag..max_lag {
             let mut sum = 0.0f32;
             let mut count = 0;
-            
+
             for i in (0..a.len().min(b.len())).step_by(step) {
                 let a_idx = i as i64;
                 let b_idx = (i as i64) + lag;
-                
+
                 if b_idx >= 0 && (b_idx as usize) < b.len() {
                     sum += a[a_idx as usize] * b[b_idx as usize];
                     count += 1;
                 }
             }
-            
+
             if count > 0 {
                 let corr = sum / count as f32;
                 if corr > best_corr {
@@ -1066,7 +1108,7 @@ impl AudioSynchronizer {
                 }
             }
         }
-        
+
         (best_lag * step as i64, best_corr)
     }
 }
@@ -1112,7 +1154,8 @@ impl AudioSynchronizer {
             let mut candidates: Vec<(usize, f32)> = Vec::new();
             for bin in 2..mags.len().saturating_sub(2) {
                 let m = mags[bin];
-                if m > mags[bin - 1] && m > mags[bin + 1] && m > mags[bin - 2] && m > mags[bin + 2] {
+                if m > mags[bin - 1] && m > mags[bin + 1] && m > mags[bin - 2] && m > mags[bin + 2]
+                {
                     candidates.push((bin, m));
                 }
             }
@@ -1154,7 +1197,10 @@ impl AudioSynchronizer {
                 let f2 = (next.freq.min(1023) as u32) & 0x3FF;
                 let dt_bin = (dt.min(4095) as u32) & 0xFFF;
                 let hash = (f1 << 22) | (f2 << 12) | dt_bin;
-                hashes.push(FingerprintHash { hash, time: peak.time });
+                hashes.push(FingerprintHash {
+                    hash,
+                    time: peak.time,
+                });
             }
         }
         hashes
@@ -1164,7 +1210,10 @@ impl AudioSynchronizer {
 fn build_hash_index(hashes: &[FingerprintHash]) -> HashMap<u32, Vec<u64>> {
     let mut index = HashMap::new();
     for entry in hashes {
-        index.entry(entry.hash).or_insert_with(Vec::new).push(entry.time);
+        index
+            .entry(entry.hash)
+            .or_insert_with(Vec::new)
+            .push(entry.time);
     }
     index
 }
@@ -1214,46 +1263,46 @@ impl VideoStabilizer {
             strength: strength.clamp(0.0, 1.0),
         }
     }
-    
+
     /// Estimate camera path from frame-to-frame motion
     pub fn estimate_camera_path(&self, motion_vectors: &[MotionVector]) -> CameraPath {
         // Accumulate motion to get camera path
         let mut path = Vec::with_capacity(motion_vectors.len());
         let mut cumulative = CameraTransform::identity();
-        
+
         for mv in motion_vectors {
             cumulative = cumulative.apply(&mv.transform);
             path.push(cumulative.clone());
         }
-        
+
         CameraPath { transforms: path }
     }
-    
+
     /// Smooth camera path
     pub fn smooth_path(&self, path: &CameraPath) -> CameraPath {
         let n = path.transforms.len();
         let mut smoothed = Vec::with_capacity(n);
-        
+
         for i in 0..n {
             let start = i.saturating_sub(self.window_size / 2);
             let end = (i + self.window_size / 2).min(n);
-            
+
             // Average transforms in window
             let mut avg_tx = 0.0f32;
             let mut avg_ty = 0.0f32;
             let mut avg_angle = 0.0f32;
-            
+
             for j in start..end {
                 avg_tx += path.transforms[j].translation.x;
                 avg_ty += path.transforms[j].translation.y;
                 avg_angle += path.transforms[j].rotation;
             }
-            
+
             let count = (end - start) as f32;
             avg_tx /= count;
             avg_ty /= count;
             avg_angle /= count;
-            
+
             // Blend original with smoothed
             let orig = &path.transforms[i];
             let smooth = CameraTransform {
@@ -1264,23 +1313,29 @@ impl VideoStabilizer {
                 rotation: orig.rotation * (1.0 - self.strength) + avg_angle * self.strength,
                 scale: orig.scale,
             };
-            
+
             smoothed.push(smooth);
         }
-        
-        CameraPath { transforms: smoothed }
+
+        CameraPath {
+            transforms: smoothed,
+        }
     }
-    
+
     /// Compute stabilization transforms
-    pub fn compute_stabilization(&self, original: &CameraPath, smoothed: &CameraPath) -> Vec<CameraTransform> {
-        original.transforms.iter()
+    pub fn compute_stabilization(
+        &self,
+        original: &CameraPath,
+        smoothed: &CameraPath,
+    ) -> Vec<CameraTransform> {
+        original
+            .transforms
+            .iter()
             .zip(smoothed.transforms.iter())
-            .map(|(orig, smooth)| {
-                CameraTransform {
-                    translation: smooth.translation - orig.translation,
-                    rotation: smooth.rotation - orig.rotation,
-                    scale: 1.0,
-                }
+            .map(|(orig, smooth)| CameraTransform {
+                translation: smooth.translation - orig.translation,
+                rotation: smooth.rotation - orig.rotation,
+                scale: 1.0,
             })
             .collect()
     }
@@ -1307,7 +1362,7 @@ impl CameraTransform {
             scale: 1.0,
         }
     }
-    
+
     pub fn apply(&self, other: &CameraTransform) -> Self {
         Self {
             translation: self.translation + other.translation,
@@ -1331,7 +1386,10 @@ fn sample_camera_transform(path: &CameraPath, index: usize, total: usize) -> Cam
     }
     let t = index as f32 / (total - 1) as f32;
     let target = (t * (path.transforms.len() - 1) as f32).round() as usize;
-    path.transforms.get(target).cloned().unwrap_or_else(CameraTransform::identity)
+    path.transforms
+        .get(target)
+        .cloned()
+        .unwrap_or_else(CameraTransform::identity)
 }
 
 // ============================================================================
@@ -1362,11 +1420,11 @@ impl SceneReconstructor {
             stabilizer: VideoStabilizer::new(0.7),
         }
     }
-    
+
     /// Create new reconstruction job
     pub fn create_job(&mut self, name: &str, settings: ReconstructionSettings) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        
+
         let job = SceneReconstructionJob {
             id: id.clone(),
             name: name.to_string(),
@@ -1383,34 +1441,44 @@ impl SceneReconstructor {
             confidence: None,
             output_path: None,
         };
-        
+
         self.jobs.insert(id.clone(), job);
         id
     }
-    
+
     /// Add video source to job
-    pub fn add_source(&mut self, job_id: &str, source: VideoSource) -> Result<(), ReconstructionError> {
-        let job = self.jobs.get_mut(job_id)
+    pub fn add_source(
+        &mut self,
+        job_id: &str,
+        source: VideoSource,
+    ) -> Result<(), ReconstructionError> {
+        let job = self
+            .jobs
+            .get_mut(job_id)
             .ok_or(ReconstructionError::JobNotFound)?;
-        
+
         job.sources.push(source);
         Ok(())
     }
-    
+
     /// Analyze and sync all sources
     pub fn sync_sources(&mut self, job_id: &str) -> Result<(), ReconstructionError> {
-        let job = self.jobs.get_mut(job_id)
+        let job = self
+            .jobs
+            .get_mut(job_id)
             .ok_or(ReconstructionError::JobNotFound)?;
-        
+
         if job.sources.is_empty() {
             return Err(ReconstructionError::NoSources);
         }
-        
+
         job.status.phase = ReconstructionPhase::SyncingTimelines;
         job.status.current_operation = "Synchronizing timelines".to_string();
-        
+
         // Find best reference (prefer official sources)
-        let ref_idx = job.sources.iter()
+        let ref_idx = job
+            .sources
+            .iter()
             .enumerate()
             .filter(|(_, s)| s.audio_track.is_some())
             .max_by(|(_, a), (_, b)| {
@@ -1427,12 +1495,12 @@ impl SceneReconstructor {
                 score_a.cmp(&score_b)
             })
             .map(|(i, _)| i);
-        
+
         if let Some(ref_idx) = ref_idx {
             if let Some(ref_audio) = &job.sources[ref_idx].audio_track {
                 self.audio_sync.set_reference(ref_audio.clone());
             }
-            
+
             // Align other sources
             for i in 0..job.sources.len() {
                 if i == ref_idx {
@@ -1445,7 +1513,7 @@ impl SceneReconstructor {
                     });
                     continue;
                 }
-                
+
                 if let Some(audio) = &job.sources[i].audio_track {
                     if let Some(alignment) = self.audio_sync.find_offset(audio) {
                         job.sources[i].alignment = Some(alignment);
@@ -1453,48 +1521,54 @@ impl SceneReconstructor {
                 }
             }
         }
-        
+
         // Compute total duration
-        job.duration = job.sources.iter()
+        job.duration = job
+            .sources
+            .iter()
             .filter_map(|s| {
                 let offset = s.alignment.as_ref()?.offset_secs;
                 Some(offset + s.metadata.duration_secs)
             })
             .fold(0.0f64, f64::max);
-        
+
         Ok(())
     }
-    
+
     /// Build confidence field
     pub fn build_confidence(&mut self, job_id: &str) -> Result<(), ReconstructionError> {
-        let job = self.jobs.get_mut(job_id)
+        let job = self
+            .jobs
+            .get_mut(job_id)
             .ok_or(ReconstructionError::JobNotFound)?;
-        
+
         job.status.phase = ReconstructionPhase::BuildingConfidence;
         job.status.current_operation = "Building confidence field".to_string();
-        
+
         // Estimate scene bounds from GPS or default
         let bounds_min = na::Point3::new(-50.0, -10.0, -50.0);
         let bounds_max = na::Point3::new(50.0, 30.0, 50.0);
-        
+
         let mut confidence = ConfidenceField::new(
             bounds_min,
             bounds_max,
             (0.0, job.duration),
             job.settings.confidence_voxel_size,
-            1.0,  // 1 second time steps
+            1.0, // 1 second time steps
         );
-        
+
         // Accumulate views from each source
         for source in &job.sources {
             if source.state != SourceState::Ready {
                 continue;
             }
-            
-            let offset = source.alignment.as_ref()
+
+            let offset = source
+                .alignment
+                .as_ref()
                 .map(|a| a.offset_secs)
                 .unwrap_or(0.0);
-            
+
             let quality_weight = source.quality.overall_score;
 
             let num_samples = (source.metadata.duration_secs * source.metadata.fps / 30.0) as usize;
@@ -1528,28 +1602,28 @@ impl SceneReconstructor {
                     transform.translation.y * jitter_scale,
                 );
                 let camera_dir = na::Vector3::new(yaw.sin(), 0.0, yaw.cos());
-                
+
                 confidence.accumulate_view(
                     camera_pos,
                     camera_dir,
-                    1.2,  // ~70 degree FOV
+                    1.2, // ~70 degree FOV
                     global_t,
                     quality_weight,
                 );
             }
         }
-        
+
         confidence.normalize();
         job.confidence = Some(confidence);
-        
+
         Ok(())
     }
-    
+
     /// Get job by ID
     pub fn get_job(&self, job_id: &str) -> Option<&SceneReconstructionJob> {
         self.jobs.get(job_id)
     }
-    
+
     /// List all jobs
     pub fn list_jobs(&self) -> Vec<&SceneReconstructionJob> {
         self.jobs.values().collect()
@@ -1617,7 +1691,7 @@ impl From<&SceneReconstructionJob> for SceneReconstructionJobInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_confidence_field() {
         let mut field = ConfidenceField::new(
@@ -1627,7 +1701,7 @@ mod tests {
             1.0,
             1.0,
         );
-        
+
         field.accumulate_view(
             na::Point3::new(0.0, 0.0, -5.0),
             na::Vector3::new(0.0, 0.0, 1.0),
@@ -1635,14 +1709,14 @@ mod tests {
             5.0,
             1.0,
         );
-        
+
         field.normalize();
-        
+
         // Should have non-zero confidence in front of camera
         let conf = field.sample(na::Point3::new(0.0, 0.0, 0.0), 5.0);
         assert!(conf > 0.0);
     }
-    
+
     #[test]
     fn test_audio_fingerprint() {
         let sync = AudioSynchronizer::new(48000);
@@ -1650,31 +1724,37 @@ mod tests {
         let fp = sync.compute_fingerprint(&samples);
         assert!(!fp.hash.is_empty());
     }
-    
+
     #[test]
     fn test_video_stabilizer() {
         let stabilizer = VideoStabilizer::new(0.7);
-        
-        let motions: Vec<_> = (0..100).map(|i| MotionVector {
-            frame_idx: i,
-            transform: CameraTransform {
-                translation: na::Vector2::new((i as f32 * 0.1).sin() * 5.0, 0.0),
-                rotation: 0.0,
-                scale: 1.0,
-            },
-        }).collect();
-        
+
+        let motions: Vec<_> = (0..100)
+            .map(|i| MotionVector {
+                frame_idx: i,
+                transform: CameraTransform {
+                    translation: na::Vector2::new((i as f32 * 0.1).sin() * 5.0, 0.0),
+                    rotation: 0.0,
+                    scale: 1.0,
+                },
+            })
+            .collect();
+
         let path = stabilizer.estimate_camera_path(&motions);
         let smoothed = stabilizer.smooth_path(&path);
-        
+
         // Smoothed path should have less variation
-        let orig_var: f32 = path.transforms.windows(2)
+        let orig_var: f32 = path
+            .transforms
+            .windows(2)
             .map(|w| (w[1].translation.x - w[0].translation.x).abs())
             .sum();
-        let smooth_var: f32 = smoothed.transforms.windows(2)
+        let smooth_var: f32 = smoothed
+            .transforms
+            .windows(2)
             .map(|w| (w[1].translation.x - w[0].translation.x).abs())
             .sum();
-        
+
         assert!(smooth_var < orig_var);
     }
 }

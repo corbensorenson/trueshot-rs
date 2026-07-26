@@ -339,6 +339,18 @@ export const activateLicenseDevice = async (payload: { device_name?: string }) =
     return res.json();
 };
 
+export const activateLicenseKey = async (payload: { license_key: string; device_name?: string }) => {
+    const res = await fetchAuthed(`${API_Base}/license/activate-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+        throw new Error(await res.text());
+    }
+    return res.json();
+};
+
 export const deactivateLicenseDevice = async (payload: { fingerprint_hash: string }) => {
     const res = await fetchAuthed(`${API_Base}/license/deactivate`, {
         method: 'POST',

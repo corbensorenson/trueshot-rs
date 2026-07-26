@@ -1,14 +1,14 @@
 //! GS2Mesh: Mesh Extraction from 3D Gaussian Splatting
-//! 
+//!
 //! Converts trained 3DGS models to high-quality textured meshes.
-//! 
+//!
 //! Algorithm (ECCV 2024):
 //! 1. Render stereo pairs from trained 3DGS
 //! 2. Dense depth estimation via stereo matching
 //! 3. Depth fusion into TSDF volume
 //! 4. Marching cubes mesh extraction
 //! 5. UV unwrapping and texture baking
-//! 
+//!
 //! This provides a path from neural representation to traditional mesh
 //! suitable for game engines, AR apps, and 3D printing.
 
@@ -16,8 +16,8 @@ use anyhow::Result;
 use nalgebra as na;
 use std::path::PathBuf;
 
-use crate::gaussian_splatting::{GaussianCloud, Camera};
-use crate::mesh::{TsdfGrid, TsdfVoxel, MarchingCubes, MarchingCubesConfig, ExtractedMesh};
+use crate::gaussian_splatting::{Camera, GaussianCloud};
+use crate::mesh::{ExtractedMesh, MarchingCubes, MarchingCubesConfig, TsdfGrid, TsdfVoxel};
 
 /// Type alias for TSDF volume using unified mesh library
 pub type UnifiedTsdfVolume = TsdfGrid;
@@ -107,9 +107,8 @@ impl DepthMap {
         let ray = k_inv * pixel;
 
         let point_cam = ray * depth;
-        let point_world = self.camera_pose * na::Vector4::new(
-            point_cam.x, point_cam.y, point_cam.z, 1.0
-        );
+        let point_world =
+            self.camera_pose * na::Vector4::new(point_cam.x, point_cam.y, point_cam.z, 1.0);
 
         Some(na::Point3::new(point_world.x, point_world.y, point_world.z))
     }
@@ -172,15 +171,17 @@ impl TsdfVolume {
     /// Integrate depth map into TSDF
     pub fn integrate(&mut self, depth_map: &DepthMap, truncation: f32) {
         let k = depth_map.intrinsics;
-        let pose_inv = depth_map.camera_pose.try_inverse().unwrap_or(na::Matrix4::identity());
+        let pose_inv = depth_map
+            .camera_pose
+            .try_inverse()
+            .unwrap_or(na::Matrix4::identity());
 
         for z in 0..self.resolution[2] {
             for y in 0..self.resolution[1] {
                 for x in 0..self.resolution[0] {
                     let voxel_world = self.voxel_center(x, y, z);
-                    let voxel_cam = pose_inv * na::Vector4::new(
-                        voxel_world.x, voxel_world.y, voxel_world.z, 1.0
-                    );
+                    let voxel_cam = pose_inv
+                        * na::Vector4::new(voxel_world.x, voxel_world.y, voxel_world.z, 1.0);
 
                     // Skip if behind camera
                     if voxel_cam.z <= 0.0 {
@@ -197,7 +198,11 @@ impl TsdfVolume {
                     let px = proj.x.round() as i32;
                     let py = proj.y.round() as i32;
 
-                    if px < 0 || py < 0 || px >= depth_map.width as i32 || py >= depth_map.height as i32 {
+                    if px < 0
+                        || py < 0
+                        || px >= depth_map.width as i32
+                        || py >= depth_map.height as i32
+                    {
                         continue;
                     }
 
@@ -208,7 +213,7 @@ impl TsdfVolume {
 
                     // TSDF value
                     let sdf = measured_depth - voxel_cam.z;
-                    
+
                     // Truncate
                     if sdf < -truncation {
                         continue;
@@ -267,7 +272,11 @@ impl TexturedMesh {
         // Write MTL reference if we have texture
         if self.texture.is_some() {
             let mtl_name = path.with_extension("mtl");
-            writeln!(file, "mtllib {}", mtl_name.file_name().unwrap().to_str().unwrap())?;
+            writeln!(
+                file,
+                "mtllib {}",
+                mtl_name.file_name().unwrap().to_str().unwrap()
+            )?;
         }
 
         // Vertices
@@ -295,9 +304,15 @@ impl TexturedMesh {
             writeln!(
                 file,
                 "f {}/{}/{} {}/{}/{} {}/{}/{}",
-                tri[0] + 1, tri[0] + 1, tri[0] + 1,
-                tri[1] + 1, tri[1] + 1, tri[1] + 1,
-                tri[2] + 1, tri[2] + 1, tri[2] + 1,
+                tri[0] + 1,
+                tri[0] + 1,
+                tri[0] + 1,
+                tri[1] + 1,
+                tri[1] + 1,
+                tri[1] + 1,
+                tri[2] + 1,
+                tri[2] + 1,
+                tri[2] + 1,
             )?;
         }
 
@@ -305,12 +320,16 @@ impl TexturedMesh {
         if let Some(ref texture) = self.texture {
             let mtl_path = path.with_extension("mtl");
             let tex_path = path.with_extension("png");
-            
+
             let mut mtl_file = std::fs::File::create(&mtl_path)?;
             writeln!(mtl_file, "newmtl material0")?;
             writeln!(mtl_file, "Ka 1.0 1.0 1.0")?;
             writeln!(mtl_file, "Kd 1.0 1.0 1.0")?;
-            writeln!(mtl_file, "map_Kd {}", tex_path.file_name().unwrap().to_str().unwrap())?;
+            writeln!(
+                mtl_file,
+                "map_Kd {}",
+                tex_path.file_name().unwrap().to_str().unwrap()
+            )?;
 
             texture.save(&tex_path)?;
         }
@@ -325,7 +344,7 @@ impl TexturedMesh {
             let v0 = self.vertices[tri[0] as usize];
             let v1 = self.vertices[tri[1] as usize];
             let v2 = self.vertices[tri[2] as usize];
-            
+
             let edge1 = v1 - v0;
             let edge2 = v2 - v0;
             area += edge1.cross(&edge2).norm() * 0.5;
@@ -347,13 +366,15 @@ impl GS2Mesh {
 
     /// Extract mesh from trained Gaussian cloud
     pub fn extract(&self, gaussians: &GaussianCloud) -> Result<TexturedMesh> {
-        tracing::info!("🔧 GS2Mesh: Starting mesh extraction from {} Gaussians", 
-            gaussians.num_gaussians());
+        tracing::info!(
+            "🔧 GS2Mesh: Starting mesh extraction from {} Gaussians",
+            gaussians.num_gaussians()
+        );
 
         // 1. Compute bounding box
         let (min_bound, max_bound) = self.compute_bounds(gaussians);
         let size = max_bound - min_bound;
-        
+
         tracing::info!("  Bounding box: {:?} to {:?}", min_bound, max_bound);
 
         // 2. Create TSDF volume
@@ -368,10 +389,10 @@ impl GS2Mesh {
         for (i, camera) in cameras.iter().enumerate() {
             // Render depth from 3DGS
             let depth_map = self.render_depth(gaussians, camera)?;
-            
+
             // Integrate into TSDF
             tsdf.integrate(&depth_map, self.config.tsdf_truncation);
-            
+
             if i % 10 == 0 {
                 tracing::info!("  Integrated {}/{} depth maps", i + 1, cameras.len());
             }
@@ -380,16 +401,23 @@ impl GS2Mesh {
         // 5. Marching cubes
         tracing::info!("  Running marching cubes...");
         let mesh = self.marching_cubes(&tsdf)?;
-        tracing::info!("  Extracted {} vertices, {} triangles", 
-            mesh.vertices.len(), mesh.indices.len());
+        tracing::info!(
+            "  Extracted {} vertices, {} triangles",
+            mesh.vertices.len(),
+            mesh.indices.len()
+        );
 
         // 6. UV unwrap
         tracing::info!("  Computing UV coordinates...");
         let mesh = self.compute_uvs(mesh)?;
 
         // 7. Simplify if needed
-        let mut mesh = if self.config.simplify && mesh.indices.len() > self.config.target_triangles {
-            tracing::info!("  Simplifying to {} triangles...", self.config.target_triangles);
+        let mut mesh = if self.config.simplify && mesh.indices.len() > self.config.target_triangles
+        {
+            tracing::info!(
+                "  Simplifying to {} triangles...",
+                self.config.target_triangles
+            );
             self.simplify_mesh(mesh, self.config.target_triangles)?
         } else {
             mesh
@@ -404,8 +432,11 @@ impl GS2Mesh {
         let lod_chain = self.generate_lod_chain(&mesh)?;
         mesh.lod_chain = lod_chain;
 
-        tracing::info!("✅ GS2Mesh complete: {} vertices, {} triangles", 
-            mesh.vertices.len(), mesh.indices.len());
+        tracing::info!(
+            "✅ GS2Mesh complete: {} vertices, {} triangles",
+            mesh.vertices.len(),
+            mesh.indices.len()
+        );
 
         Ok(mesh)
     }
@@ -434,13 +465,17 @@ impl GS2Mesh {
     }
 
     /// Generate virtual cameras around the object
-    fn generate_cameras(&self, min_bound: &na::Point3<f32>, max_bound: &na::Point3<f32>) -> Vec<Camera> {
+    fn generate_cameras(
+        &self,
+        min_bound: &na::Point3<f32>,
+        max_bound: &na::Point3<f32>,
+    ) -> Vec<Camera> {
         let center = na::Point3::new(
             (min_bound.x + max_bound.x) / 2.0,
             (min_bound.y + max_bound.y) / 2.0,
             (min_bound.z + max_bound.z) / 2.0,
         );
-        
+
         let size = max_bound - min_bound;
         let radius = size.norm() * 1.5;
 
@@ -460,13 +495,11 @@ impl GS2Mesh {
                 );
 
                 let transform = self.look_at_matrix(&pos, &center);
-                
+
                 cameras.push(Camera {
                     transform,
                     intrinsics: na::Matrix3::new(
-                        500.0, 0.0, 400.0,
-                        0.0, 500.0, 300.0,
-                        0.0, 0.0, 1.0,
+                        500.0, 0.0, 400.0, 0.0, 500.0, 300.0, 0.0, 0.0, 1.0,
                     ),
                     width: 800,
                     height: 600,
@@ -485,10 +518,8 @@ impl GS2Mesh {
         let up = right.cross(&forward);
 
         na::Matrix4::new(
-            right.x, up.x, -forward.x, eye.x,
-            right.y, up.y, -forward.y, eye.y,
-            right.z, up.z, -forward.z, eye.z,
-            0.0, 0.0, 0.0, 1.0,
+            right.x, up.x, -forward.x, eye.x, right.y, up.y, -forward.y, eye.y, right.z, up.z,
+            -forward.z, eye.z, 0.0, 0.0, 0.0, 1.0,
         )
     }
 
@@ -499,7 +530,10 @@ impl GS2Mesh {
         let mut depth_data = vec![f32::INFINITY; (width * height) as usize];
 
         // Simple z-buffer rendering
-        let view = camera.transform.try_inverse().unwrap_or(na::Matrix4::identity());
+        let view = camera
+            .transform
+            .try_inverse()
+            .unwrap_or(na::Matrix4::identity());
 
         for i in 0..gaussians.num_gaussians() {
             let pos = gaussians.position(i);
@@ -518,11 +552,7 @@ impl GS2Mesh {
             }
 
             // Project to image
-            let proj = camera.intrinsics * na::Vector3::new(
-                cam.x / cam.z,
-                cam.y / cam.z,
-                1.0,
-            );
+            let proj = camera.intrinsics * na::Vector3::new(cam.x / cam.z, cam.y / cam.z, 1.0);
 
             let px = proj.x.round() as i32;
             let py = proj.y.round() as i32;
@@ -548,7 +578,7 @@ impl GS2Mesh {
     fn marching_cubes(&self, tsdf: &TsdfVolume) -> Result<TexturedMesh> {
         // Convert local TsdfVolume to unified TsdfGrid for marching cubes
         let unified_grid = self.convert_to_unified_grid(tsdf);
-        
+
         // Use unified marching cubes with proper triangulation
         let mc = MarchingCubes::new(MarchingCubesConfig {
             threshold: 0.0, // Surface at zero-crossing
@@ -556,13 +586,13 @@ impl GS2Mesh {
             compute_uvs: true,
             uv_scale: 1.0 / self.config.voxel_size,
         });
-        
+
         let extracted = mc.extract(&unified_grid);
-        
+
         // Convert from unified ExtractedMesh to local TexturedMesh
         self.convert_from_unified_mesh(extracted)
     }
-    
+
     /// Convert local TsdfVolume to unified TsdfGrid
     fn convert_to_unified_grid(&self, tsdf: &TsdfVolume) -> TsdfGrid {
         let bounds_max = na::Point3::new(
@@ -570,9 +600,9 @@ impl GS2Mesh {
             tsdf.origin.y + tsdf.resolution[1] as f32 * tsdf.voxel_size,
             tsdf.origin.z + tsdf.resolution[2] as f32 * tsdf.voxel_size,
         );
-        
+
         let mut grid = TsdfGrid::new(tsdf.origin, bounds_max, tsdf.voxel_size);
-        
+
         // Copy TSDF values to unified grid
         for z in 0..tsdf.resolution[2] {
             for y in 0..tsdf.resolution[1] {
@@ -591,22 +621,22 @@ impl GS2Mesh {
                 }
             }
         }
-        
+
         grid
     }
-    
+
     /// Convert from unified ExtractedMesh to local TexturedMesh
     fn convert_from_unified_mesh(&self, extracted: ExtractedMesh) -> Result<TexturedMesh> {
         let mut vertices = Vec::with_capacity(extracted.vertices.len());
         let mut normals = Vec::with_capacity(extracted.vertices.len());
         let mut uvs = Vec::with_capacity(extracted.vertices.len());
-        
+
         for v in &extracted.vertices {
             vertices.push(na::Point3::new(v.position[0], v.position[1], v.position[2]));
             normals.push(na::Vector3::new(v.normal[0], v.normal[1], v.normal[2]));
             uvs.push(na::Vector2::new(v.uv[0], v.uv[1]));
         }
-        
+
         // Convert indices from flat to [u32; 3] triangles
         let mut indices = Vec::with_capacity(extracted.indices.len() / 3);
         for tri in extracted.indices.chunks(3) {
@@ -614,7 +644,7 @@ impl GS2Mesh {
                 indices.push([tri[0], tri[1], tri[2]]);
             }
         }
-        
+
         Ok(TexturedMesh {
             vertices,
             normals,
@@ -653,7 +683,7 @@ impl GS2Mesh {
 
             // Box projection based on dominant axis
             let abs_normal = na::Vector3::new(normal.x.abs(), normal.y.abs(), normal.z.abs());
-            
+
             let uv = if abs_normal.x > abs_normal.y && abs_normal.x > abs_normal.z {
                 na::Vector2::new(v.z, v.y)
             } else if abs_normal.y > abs_normal.z {
@@ -669,7 +699,12 @@ impl GS2Mesh {
     }
 
     /// Bake texture from 3DGS colors
-    fn bake_texture(&self, mut mesh: TexturedMesh, gaussians: &GaussianCloud, _cameras: &[Camera]) -> Result<TexturedMesh> {
+    fn bake_texture(
+        &self,
+        mut mesh: TexturedMesh,
+        gaussians: &GaussianCloud,
+        _cameras: &[Camera],
+    ) -> Result<TexturedMesh> {
         let size = self.config.texture_resolution;
         let mut texture = image::RgbaImage::new(size, size);
 
@@ -702,7 +737,11 @@ impl GS2Mesh {
                 }
             }
 
-            texture.put_pixel(px.min(size - 1), py.min(size - 1), image::Rgba([color[0], color[1], color[2], 255]));
+            texture.put_pixel(
+                px.min(size - 1),
+                py.min(size - 1),
+                image::Rgba([color[0], color[1], color[2], 255]),
+            );
         }
 
         mesh.texture = Some(texture);
@@ -772,10 +811,14 @@ struct Quadric {
 
 impl Quadric {
     fn zero() -> Self {
-        Self { m: na::Matrix4::zeros() }
+        Self {
+            m: na::Matrix4::zeros(),
+        }
     }
     fn from_plane(plane: na::Vector4<f32>) -> Self {
-        Self { m: plane * plane.transpose() }
+        Self {
+            m: plane * plane.transpose(),
+        }
     }
     fn add(&mut self, other: &Quadric) {
         self.m += other.m;
@@ -807,7 +850,10 @@ impl PartialOrd for HeapEdge {
 
 impl Ord for HeapEdge {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.cost.partial_cmp(&self.cost).unwrap_or(std::cmp::Ordering::Equal)
+        other
+            .cost
+            .partial_cmp(&self.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -836,7 +882,9 @@ fn qem_simplify(
                 if preserve_uv_seams && is_seam_edge(u, v, &uvs, uv_seam_threshold) {
                     continue;
                 }
-                if preserve_boundaries && edge_face_count(u, v, &indices, &face_valid, &vertex_faces) <= 1 {
+                if preserve_boundaries
+                    && edge_face_count(u, v, &indices, &face_valid, &vertex_faces) <= 1
+                {
                     continue;
                 }
                 let edge = compute_edge(u, v, &vertices, &uvs, &quadrics);
@@ -911,9 +959,11 @@ fn qem_simplify(
         neighbors[edge.v].clear();
 
         // Recompute quadric for u and neighbors
-        quadrics[edge.u] = recompute_vertex_quadric(edge.u, &vertices, &indices, &face_valid, &vertex_faces);
+        quadrics[edge.u] =
+            recompute_vertex_quadric(edge.u, &vertices, &indices, &face_valid, &vertex_faces);
         for &n in neighbors[edge.u].iter() {
-            quadrics[n] = recompute_vertex_quadric(n, &vertices, &indices, &face_valid, &vertex_faces);
+            quadrics[n] =
+                recompute_vertex_quadric(n, &vertices, &indices, &face_valid, &vertex_faces);
         }
 
         // Push updated edges
@@ -922,7 +972,9 @@ fn qem_simplify(
             if preserve_uv_seams && is_seam_edge(a, b, &uvs, uv_seam_threshold) {
                 continue;
             }
-            if preserve_boundaries && edge_face_count(a, b, &indices, &face_valid, &vertex_faces) <= 1 {
+            if preserve_boundaries
+                && edge_face_count(a, b, &indices, &face_valid, &vertex_faces) <= 1
+            {
                 continue;
             }
             let candidate = compute_edge(a, b, &vertices, &uvs, &quadrics);
@@ -977,7 +1029,13 @@ pub fn simplify_textured_mesh(
     preserve_uv_seams: bool,
     uv_seam_threshold: f32,
 ) -> Result<TexturedMesh> {
-    qem_simplify(mesh, target_triangles, preserve_boundaries, preserve_uv_seams, uv_seam_threshold)
+    qem_simplify(
+        mesh,
+        target_triangles,
+        preserve_boundaries,
+        preserve_uv_seams,
+        uv_seam_threshold,
+    )
 }
 
 fn build_vertex_faces(vertex_count: usize, indices: &[[u32; 3]]) -> Vec<Vec<usize>> {
@@ -990,7 +1048,10 @@ fn build_vertex_faces(vertex_count: usize, indices: &[[u32; 3]]) -> Vec<Vec<usiz
     faces
 }
 
-fn build_vertex_neighbors(vertex_count: usize, indices: &[[u32; 3]]) -> Vec<std::collections::HashSet<usize>> {
+fn build_vertex_neighbors(
+    vertex_count: usize,
+    indices: &[[u32; 3]],
+) -> Vec<std::collections::HashSet<usize>> {
     let mut neighbors = vec![std::collections::HashSet::new(); vertex_count];
     for tri in indices {
         let a = tri[0] as usize;
@@ -1006,7 +1067,11 @@ fn build_vertex_neighbors(vertex_count: usize, indices: &[[u32; 3]]) -> Vec<std:
     neighbors
 }
 
-fn build_quadrics(vertices: &[na::Point3<f32>], indices: &[[u32; 3]], face_valid: &[bool]) -> Vec<Quadric> {
+fn build_quadrics(
+    vertices: &[na::Point3<f32>],
+    indices: &[[u32; 3]],
+    face_valid: &[bool],
+) -> Vec<Quadric> {
     let mut quadrics = vec![Quadric::zero(); vertices.len()];
     for (idx, tri) in indices.iter().enumerate() {
         if !face_valid[idx] {
@@ -1067,9 +1132,15 @@ fn compute_edge(
 ) -> HeapEdge {
     let q = quadrics[u].m + quadrics[v].m;
     let a = na::Matrix3::new(
-        q[(0, 0)], q[(0, 1)], q[(0, 2)],
-        q[(1, 0)], q[(1, 1)], q[(1, 2)],
-        q[(2, 0)], q[(2, 1)], q[(2, 2)],
+        q[(0, 0)],
+        q[(0, 1)],
+        q[(0, 2)],
+        q[(1, 0)],
+        q[(1, 1)],
+        q[(1, 2)],
+        q[(2, 0)],
+        q[(2, 1)],
+        q[(2, 2)],
     );
     let b = na::Vector3::new(q[(0, 3)], q[(1, 3)], q[(2, 3)]);
     let position = if let Some(inv) = a.try_inverse() {
@@ -1140,11 +1211,7 @@ mod tests {
             width: 10,
             height: 10,
             camera_pose: na::Matrix4::identity(),
-            intrinsics: na::Matrix3::new(
-                10.0, 0.0, 5.0,
-                0.0, 10.0, 5.0,
-                0.0, 0.0, 1.0,
-            ),
+            intrinsics: na::Matrix3::new(10.0, 0.0, 5.0, 0.0, 10.0, 5.0, 0.0, 0.0, 1.0),
         };
 
         let point = depth_map.unproject(5, 5);

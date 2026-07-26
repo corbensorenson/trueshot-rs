@@ -1,11 +1,11 @@
 //! 3D Gaussian Primitive and Cloud
-//! 
+//!
 //! Core data structures for 3D Gaussian Splatting.
 
-use nalgebra as na;
 use anyhow::Result;
-use std::path::PathBuf;
+use nalgebra as na;
 use std::io::Write;
+use std::path::PathBuf;
 use zstd;
 
 pub const SH_DEGREE: usize = 4;
@@ -32,18 +32,18 @@ impl Gaussian3D {
     pub fn from_point(position: na::Point3<f32>, color: [u8; 3]) -> Self {
         // Initial rotation: identity
         let rotation = na::Vector4::new(1.0, 0.0, 0.0, 0.0);
-        
+
         // Initial scale: small sphere
         let scale = na::Vector3::new(-4.0, -4.0, -4.0); // exp(-4) ≈ 0.018
-        
+
         // Initial opacity: fully opaque (before sigmoid)
         let opacity = 0.1;
-        
+
         // Initialize SH coefficients with DC term (base color)
         let mut sh_coeffs = vec![0.0f32; SH_COEFFS_TOTAL];
         // SH DC term = color * C0 where C0 = 0.28209479
         let c0 = 0.28209479;
-        sh_coeffs[0] = (color[0] as f32 / 255.0 - 0.5) / c0;  // R
+        sh_coeffs[0] = (color[0] as f32 / 255.0 - 0.5) / c0; // R
         sh_coeffs[SH_COEFFS_PER_CHANNEL] = (color[1] as f32 / 255.0 - 0.5) / c0; // G
         sh_coeffs[SH_COEFFS_PER_CHANNEL * 2] = (color[2] as f32 / 255.0 - 0.5) / c0; // B
 
@@ -60,7 +60,7 @@ impl Gaussian3D {
     pub fn covariance(&self) -> na::Matrix3<f32> {
         // Rotation matrix from quaternion
         let r = self.rotation_matrix();
-        
+
         // Scale matrix (exp of log-scale)
         let s = na::Matrix3::from_diagonal(&na::Vector3::new(
             self.scale.x.exp(),
@@ -81,9 +81,15 @@ impl Gaussian3D {
         let z = self.rotation.z;
 
         na::Matrix3::new(
-            1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y),
-            2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x),
-            2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y),
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - w * z),
+            2.0 * (x * z + w * y),
+            2.0 * (x * y + w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - w * x),
+            2.0 * (x * z - w * y),
+            2.0 * (y * z + w * x),
+            1.0 - 2.0 * (x * x + y * y),
         )
     }
 
@@ -111,7 +117,8 @@ pub struct GaussianCloud {
 impl GaussianCloud {
     /// Create from initial point cloud
     pub fn from_points(points: &[(na::Point3<f32>, [u8; 3])]) -> Self {
-        let gaussians: Vec<Gaussian3D> = points.iter()
+        let gaussians: Vec<Gaussian3D> = points
+            .iter()
             .map(|(pos, color)| Gaussian3D::from_point(*pos, *color))
             .collect();
 
@@ -216,25 +223,25 @@ impl GaussianCloud {
     pub fn split_gaussians(&mut self, indices: &[usize]) {
         for &i in indices {
             let original = &self.gaussians[i];
-            
+
             // Create two smaller Gaussians
             let scale_reduction = 0.8f32.ln(); // Reduce scale by 20%
-            
+
             let mut g1 = original.clone();
             let mut g2 = original.clone();
-            
+
             // Offset in random directions based on scale
             let offset = 0.01;
             g1.position.x += offset;
             g2.position.x -= offset;
-            
+
             // Reduce scale
             g1.scale += na::Vector3::new(scale_reduction, scale_reduction, scale_reduction);
             g2.scale += na::Vector3::new(scale_reduction, scale_reduction, scale_reduction);
-            
+
             // Replace original with g1
             self.gaussians[i] = g1;
-            
+
             // Add g2
             self.gaussians.push(g2);
             self.position_gradients.push(na::Vector3::zeros());
@@ -266,7 +273,9 @@ impl GaussianCloud {
 
         // Sort Gaussians by depth (front to back for alpha blending would be back to front,
         // but we use a simplified depth-test approach)
-        let view_matrix = camera.transform.try_inverse()
+        let view_matrix = camera
+            .transform
+            .try_inverse()
             .unwrap_or(na::Matrix4::identity());
 
         let mut sorted_indices: Vec<(usize, f32)> = self.gaussians.iter()
@@ -284,13 +293,14 @@ impl GaussianCloud {
         for (i, depth) in sorted_indices {
             let g = &self.gaussians[i];
             let opacity = g.activated_opacity();
-            
+
             if opacity < 0.01 {
                 continue;
             }
 
             // Project center
-            let cam_pos = view_matrix * na::Vector4::new(g.position.x, g.position.y, g.position.z, 1.0);
+            let cam_pos =
+                view_matrix * na::Vector4::new(g.position.x, g.position.y, g.position.z, 1.0);
             if cam_pos.z <= 0.0 {
                 continue;
             }
@@ -331,11 +341,10 @@ impl GaussianCloud {
                     // Gaussian falloff
                     let qx = dx as f32;
                     let qy = dy as f32;
-                    let power = -0.5 * (
-                        inv_cov[0] * qx * qx +
-                        2.0 * inv_cov[1] * qx * qy +
-                        inv_cov[2] * qy * qy
-                    );
+                    let power = -0.5
+                        * (inv_cov[0] * qx * qx
+                            + 2.0 * inv_cov[1] * qx * qy
+                            + inv_cov[2] * qy * qy);
                     if power > 0.0 {
                         continue;
                     }
@@ -348,9 +357,12 @@ impl GaussianCloud {
 
                     // Alpha blending (back-to-front)
                     let current = image.get_pixel(px, py);
-                    let new_r = (current[0] as f32 * (1.0 - alpha) + color[0] * 255.0 * alpha).round() as u8;
-                    let new_g = (current[1] as f32 * (1.0 - alpha) + color[1] * 255.0 * alpha).round() as u8;
-                    let new_b = (current[2] as f32 * (1.0 - alpha) + color[2] * 255.0 * alpha).round() as u8;
+                    let new_r = (current[0] as f32 * (1.0 - alpha) + color[0] * 255.0 * alpha)
+                        .round() as u8;
+                    let new_g = (current[1] as f32 * (1.0 - alpha) + color[1] * 255.0 * alpha)
+                        .round() as u8;
+                    let new_b = (current[2] as f32 * (1.0 - alpha) + color[2] * 255.0 * alpha)
+                        .round() as u8;
 
                     image.put_pixel(px, py, image::Rgb([new_r, new_g, new_b]));
                     let _ = depth;
@@ -375,7 +387,10 @@ impl GaussianCloud {
         Vec<Vec<f32>>,
     ) {
         let width = rendered.width().min(ground_truth.width()).min(camera.width) as i32;
-        let height = rendered.height().min(ground_truth.height()).min(camera.height) as i32;
+        let height = rendered
+            .height()
+            .min(ground_truth.height())
+            .min(camera.height) as i32;
         let mut position_grad = vec![na::Vector3::zeros(); self.gaussians.len()];
         let mut opacity_grad = vec![0.0f32; self.gaussians.len()];
         let mut scale_grad = vec![na::Vector3::zeros(); self.gaussians.len()];
@@ -383,10 +398,19 @@ impl GaussianCloud {
         let mut sh_grad = vec![vec![0.0f32; SH_COEFFS_TOTAL]; self.gaussians.len()];
 
         if width <= 0 || height <= 0 {
-            return (position_grad, opacity_grad, scale_grad, rotation_grad, sh_grad);
+            return (
+                position_grad,
+                opacity_grad,
+                scale_grad,
+                rotation_grad,
+                sh_grad,
+            );
         }
 
-        let view_matrix = camera.transform.try_inverse().unwrap_or(na::Matrix4::identity());
+        let view_matrix = camera
+            .transform
+            .try_inverse()
+            .unwrap_or(na::Matrix4::identity());
         let rot = view_matrix.fixed_slice::<3, 3>(0, 0).into_owned();
         let rot_t = rot.transpose();
         let fx = camera.intrinsics[(0, 0)];
@@ -399,7 +423,8 @@ impl GaussianCloud {
                 continue;
             }
 
-            let cam_pos = view_matrix * na::Vector4::new(g.position.x, g.position.y, g.position.z, 1.0);
+            let cam_pos =
+                view_matrix * na::Vector4::new(g.position.x, g.position.y, g.position.z, 1.0);
             if cam_pos.z <= 0.0 {
                 continue;
             }
@@ -407,7 +432,8 @@ impl GaussianCloud {
             let u = fx * (cam_pos.x / cam_pos.z) + cx;
             let v = fy * (cam_pos.y / cam_pos.z) + cy;
 
-            let cov2d = project_covariance(&g.covariance(), cam_pos.x, cam_pos.y, cam_pos.z, fx, fy);
+            let cov2d =
+                project_covariance(&g.covariance(), cam_pos.x, cam_pos.y, cam_pos.z, fx, fy);
             let (inv_cov, mut radius) = match invert_cov2d(&cov2d) {
                 Some(result) => result,
                 None => continue,
@@ -441,7 +467,8 @@ impl GaussianCloud {
                     let dx = px as f32 + 0.5 - u;
                     let dy = py as f32 + 0.5 - v;
 
-                    let quad = inv_cov[0] * dx * dx + 2.0 * inv_cov[1] * dx * dy + inv_cov[2] * dy * dy;
+                    let quad =
+                        inv_cov[0] * dx * dx + 2.0 * inv_cov[1] * dx * dy + inv_cov[2] * dy * dy;
                     let power = -0.5 * quad;
                     if power > 0.0 {
                         continue;
@@ -505,11 +532,7 @@ impl GaussianCloud {
                     grad_inv_cov[1] += d_loss_d_quad * 2.0 * dx * dy;
                     grad_inv_cov[2] += d_loss_d_quad * dy * dy;
 
-                    let d_loss_d_color = [
-                        error[0] * alpha,
-                        error[1] * alpha,
-                        error[2] * alpha,
-                    ];
+                    let d_loss_d_color = [error[0] * alpha, error[1] * alpha, error[2] * alpha];
                     for channel in 0..3 {
                         if clamp_mask[channel] == 0.0 {
                             continue;
@@ -526,7 +549,10 @@ impl GaussianCloud {
             position_grad[idx] = rot_t * grad_cam;
             opacity_grad[idx] = grad_opacity;
             scale_grad[idx] = grad_scale;
-            if grad_inv_cov[0].abs() > 0.0 || grad_inv_cov[1].abs() > 0.0 || grad_inv_cov[2].abs() > 0.0 {
+            if grad_inv_cov[0].abs() > 0.0
+                || grad_inv_cov[1].abs() > 0.0
+                || grad_inv_cov[2].abs() > 0.0
+            {
                 let inv_cov_mat = na::Matrix2::new(inv_cov[0], inv_cov[1], inv_cov[1], inv_cov[2]);
                 let grad_inv_mat = na::Matrix2::new(
                     grad_inv_cov[0],
@@ -536,8 +562,12 @@ impl GaussianCloud {
                 );
                 let grad_cov2d = -inv_cov_mat * grad_inv_mat * inv_cov_mat;
                 let j = na::Matrix2x3::new(
-                    fx * inv_z, 0.0, -fx * cam_pos.x * inv_z2,
-                    0.0, fy * inv_z, -fy * cam_pos.y * inv_z2,
+                    fx * inv_z,
+                    0.0,
+                    -fx * cam_pos.x * inv_z2,
+                    0.0,
+                    fy * inv_z,
+                    -fy * cam_pos.y * inv_z2,
                 );
                 let grad_cov3d = j.transpose() * grad_cov2d * j;
                 let scale = na::Vector3::new(g.scale.x.exp(), g.scale.y.exp(), g.scale.z.exp());
@@ -556,7 +586,13 @@ impl GaussianCloud {
             }
         }
 
-        (position_grad, opacity_grad, scale_grad, rotation_grad, sh_grad)
+        (
+            position_grad,
+            opacity_grad,
+            scale_grad,
+            rotation_grad,
+            sh_grad,
+        )
     }
 
     /// Export to PLY format
@@ -573,12 +609,12 @@ impl GaussianCloud {
         writeln!(file, "property float nx")?;
         writeln!(file, "property float ny")?;
         writeln!(file, "property float nz")?;
-        
+
         // Spherical harmonics
         for i in 0..SH_COEFFS_TOTAL {
             writeln!(file, "property float f_dc_{}", i)?;
         }
-        
+
         writeln!(file, "property float opacity")?;
         writeln!(file, "property float scale_0")?;
         writeln!(file, "property float scale_1")?;
@@ -595,7 +631,7 @@ impl GaussianCloud {
             file.write_all(&g.position.x.to_le_bytes())?;
             file.write_all(&g.position.y.to_le_bytes())?;
             file.write_all(&g.position.z.to_le_bytes())?;
-            
+
             // Normal (dummy)
             file.write_all(&0.0f32.to_le_bytes())?;
             file.write_all(&0.0f32.to_le_bytes())?;
@@ -676,12 +712,7 @@ impl GaussianCloud {
 fn sh_dc_to_srgb(sh_coeffs: &[f32]) -> (u8, u8, u8) {
     let c0 = 0.28209479;
     let r = sh_coeffs.get(0).copied().unwrap_or(0.0) * c0 + 0.5;
-    let g = sh_coeffs
-        .get(SH_COEFFS_PER_CHANNEL)
-        .copied()
-        .unwrap_or(0.0)
-        * c0
-        + 0.5;
+    let g = sh_coeffs.get(SH_COEFFS_PER_CHANNEL).copied().unwrap_or(0.0) * c0 + 0.5;
     let b = sh_coeffs
         .get(SH_COEFFS_PER_CHANNEL * 2)
         .copied()
@@ -847,7 +878,10 @@ fn eval_sh_basis(view_dir: na::Vector3<f32>) -> [f32; SH_COEFFS_PER_CHANNEL] {
     ]
 }
 
-fn eval_sh_color(sh_coeffs: &[f32], basis: &[f32; SH_COEFFS_PER_CHANNEL]) -> ([f32; 3], [f32; 3], [f32; 3]) {
+fn eval_sh_color(
+    sh_coeffs: &[f32],
+    basis: &[f32; SH_COEFFS_PER_CHANNEL],
+) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let mut raw = [0.0f32; 3];
     let mut color = [0.0f32; 3];
     let mut mask = [1.0f32; 3];

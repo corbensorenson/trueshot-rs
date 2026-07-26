@@ -12,9 +12,9 @@
 //! - Kalman filter-based trajectory prediction
 //! - Cross-frame object tracking and association
 
-use uuid::Uuid;
 use nalgebra as na;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 // ============================================================================
 // Bounding Boxes
@@ -31,11 +31,11 @@ impl BoundingBox3D {
     pub fn new(min: na::Point3<f32>, max: na::Point3<f32>) -> Self {
         Self { min, max }
     }
-    
+
     pub fn from_points(points: impl Iterator<Item = na::Point3<f32>>) -> Self {
         let mut min = na::Point3::new(f32::MAX, f32::MAX, f32::MAX);
         let mut max = na::Point3::new(f32::MIN, f32::MIN, f32::MIN);
-        
+
         for p in points {
             min.x = min.x.min(p.x);
             min.y = min.y.min(p.y);
@@ -44,52 +44,58 @@ impl BoundingBox3D {
             max.y = max.y.max(p.y);
             max.z = max.z.max(p.z);
         }
-        
+
         Self { min, max }
     }
-    
+
     /// Compute center point
     pub fn center(&self) -> na::Point3<f32> {
         na::Point3::from((self.min.coords + self.max.coords) / 2.0)
     }
-    
+
     /// Compute size vector
     pub fn size(&self) -> na::Vector3<f32> {
         self.max - self.min
     }
-    
+
     /// Compute volume
     pub fn volume(&self) -> f32 {
         let s = self.size();
         s.x * s.y * s.z
     }
-    
+
     /// Compute surface area
     pub fn surface_area(&self) -> f32 {
         let s = self.size();
         2.0 * (s.x * s.y + s.y * s.z + s.z * s.x)
     }
-    
+
     /// Check if point is inside
     pub fn contains(&self, point: &na::Point3<f32>) -> bool {
-        point.x >= self.min.x && point.x <= self.max.x
-            && point.y >= self.min.y && point.y <= self.max.y
-            && point.z >= self.min.z && point.z <= self.max.z
+        point.x >= self.min.x
+            && point.x <= self.max.x
+            && point.y >= self.min.y
+            && point.y <= self.max.y
+            && point.z >= self.min.z
+            && point.z <= self.max.z
     }
-    
+
     /// Check if boxes intersect
     pub fn intersects(&self, other: &BoundingBox3D) -> bool {
-        self.min.x <= other.max.x && self.max.x >= other.min.x
-            && self.min.y <= other.max.y && self.max.y >= other.min.y
-            && self.min.z <= other.max.z && self.max.z >= other.min.z
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+            && self.min.z <= other.max.z
+            && self.max.z >= other.min.z
     }
-    
+
     /// Compute IoU (Intersection over Union)
     pub fn iou(&self, other: &BoundingBox3D) -> f32 {
         if !self.intersects(other) {
             return 0.0;
         }
-        
+
         let inter_min = na::Point3::new(
             self.min.x.max(other.min.x),
             self.min.y.max(other.min.y),
@@ -100,18 +106,18 @@ impl BoundingBox3D {
             self.max.y.min(other.max.y),
             self.max.z.min(other.max.z),
         );
-        
+
         let inter = BoundingBox3D::new(inter_min, inter_max);
         let inter_vol = inter.volume();
         let union_vol = self.volume() + other.volume() - inter_vol;
-        
+
         if union_vol > 0.0 {
             inter_vol / union_vol
         } else {
             0.0
         }
     }
-    
+
     /// Expand box by margin
     pub fn expand(&self, margin: f32) -> Self {
         Self {
@@ -151,17 +157,17 @@ impl MotionClass {
             MotionClass::Rapid
         }
     }
-    
+
     /// Get recommended update frequency (frames between updates)
     pub fn update_interval(&self) -> usize {
         match self {
-            MotionClass::Static => 30,  // Once per second at 30fps
-            MotionClass::Slow => 5,     // 6 times per second
-            MotionClass::Dynamic => 1,  // Every frame
-            MotionClass::Rapid => 1,    // Every frame with priority
+            MotionClass::Static => 30, // Once per second at 30fps
+            MotionClass::Slow => 5,    // 6 times per second
+            MotionClass::Dynamic => 1, // Every frame
+            MotionClass::Rapid => 1,   // Every frame with priority
         }
     }
-    
+
     /// Check if can be converted to mesh
     pub fn is_meshifiable(&self) -> bool {
         matches!(self, MotionClass::Static)
@@ -253,7 +259,7 @@ impl MotionAnalyzer {
             current_frame: 0,
         }
     }
-    
+
     /// Update motion state for an object
     pub fn update(
         &mut self,
@@ -261,27 +267,25 @@ impl MotionAnalyzer {
         position: na::Point3<f32>,
         bounds: BoundingBox3D,
     ) -> MotionState {
-        let state = self.states.entry(object_id).or_insert_with(|| {
-            MotionState {
-                position,
-                bounds: bounds.clone(),
-                ..Default::default()
-            }
+        let state = self.states.entry(object_id).or_insert_with(|| MotionState {
+            position,
+            bounds: bounds.clone(),
+            ..Default::default()
         });
-        
+
         // Compute deltas
         let position_delta = position - state.position;
         let new_velocity = position_delta; // Assuming 1 frame timestep
         let acceleration_delta = new_velocity - state.velocity;
-        
+
         // EMA smoothing
         let alpha = self.config.ema_alpha;
         state.velocity = state.velocity * (1.0 - alpha) + new_velocity * alpha;
         state.acceleration = state.acceleration * (1.0 - alpha) + acceleration_delta * alpha;
-        
+
         // Update position
         state.position = position;
-        
+
         // Compute shape change (bounding box volume ratio)
         let prev_vol = state.bounds.volume();
         let curr_vol = bounds.volume();
@@ -291,31 +295,31 @@ impl MotionAnalyzer {
             0.0
         };
         state.bounds = bounds;
-        
+
         // Compute motion score
         let pos_score = position_delta.norm().min(1.0);
         let vel_score = state.velocity.norm().min(1.0);
         let acc_score = state.acceleration.norm().min(1.0);
-        
+
         state.score = self.config.position_weight * pos_score
             + self.config.velocity_weight * vel_score
             + self.config.acceleration_weight * acc_score
             + self.config.shape_weight * shape_delta;
-        
+
         state.score = state.score.clamp(0.0, 1.0);
         state.class = MotionClass::from_score(state.score);
-        
+
         // Update history
         state.history.push(position);
         if state.history.len() > self.config.history_frames {
             state.history.remove(0);
         }
-        
+
         state.last_update_frame = self.current_frame;
-        
+
         state.clone()
     }
-    
+
     /// Predict future position
     pub fn predict(&self, object_id: &Uuid, frames_ahead: f32) -> Option<na::Point3<f32>> {
         self.states.get(object_id).map(|state| {
@@ -325,12 +329,12 @@ impl MotionAnalyzer {
             state.position + pos_delta
         })
     }
-    
+
     /// Get motion state for object
     pub fn get_state(&self, object_id: &Uuid) -> Option<&MotionState> {
         self.states.get(object_id)
     }
-    
+
     /// Get all static objects (meshification candidates)
     pub fn get_static_objects(&self) -> Vec<Uuid> {
         self.states
@@ -339,17 +343,16 @@ impl MotionAnalyzer {
             .map(|(id, _)| *id)
             .collect()
     }
-    
+
     /// Advance frame counter
     pub fn advance_frame(&mut self) {
         self.current_frame += 1;
     }
-    
+
     /// Remove stale objects
     pub fn prune_stale(&mut self, max_frames: u64) {
-        self.states.retain(|_, state| {
-            self.current_frame - state.last_update_frame < max_frames
-        });
+        self.states
+            .retain(|_, state| self.current_frame - state.last_update_frame < max_frames);
     }
 }
 
@@ -415,25 +418,25 @@ impl ObjectSegmenter {
     pub fn new(config: SegmentationConfig) -> Self {
         Self { config }
     }
-    
+
     /// Segment points into objects
     pub fn segment(&self, positions: &[na::Point3<f32>]) -> Vec<SegmentedObject> {
         if positions.is_empty() {
             return Vec::new();
         }
-        
+
         let mut visited = vec![false; positions.len()];
         let mut clusters: Vec<Vec<usize>> = Vec::new();
-        
+
         // DBSCAN-like clustering
         for i in 0..positions.len() {
             if visited[i] {
                 continue;
             }
-            
+
             let mut cluster = Vec::new();
             self.expand_cluster(positions, i, &mut cluster, &mut visited);
-            
+
             if cluster.len() >= self.config.min_cluster_size {
                 clusters.push(cluster);
                 if clusters.len() >= self.config.max_objects {
@@ -441,14 +444,14 @@ impl ObjectSegmenter {
                 }
             }
         }
-        
+
         // Convert to segmented objects
         clusters
             .into_iter()
             .map(|indices| self.create_object(positions, indices))
             .collect()
     }
-    
+
     /// Expand cluster using region growing
     fn expand_cluster(
         &self,
@@ -458,14 +461,14 @@ impl ObjectSegmenter {
         visited: &mut [bool],
     ) {
         let mut stack = vec![start];
-        
+
         while let Some(idx) = stack.pop() {
             if visited[idx] {
                 continue;
             }
             visited[idx] = true;
             cluster.push(idx);
-            
+
             // Find neighbors
             let pos = positions[idx];
             for (j, other_pos) in positions.iter().enumerate() {
@@ -475,14 +478,14 @@ impl ObjectSegmenter {
             }
         }
     }
-    
+
     /// Create a SegmentedObject from cluster indices
     fn create_object(&self, positions: &[na::Point3<f32>], indices: Vec<usize>) -> SegmentedObject {
         let points = indices.iter().map(|&i| positions[i]);
         let bounds = BoundingBox3D::from_points(points);
         let centroid = bounds.center();
         let surface_area = bounds.surface_area();
-        
+
         SegmentedObject {
             id: Uuid::new_v4(),
             point_indices: indices,
@@ -557,12 +560,12 @@ impl TrackedObject {
             hits: 1,
         }
     }
-    
+
     /// Check if track is confirmed (enough hits)
     pub fn is_confirmed(&self) -> bool {
         self.hits >= 3
     }
-    
+
     /// Check if track is lost
     pub fn is_lost(&self, max_frames: usize) -> bool {
         self.frames_lost > max_frames
@@ -586,104 +589,106 @@ impl ObjectTracker {
             frame_count: 0,
         }
     }
-    
+
     /// Update tracker with new detections
     pub fn update(&mut self, detections: Vec<SegmentedObject>) -> Vec<TrackedObject> {
         self.frame_count += 1;
         self.motion_analyzer.advance_frame();
-        
+
         // Match detections to existing tracks
         let mut matched_tracks = vec![false; self.tracks.len()];
         let mut matched_dets = vec![false; detections.len()];
-        
+
         // Greedy matching by distance
         for (t_idx, track) in self.tracks.iter_mut().enumerate() {
             let mut best_match: Option<(usize, f32)> = None;
-            
+
             for (d_idx, det) in detections.iter().enumerate() {
                 if matched_dets[d_idx] {
                     continue;
                 }
-                
+
                 let dist = na::distance(&track.object.centroid, &det.centroid);
                 let iou = track.object.bounds.iou(&det.bounds);
-                
-                if dist < self.config.max_association_distance || iou > self.config.min_iou_threshold {
+
+                if dist < self.config.max_association_distance
+                    || iou > self.config.min_iou_threshold
+                {
                     let score = dist - iou * self.config.max_association_distance;
                     if best_match.map_or(true, |(_, s)| score < s) {
                         best_match = Some((d_idx, score));
                     }
                 }
             }
-            
+
             if let Some((d_idx, _)) = best_match {
                 matched_tracks[t_idx] = true;
                 matched_dets[d_idx] = true;
-                
+
                 // Update track
                 let det = &detections[d_idx];
                 track.object = det.clone();
-                track.motion = self.motion_analyzer.update(
-                    track.id,
-                    det.centroid,
-                    det.bounds.clone(),
-                );
+                track.motion =
+                    self.motion_analyzer
+                        .update(track.id, det.centroid, det.bounds.clone());
                 track.age += 1;
                 track.hits += 1;
                 track.frames_lost = 0;
             }
         }
-        
+
         // Increment lost count for unmatched tracks
         for (i, track) in self.tracks.iter_mut().enumerate() {
             if !matched_tracks[i] {
                 track.frames_lost += 1;
             }
         }
-        
+
         // Create new tracks for unmatched detections
         for (i, det) in detections.into_iter().enumerate() {
             if !matched_dets[i] {
                 let mut track = TrackedObject::new(det.clone());
-                track.motion = self.motion_analyzer.update(
-                    track.id,
-                    det.centroid,
-                    det.bounds,
-                );
+                track.motion = self
+                    .motion_analyzer
+                    .update(track.id, det.centroid, det.bounds);
                 self.tracks.push(track);
             }
         }
-        
+
         // Remove lost tracks
-        self.tracks.retain(|t| !t.is_lost(self.config.max_frames_lost));
-        
+        self.tracks
+            .retain(|t| !t.is_lost(self.config.max_frames_lost));
+
         // Return confirmed tracks
-        self.tracks.iter()
+        self.tracks
+            .iter()
             .filter(|t| t.is_confirmed())
             .cloned()
             .collect()
     }
-    
+
     /// Get all active tracks
     pub fn get_tracks(&self) -> &[TrackedObject] {
         &self.tracks
     }
-    
+
     /// Get track by ID
     pub fn get_track(&self, id: &Uuid) -> Option<&TrackedObject> {
         self.tracks.iter().find(|t| &t.id == id)
     }
-    
+
     /// Get static objects (candidates for meshification)
     pub fn get_static_tracks(&self) -> Vec<&TrackedObject> {
-        self.tracks.iter()
+        self.tracks
+            .iter()
             .filter(|t| t.is_confirmed() && t.motion.class.is_meshifiable())
             .collect()
     }
-    
+
     /// Get dynamic objects (need real-time processing)
     pub fn get_dynamic_tracks(&self) -> Vec<&TrackedObject> {
-        self.tracks.iter()
+        self.tracks
+            .iter()
             .filter(|t| t.is_confirmed() && !t.motion.class.is_meshifiable())
             .collect()
     }
@@ -698,7 +703,7 @@ impl Default for ObjectTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_bounding_box_iou() {
         let a = BoundingBox3D::new(
@@ -709,11 +714,11 @@ mod tests {
             na::Point3::new(0.5, 0.5, 0.5),
             na::Point3::new(1.5, 1.5, 1.5),
         );
-        
+
         let iou = a.iou(&b);
         assert!(iou > 0.0 && iou < 1.0);
     }
-    
+
     #[test]
     fn test_motion_classification() {
         assert_eq!(MotionClass::from_score(0.0), MotionClass::Static);
@@ -722,7 +727,7 @@ mod tests {
         assert_eq!(MotionClass::from_score(0.5), MotionClass::Dynamic);
         assert_eq!(MotionClass::from_score(0.9), MotionClass::Rapid);
     }
-    
+
     #[test]
     fn test_segmentation() {
         let segmenter = ObjectSegmenter::new(SegmentationConfig {
@@ -730,14 +735,14 @@ mod tests {
             eps_distance: 0.5,
             ..Default::default()
         });
-        
+
         let positions = vec![
             na::Point3::new(0.0, 0.0, 0.0),
             na::Point3::new(0.1, 0.1, 0.1),
             na::Point3::new(5.0, 5.0, 5.0),
             na::Point3::new(5.1, 5.1, 5.1),
         ];
-        
+
         let objects = segmenter.segment(&positions);
         assert_eq!(objects.len(), 2);
     }

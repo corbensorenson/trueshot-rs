@@ -64,14 +64,15 @@ pub fn validate_path_writable(path: &Path) -> ValidationResult {
 /// Validate that a file has a valid image extension
 pub fn validate_image_extension(path: &Path) -> ValidationResult {
     let valid_extensions = [
-        "jpg", "jpeg", "png", "tiff", "tif", "raw", "dng", "cr2", "cr3", 
-        "nef", "arw", "orf", "rw2", "pef", "srw"
+        "jpg", "jpeg", "png", "tiff", "tif", "raw", "dng", "cr2", "cr3", "nef", "arw", "orf",
+        "rw2", "pef", "srw",
     ];
-    
-    let ext = path.extension()
+
+    let ext = path
+        .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase());
-    
+
     match ext {
         Some(e) if valid_extensions.contains(&e.as_str()) => Ok(()),
         Some(e) => Err(TrueShotError::InvalidState(format!(
@@ -79,7 +80,7 @@ pub fn validate_image_extension(path: &Path) -> ValidationResult {
             e, valid_extensions
         ))),
         None => Err(TrueShotError::InvalidState(
-            "File has no extension".to_string()
+            "File has no extension".to_string(),
         )),
     }
 }
@@ -92,21 +93,21 @@ pub fn validate_image_extension(path: &Path) -> ValidationResult {
 pub fn validate_image_dimensions(width: u32, height: u32) -> ValidationResult {
     const MIN_DIM: u32 = 16;
     const MAX_DIM: u32 = 65536;
-    
+
     if width < MIN_DIM || width > MAX_DIM {
         return Err(TrueShotError::InvalidState(format!(
             "Image width {} out of range [{}, {}]",
             width, MIN_DIM, MAX_DIM
         )));
     }
-    
+
     if height < MIN_DIM || height > MAX_DIM {
         return Err(TrueShotError::InvalidState(format!(
             "Image height {} out of range [{}, {}]",
             height, MIN_DIM, MAX_DIM
         )));
     }
-    
+
     // Check for excessive memory requirement
     let pixels = width as u64 * height as u64;
     const MAX_PIXELS: u64 = 500_000_000; // 500 megapixels
@@ -117,70 +118,69 @@ pub fn validate_image_dimensions(width: u32, height: u32) -> ValidationResult {
             MAX_PIXELS / 1_000_000
         )));
     }
-    
+
     Ok(())
 }
 
 /// Validate Gaussian count for 3DGS
 pub fn validate_gaussian_count(count: usize) -> ValidationResult {
     const MAX_GAUSSIANS: usize = 50_000_000; // 50 million
-    
+
     if count == 0 {
         return Err(TrueShotError::InvalidState(
-            "Gaussian count cannot be zero".to_string()
+            "Gaussian count cannot be zero".to_string(),
         ));
     }
-    
+
     if count > MAX_GAUSSIANS {
         return Err(TrueShotError::InvalidState(format!(
             "Too many Gaussians: {} (max: {})",
             count, MAX_GAUSSIANS
         )));
     }
-    
+
     Ok(())
 }
 
 /// Validate mesh vertex count
 pub fn validate_mesh_vertex_count(count: usize) -> ValidationResult {
     const MAX_VERTICES: usize = 100_000_000; // 100 million
-    
+
     if count == 0 {
         return Err(TrueShotError::InvalidState(
-            "Mesh must have at least one vertex".to_string()
+            "Mesh must have at least one vertex".to_string(),
         ));
     }
-    
+
     if count > MAX_VERTICES {
         return Err(TrueShotError::InvalidState(format!(
             "Too many vertices: {} (max: {})",
             count, MAX_VERTICES
         )));
     }
-    
+
     Ok(())
 }
 
 /// Validate memory availability
 pub fn validate_memory_available(needed_gb: f64) -> ValidationResult {
     use sysinfo::System;
-    
+
     let mut sys = System::new_all();
     sys.refresh_memory();
-    
+
     let available_gb = sys.available_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
-    
+
     // Require 20% safety margin
     let required_with_margin = needed_gb * 1.2;
-    
+
     if available_gb < required_with_margin {
         return Err(TrueShotError::InvalidState(format!(
             "Insufficient memory: need {:.1} GB but only {:.1} GB available",
-            required_with_margin,
-            available_gb
+            required_with_margin, available_gb
         )));
     }
-    
+
     Ok(())
 }
 
@@ -243,7 +243,9 @@ pub fn validate_min_count<T>(collection: &[T], min: usize, name: &str) -> Valida
     if collection.len() < min {
         return Err(TrueShotError::InvalidState(format!(
             "{} requires at least {} items, got {}",
-            name, min, collection.len()
+            name,
+            min,
+            collection.len()
         )));
     }
     Ok(())
@@ -254,18 +256,16 @@ pub fn validate_min_count<T>(collection: &[T], min: usize, name: &str) -> Valida
 // ============================================================================
 
 /// Validate input for photogrammetry pipeline
-pub fn validate_photogrammetry_input(
-    image_dir: &Path,
-    min_images: usize,
-) -> ValidationResult {
+pub fn validate_photogrammetry_input(image_dir: &Path, min_images: usize) -> ValidationResult {
     validate_directory_exists(image_dir)?;
-    
+
     // Count valid images
     let image_count = std::fs::read_dir(image_dir)
         .map_err(|e| TrueShotError::Io(format!("Failed to read directory: {}", e)))?
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
-            entry.path()
+            entry
+                .path()
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| {
@@ -275,14 +275,14 @@ pub fn validate_photogrammetry_input(
                 .unwrap_or(false)
         })
         .count();
-    
+
     if image_count < min_images {
         return Err(TrueShotError::InvalidState(format!(
             "Not enough images: found {}, need at least {}",
             image_count, min_images
         )));
     }
-    
+
     Ok(())
 }
 
@@ -300,14 +300,14 @@ pub fn validate_gaussian_splatting_input(
 mod tests {
     use super::*;
     use tempfile::tempdir;
-    
+
     #[test]
     fn test_validate_path_exists() {
         let dir = tempdir().unwrap();
         assert!(validate_path_exists(dir.path()).is_ok());
         assert!(validate_path_exists(Path::new("/nonexistent/path")).is_err());
     }
-    
+
     #[test]
     fn test_validate_image_dimensions() {
         assert!(validate_image_dimensions(1920, 1080).is_ok());
@@ -315,7 +315,7 @@ mod tests {
         assert!(validate_image_dimensions(0, 100).is_err());
         assert!(validate_image_dimensions(100000, 100000).is_err());
     }
-    
+
     #[test]
     fn test_validate_gaussian_count() {
         assert!(validate_gaussian_count(1000).is_ok());
@@ -323,13 +323,13 @@ mod tests {
         assert!(validate_gaussian_count(0).is_err());
         assert!(validate_gaussian_count(100_000_000).is_err());
     }
-    
+
     #[test]
     fn test_validate_range() {
         assert!(validate_range(5, 0, 10, "test").is_ok());
         assert!(validate_range(15, 0, 10, "test").is_err());
     }
-    
+
     #[test]
     fn test_validate_not_empty() {
         assert!(validate_not_empty(&[1, 2, 3], "test").is_ok());

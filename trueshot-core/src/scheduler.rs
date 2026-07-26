@@ -1,12 +1,12 @@
-use async_trait::async_trait;
-use uuid::Uuid;
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use std::sync::Arc;
-use dashmap::DashMap;
-use tokio::sync::mpsc;
 use anyhow::Result;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
 pub mod cluster;
 
@@ -43,7 +43,7 @@ pub struct RemoteJobPayload {
 pub trait Job: Send + Sync + 'static {
     /// Return a human readable name
     fn name(&self) -> &str;
-    
+
     /// Execute the job logic
     /// `progress_tx` can be used to send progress updates (0.0 - 1.0)
     async fn execute(&self, progress_tx: mpsc::Sender<f32>) -> Result<()>;
@@ -90,15 +90,19 @@ impl Scheduler {
         // Simple dispatcher spawning tasks limited by semaphore
         tokio::spawn(async move {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(worker_count));
-            
+
             while let Some(queued) = rx.recv().await {
                 // If None, channel closed, exit
-                let permit = semaphore.clone().acquire_owned().await.expect("Semaphore closed");
+                let permit = semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("Semaphore closed");
                 let jobs_map = jobs_clone.clone();
                 let job_id = queued.id;
                 let job_task = queued.job;
                 let observer = observer_clone.clone();
-                
+
                 tokio::spawn(async move {
                     // Update Status to Running
                     if let Some(mut info) = jobs_map.get_mut(&job_id) {
@@ -110,9 +114,9 @@ impl Scheduler {
                             obs.on_job_update(info);
                         }
                     }
-                    
+
                     let (prog_tx, mut prog_rx) = mpsc::channel(10);
-                    
+
                     // Spawn progress listener
                     let jobs_map_prog = jobs_map.clone();
                     let observer_progress = observer.clone();
@@ -131,7 +135,7 @@ impl Scheduler {
                             }
                         }
                     });
-                    
+
                     tracing::info!("Starting job: {}", job_id);
                     match job_task.execute(prog_tx).await {
                         Ok(_) => {
@@ -160,7 +164,7 @@ impl Scheduler {
                             tracing::error!("Job failed: {}: {:?}", job_id, e);
                         }
                     }
-                    
+
                     drop(permit); // Release slot
                 });
             }
@@ -191,17 +195,20 @@ impl Scheduler {
             started_at: None,
             finished_at: None,
         };
-        
+
         self.jobs.insert(id, info.clone());
         if let Some(obs) = self.observer.as_ref() {
             obs.on_job_update(info);
         }
-        
-        self.queue.send(QueuedJob {
-            id,
-            job: Box::new(job),
-        }).await.map_err(|_| anyhow::anyhow!("Scheduler closed"))?;
-        
+
+        self.queue
+            .send(QueuedJob {
+                id,
+                job: Box::new(job),
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Scheduler closed"))?;
+
         Ok(id)
     }
 

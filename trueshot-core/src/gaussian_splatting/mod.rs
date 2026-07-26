@@ -1,37 +1,37 @@
 //! Native 3D Gaussian Splatting - TrueShot's Own Implementation
-//! 
+//!
 //! Provides 3DGS training without external Python/CUDA dependencies.
 //! Uses WGPU for GPU-accelerated rasterization.
 
+pub mod asg;
+pub mod deformation;
 pub mod gaussian;
+pub mod gaussian_4d;
+pub mod gs2mesh;
+pub mod mip;
 pub mod optimizer;
 pub mod rasterizer;
 pub mod rasterizer_4d;
-pub mod mip;
-pub mod asg;
-pub mod gs2mesh;
-pub mod gaussian_4d;
-pub mod trainer_4d;
-pub mod deformation;
 pub mod spatial_audio;
 pub mod splat_edit;
+pub mod trainer_4d;
 
 // Re-exports
 pub use gaussian::{Gaussian3D, GaussianCloud, SH_COEFFS_PER_CHANNEL, SH_COEFFS_TOTAL};
+pub use gaussian_4d::{Dynamic4DScene, Gaussian4D, SlicedGaussian3D};
 pub use optimizer::AdamOptimizer;
-pub use gaussian_4d::{Gaussian4D, Dynamic4DScene, SlicedGaussian3D};
-pub use trainer_4d::{Trainer4D, Training4DConfig};
 pub use rasterizer_4d::{GpuRasterizer4D, Raster4DConfig, RenderedFrame4D};
+pub use trainer_4d::{Trainer4D, Training4DConfig};
 
-use std::path::PathBuf;
+#[cfg(feature = "wgpu")]
+use self::rasterizer::{CameraUniforms, GaussianGradientsGpu, GpuRasterizer, RasterizerConfig};
 use anyhow::Result;
 use nalgebra as na;
+use std::path::PathBuf;
 #[cfg(feature = "wgpu")]
 use std::sync::Arc;
 #[cfg(feature = "wgpu")]
 use wgpu;
-#[cfg(feature = "wgpu")]
-use self::rasterizer::{CameraUniforms, GaussianGradientsGpu, GpuRasterizer, RasterizerConfig};
 
 /// 3DGS Training configuration
 #[derive(Debug, Clone)]
@@ -124,13 +124,13 @@ struct GpuGradientState {
 impl GaussianSplatTrainer {
     /// Create trainer from initial point cloud and cameras
     pub fn new(
-        initial_points: &[(na::Point3<f32>, [u8; 3])],  // positions and colors
+        initial_points: &[(na::Point3<f32>, [u8; 3])], // positions and colors
         cameras: Vec<Camera>,
         config: TrainingConfig,
     ) -> Self {
         // Initialize Gaussians from points
         let gaussians = GaussianCloud::from_points(initial_points);
-        
+
         // Create optimizer
         let optimizer = AdamOptimizer::new(
             gaussians.num_gaussians(),
@@ -161,14 +161,13 @@ impl GaussianSplatTrainer {
         let rendered = self.gaussians.render(&camera)?;
 
         // Load ground truth image
-        let ground_truth = image::open(&camera.image_path)?
-            .to_rgb8();
+        let ground_truth = image::open(&camera.image_path)?.to_rgb8();
 
         // Compute loss (L1 + SSIM)
         let l1_loss = compute_l1_loss(&rendered, &ground_truth);
         let ssim_loss = compute_ssim_loss(&rendered, &ground_truth);
-        let loss = (1.0 - self.config.ssim_weight) * l1_loss 
-                 + self.config.ssim_weight * (1.0 - ssim_loss);
+        let loss =
+            (1.0 - self.config.ssim_weight) * l1_loss + self.config.ssim_weight * (1.0 - ssim_loss);
 
         // Backward pass: Compute gradients (image-space splat derivatives)
         let gradients = self.compute_gradients(&rendered, &ground_truth, &camera)?;
@@ -191,8 +190,9 @@ impl GaussianSplatTrainer {
         ground_truth: &image::RgbImage,
         camera: &Camera,
     ) -> Result<GaussianGradients> {
-        let (position_grad, opacity_grad, scale_grad, rotation_grad, sh_grad) =
-            self.gaussians.compute_image_gradients(camera, rendered, ground_truth);
+        let (position_grad, opacity_grad, scale_grad, rotation_grad, sh_grad) = self
+            .gaussians
+            .compute_image_gradients(camera, rendered, ground_truth);
         let mut gradients = GaussianGradients::new(self.gaussians.num_gaussians());
         gradients.position_grad = position_grad;
         gradients.opacity_grad = opacity_grad;
@@ -409,7 +409,10 @@ impl GaussianSplatTrainer {
 
 #[cfg(feature = "wgpu")]
 fn camera_to_uniform(camera: &Camera) -> CameraUniforms {
-    let view = camera.transform.try_inverse().unwrap_or(na::Matrix4::identity());
+    let view = camera
+        .transform
+        .try_inverse()
+        .unwrap_or(na::Matrix4::identity());
     let width = camera.width.max(1) as f32;
     let height = camera.height.max(1) as f32;
     let fx = camera.intrinsics[(0, 0)];
@@ -419,10 +422,22 @@ fn camera_to_uniform(camera: &Camera) -> CameraUniforms {
     let near = 0.1f32;
     let far = 1000.0f32;
     let proj = na::Matrix4::new(
-        2.0 * fx / width, 0.0, 1.0 - 2.0 * cx / width, 0.0,
-        0.0, 2.0 * fy / height, 2.0 * cy / height - 1.0, 0.0,
-        0.0, 0.0, (far + near) / (near - far), (2.0 * far * near) / (near - far),
-        0.0, 0.0, -1.0, 0.0,
+        2.0 * fx / width,
+        0.0,
+        1.0 - 2.0 * cx / width,
+        0.0,
+        0.0,
+        2.0 * fy / height,
+        2.0 * cy / height - 1.0,
+        0.0,
+        0.0,
+        0.0,
+        (far + near) / (near - far),
+        (2.0 * far * near) / (near - far),
+        0.0,
+        0.0,
+        -1.0,
+        0.0,
     );
     let view_projection = proj * view;
     let camera_position = camera.transform * na::Vector4::new(0.0, 0.0, 0.0, 1.0);
@@ -477,9 +492,11 @@ fn rgb_to_rgba(image: &image::RgbImage) -> Vec<u8> {
 fn convert_gpu_gradients(gpu: &[GaussianGradientsGpu]) -> GaussianGradients {
     let mut gradients = GaussianGradients::new(gpu.len());
     for (i, g) in gpu.iter().enumerate() {
-        gradients.position_grad[i] = na::Vector3::new(g.position_grad[0], g.position_grad[1], g.position_grad[2]);
+        gradients.position_grad[i] =
+            na::Vector3::new(g.position_grad[0], g.position_grad[1], g.position_grad[2]);
         gradients.opacity_grad[i] = g.opacity_grad;
-        gradients.scale_grad[i] = na::Vector3::new(g.scale_grad[0], g.scale_grad[1], g.scale_grad[2]);
+        gradients.scale_grad[i] =
+            na::Vector3::new(g.scale_grad[0], g.scale_grad[1], g.scale_grad[2]);
         gradients.rotation_grad[i] = na::Vector4::new(
             g.rotation_grad[3],
             g.rotation_grad[0],
@@ -597,7 +614,7 @@ fn compute_ssim_loss(rendered: &image::RgbImage, ground_truth: &image::RgbImage)
     let c2 = 0.03 * 0.03;
 
     let ssim = ((2.0 * mean_r * mean_g + c1) * (2.0 * cov_rg + c2))
-             / ((mean_r.powi(2) + mean_g.powi(2) + c1) * (var_r + var_g + c2));
+        / ((mean_r.powi(2) + mean_g.powi(2) + c1) * (var_r + var_g + c2));
 
     ssim as f32
 }
@@ -619,15 +636,28 @@ mod tests {
         let mut rasterizer = pollster::block_on(GpuRasterizer::new(
             device,
             queue,
-            RasterizerConfig { width, height, ..Default::default() },
+            RasterizerConfig {
+                width,
+                height,
+                ..Default::default()
+            },
             16,
-        )).unwrap();
+        ))
+        .unwrap();
 
         let camera = Camera {
             transform: na::Matrix4::identity(),
-            intrinsics: na::Matrix3::new(80.0, 0.0, width as f32 * 0.5,
-                                         0.0, 80.0, height as f32 * 0.5,
-                                         0.0, 0.0, 1.0),
+            intrinsics: na::Matrix3::new(
+                80.0,
+                0.0,
+                width as f32 * 0.5,
+                0.0,
+                80.0,
+                height as f32 * 0.5,
+                0.0,
+                0.0,
+                1.0,
+            ),
             width,
             height,
             image_path: PathBuf::new(),

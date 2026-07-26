@@ -126,8 +126,7 @@ fn verify_signature(
     signature_hex: &str,
     public_key: &[u8; 32],
 ) -> Result<()> {
-    let sig_bytes = hex::decode(signature_hex)
-        .with_context(|| "Invalid model signature hex")?;
+    let sig_bytes = hex::decode(signature_hex).with_context(|| "Invalid model signature hex")?;
     if sig_bytes.len() != 64 {
         anyhow::bail!("Invalid model signature length: expected 64 bytes");
     }

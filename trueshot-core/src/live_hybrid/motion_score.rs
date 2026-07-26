@@ -7,8 +7,8 @@
 //!
 //! Uses the unified tracking module for motion classification.
 
-use nalgebra as na;
 use crate::gaussian_splatting::gaussian_4d::Gaussian4D;
+use nalgebra as na;
 
 // Re-export unified MotionClass from tracking module
 pub use crate::tracking::MotionClass;
@@ -36,12 +36,12 @@ pub struct MotionScorerConfig {
 impl Default for MotionScorerConfig {
     fn default() -> Self {
         Self {
-            alpha: 0.5,    // Position is most important
-            beta: 0.3,     // Appearance changes
-            gamma: 0.2,    // Shape deformation
-            max_position_delta: 1.0,    // 1 unit per frame
-            max_appearance_delta: 0.5,  // 50% color change
-            max_shape_delta: 0.3,       // 30% covariance change
+            alpha: 0.5,                // Position is most important
+            beta: 0.3,                 // Appearance changes
+            gamma: 0.2,                // Shape deformation
+            max_position_delta: 1.0,   // 1 unit per frame
+            max_appearance_delta: 0.5, // 50% color change
+            max_shape_delta: 0.3,      // 30% covariance change
         }
     }
 }
@@ -55,7 +55,7 @@ impl MotionScorer {
     pub fn new(config: MotionScorerConfig) -> Self {
         Self { config }
     }
-    
+
     /// Compute motion score for a set of Gaussians between two frames
     pub fn compute_score(
         &self,
@@ -65,27 +65,28 @@ impl MotionScorer {
         if prev_gaussians.is_empty() || curr_gaussians.is_empty() {
             return 0.5; // Neutral score
         }
-        
+
         let position_delta = self.compute_position_delta(prev_gaussians, curr_gaussians);
         let appearance_delta = self.compute_appearance_delta(prev_gaussians, curr_gaussians);
         let shape_delta = self.compute_shape_delta(prev_gaussians, curr_gaussians);
-        
+
         let normalized_position = (position_delta / self.config.max_position_delta).clamp(0.0, 1.0);
-        let normalized_appearance = (appearance_delta / self.config.max_appearance_delta).clamp(0.0, 1.0);
+        let normalized_appearance =
+            (appearance_delta / self.config.max_appearance_delta).clamp(0.0, 1.0);
         let normalized_shape = (shape_delta / self.config.max_shape_delta).clamp(0.0, 1.0);
-        
+
         let score = self.config.alpha * normalized_position
             + self.config.beta * normalized_appearance
             + self.config.gamma * normalized_shape;
-        
+
         score.clamp(0.0, 1.0)
     }
-    
+
     /// Classify based on score
     pub fn classify(&self, score: f32) -> MotionClassification {
         MotionClassification::from_score(score)
     }
-    
+
     /// Compute average position delta (centroid movement)
     fn compute_position_delta(
         &self,
@@ -94,24 +95,24 @@ impl MotionScorer {
     ) -> f32 {
         let prev_centroid = Self::compute_centroid(prev_gaussians);
         let curr_centroid = Self::compute_centroid(curr_gaussians);
-        
+
         na::distance(&prev_centroid, &curr_centroid)
     }
-    
+
     /// Compute centroid of Gaussians
     fn compute_centroid(gaussians: &[Gaussian4D]) -> na::Point3<f32> {
         if gaussians.is_empty() {
             return na::Point3::origin();
         }
-        
+
         let sum: na::Vector3<f32> = gaussians
             .iter()
             .map(|g| na::Vector3::new(g.center.x, g.center.y, g.center.z))
             .sum();
-        
+
         na::Point3::from(sum / gaussians.len() as f32)
     }
-    
+
     /// Compute average appearance (color) change
     fn compute_appearance_delta(
         &self,
@@ -122,18 +123,19 @@ impl MotionScorer {
         if n == 0 {
             return 0.0;
         }
-        
+
         let mut total_delta = 0.0;
         for (prev, curr) in prev_gaussians.iter().zip(curr_gaussians.iter()) {
             let color_delta = (0..3)
                 .map(|i| (prev.color[i] - curr.color[i]).abs())
-                .sum::<f32>() / 3.0;
+                .sum::<f32>()
+                / 3.0;
             total_delta += color_delta;
         }
-        
+
         total_delta / n as f32
     }
-    
+
     /// Compute average shape (covariance) change
     fn compute_shape_delta(
         &self,
@@ -144,7 +146,7 @@ impl MotionScorer {
         if n == 0 {
             return 0.0;
         }
-        
+
         let mut total_delta = 0.0;
         for (prev, curr) in prev_gaussians.iter().zip(curr_gaussians.iter()) {
             // Compare covariance matrices (use Frobenius norm of difference)
@@ -154,7 +156,7 @@ impl MotionScorer {
             let frobenius = diff.iter().map(|x| x * x).sum::<f32>().sqrt();
             total_delta += frobenius;
         }
-        
+
         total_delta / n as f32
     }
 }
@@ -176,13 +178,13 @@ impl SceneMotionAnalyzer {
             scorer: MotionScorer::default(),
         }
     }
-    
+
     pub fn with_config(config: MotionScorerConfig) -> Self {
         Self {
             scorer: MotionScorer::new(config),
         }
     }
-    
+
     /// Analyze all objects and return scores
     pub fn analyze_objects(
         &self,
@@ -208,17 +210,35 @@ impl Default for SceneMotionAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_classification_thresholds() {
-        assert_eq!(MotionClassification::from_score(0.0), MotionClassification::Static);
-        assert_eq!(MotionClassification::from_score(0.05), MotionClassification::Static);
-        assert_eq!(MotionClassification::from_score(0.1), MotionClassification::Slow);
-        assert_eq!(MotionClassification::from_score(0.3), MotionClassification::Slow);
-        assert_eq!(MotionClassification::from_score(0.5), MotionClassification::Dynamic);
-        assert_eq!(MotionClassification::from_score(1.0), MotionClassification::Dynamic);
+        assert_eq!(
+            MotionClassification::from_score(0.0),
+            MotionClassification::Static
+        );
+        assert_eq!(
+            MotionClassification::from_score(0.05),
+            MotionClassification::Static
+        );
+        assert_eq!(
+            MotionClassification::from_score(0.1),
+            MotionClassification::Slow
+        );
+        assert_eq!(
+            MotionClassification::from_score(0.3),
+            MotionClassification::Slow
+        );
+        assert_eq!(
+            MotionClassification::from_score(0.5),
+            MotionClassification::Dynamic
+        );
+        assert_eq!(
+            MotionClassification::from_score(1.0),
+            MotionClassification::Dynamic
+        );
     }
-    
+
     #[test]
     fn test_empty_gaussians() {
         let scorer = MotionScorer::default();

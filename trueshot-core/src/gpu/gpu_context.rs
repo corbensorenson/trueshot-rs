@@ -130,20 +130,18 @@ pub fn get_gpu_context() -> Option<Arc<GpuContext>> {
         return None;
     }
     GPU_CONTEXT
-        .get_or_init(|| {
-            match GpuContext::new_blocking() {
-                Ok(Some(ctx)) => {
-                    tracing::info!("GPU context initialized: {}", ctx.memory_info());
-                    Some(Arc::new(ctx))
-                }
-                Ok(None) => {
-                    tracing::info!("No GPU available - using CPU fallback");
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to initialize GPU: {} - using CPU fallback", e);
-                    None
-                }
+        .get_or_init(|| match GpuContext::new_blocking() {
+            Ok(Some(ctx)) => {
+                tracing::info!("GPU context initialized: {}", ctx.memory_info());
+                Some(Arc::new(ctx))
+            }
+            Ok(None) => {
+                tracing::info!("No GPU available - using CPU fallback");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize GPU: {} - using CPU fallback", e);
+                None
             }
         })
         .clone()

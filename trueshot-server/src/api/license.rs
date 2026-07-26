@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -80,6 +80,12 @@ pub struct ImportLicenseRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ActivateDeviceRequest {
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ActivateKeyRequest {
+    pub license_key: String,
     pub device_name: Option<String>,
 }
 
@@ -315,6 +321,56 @@ pub async fn activate_license_device(
             HttpResponse::Ok().json(LicenseActionResponse {
                 ok: true,
                 message: "Device activated".to_string(),
+                status: snapshot_to_response(snapshot),
+            })
+        }
+        Err(err) => HttpResponse::BadRequest().json(serde_json::json!({
+            "ok": false,
+            "error": err,
+        })),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/license/activate-key",
+    tag = "auth",
+    request_body = ActivateKeyRequest,
+    responses(
+        (status = 200, description = "License activated from key", body = LicenseActionResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
+#[post("/api/license/activate-key")]
+pub async fn activate_license_key(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: web::Json<ActivateKeyRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    let mut gate = state.license_gate.lock().unwrap();
+    match gate.activate_with_key(&payload.license_key, payload.device_name.clone()) {
+        Ok(snapshot) => {
+            let (actor, role, ip) = audit_actor(&req);
+            log_audit(
+                &req,
+                &state,
+                AuditEvent::new(
+                    actor,
+                    role,
+                    "license.activate_key",
+                    "license",
+                    "success",
+                    ip,
+                    serde_json::json!({}),
+                ),
+            );
+            HttpResponse::Ok().json(LicenseActionResponse {
+                ok: true,
+                message: "License activated".to_string(),
                 status: snapshot_to_response(snapshot),
             })
         }

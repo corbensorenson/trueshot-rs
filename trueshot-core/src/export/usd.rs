@@ -3,12 +3,12 @@
 //! Exports meshes to USD format with full attribute support.
 //! Outputs ASCII .usda files for maximum compatibility.
 
+use crate::export::write_provenance_for_export;
 use crate::reconstruction::Mesh;
+use crate::security::provenance::ProvenanceSigner;
 use anyhow::{Context, Result};
 use std::fmt::Write;
 use std::path::Path;
-use crate::export::write_provenance_for_export;
-use crate::security::provenance::ProvenanceSigner;
 
 /// USD export options
 #[derive(Clone, Debug)]
@@ -122,7 +122,11 @@ pub(crate) fn build_usda_document(
     write!(&mut out, "        int[] faceVertexIndices = [")?;
     for (i, f) in mesh.faces.iter().enumerate() {
         let comma = if i < mesh.faces.len() - 1 { ", " } else { "" };
-        write!(&mut out, "{}, {}, {}{}", f.vertices[0], f.vertices[1], f.vertices[2], comma)?;
+        write!(
+            &mut out,
+            "{}, {}, {}{}",
+            f.vertices[0], f.vertices[1], f.vertices[2], comma
+        )?;
     }
     writeln!(&mut out, "]")?;
 
@@ -197,7 +201,7 @@ pub(crate) fn build_usda_document(
 mod tests {
     use super::*;
     use tempfile::tempdir;
-    
+
     #[test]
     fn test_usd_export_basic() {
         let mesh = Mesh {
@@ -206,17 +210,19 @@ mod tests {
                 nalgebra::Point3::new(1.0, 0.0, 0.0),
                 nalgebra::Point3::new(0.0, 1.0, 0.0),
             ],
-            faces: vec![crate::reconstruction::Face { vertices: [0, 1, 2] }],
+            faces: vec![crate::reconstruction::Face {
+                vertices: [0, 1, 2],
+            }],
             normals: vec![],
             colors: vec![],
             uvs: vec![],
         };
-        
+
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.usda");
-        
+
         export_usd(&mesh, &path).unwrap();
-        
+
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("#usda 1.0"));
         assert!(content.contains("point3f[] points"));

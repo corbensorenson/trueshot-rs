@@ -27,8 +27,15 @@ enum PlyScalar {
 
 #[derive(Clone, Debug)]
 enum PlyProperty {
-    Scalar { name: String, ty: PlyScalar },
-    List { name: String, count_ty: PlyScalar, item_ty: PlyScalar },
+    Scalar {
+        name: String,
+        ty: PlyScalar,
+    },
+    List {
+        name: String,
+        count_ty: PlyScalar,
+        item_ty: PlyScalar,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +98,12 @@ pub fn ensure_vertex_normals(mesh: &mut Mesh) {
     mesh.normals = normals;
 }
 
-pub fn export_obj(mesh: &Mesh, path: &Path, include_normals: bool, include_colors: bool) -> Result<()> {
+pub fn export_obj(
+    mesh: &Mesh,
+    path: &Path,
+    include_normals: bool,
+    include_colors: bool,
+) -> Result<()> {
     let mut file = File::create(path)
         .with_context(|| format!("Failed to create OBJ file: {}", path.display()))?;
 
@@ -144,8 +156,8 @@ pub fn export_obj(mesh: &Mesh, path: &Path, include_normals: bool, include_color
 }
 
 fn load_obj(path: &Path) -> Result<Mesh> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open OBJ: {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open OBJ: {}", path.display()))?;
     let reader = BufReader::new(file);
 
     let mut positions: Vec<na::Point3<f32>> = Vec::new();
@@ -175,7 +187,9 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                 let x: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
                 let y: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
                 let z: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
-                let color = if let (Some(r), Some(g), Some(b)) = (parts.next(), parts.next(), parts.next()) {
+                let color = if let (Some(r), Some(g), Some(b)) =
+                    (parts.next(), parts.next(), parts.next())
+                {
                     let r: f32 = r.parse().unwrap_or(1.0);
                     let g: f32 = g.parse().unwrap_or(1.0);
                     let b: f32 = b.parse().unwrap_or(1.0);
@@ -320,8 +334,8 @@ fn triangulate_face(indices: &[usize], faces: &mut Vec<Face>) {
 }
 
 fn load_ply(path: &Path) -> Result<Mesh> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open PLY: {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open PLY: {}", path.display()))?;
     let mut reader = BufReader::new(file);
 
     let mut header_lines = Vec::new();
@@ -369,7 +383,14 @@ fn load_ply(path: &Path) -> Result<Mesh> {
                     let mut line = String::new();
                     reader.read_line(&mut line)?;
                     if element.name == "vertex" {
-                        parse_ply_vertex_ascii(line.trim(), &element.properties, &mut vertices, &mut normals, &mut colors, &mut uvs)?;
+                        parse_ply_vertex_ascii(
+                            line.trim(),
+                            &element.properties,
+                            &mut vertices,
+                            &mut normals,
+                            &mut colors,
+                            &mut uvs,
+                        )?;
                     } else if element.name == "face" {
                         parse_ply_face_ascii(line.trim(), &element.properties, &mut faces)?;
                     }
@@ -379,9 +400,22 @@ fn load_ply(path: &Path) -> Result<Mesh> {
                 let endian = format;
                 for _ in 0..element.count {
                     if element.name == "vertex" {
-                        parse_ply_vertex_binary(&mut reader, endian, &element.properties, &mut vertices, &mut normals, &mut colors, &mut uvs)?;
+                        parse_ply_vertex_binary(
+                            &mut reader,
+                            endian,
+                            &element.properties,
+                            &mut vertices,
+                            &mut normals,
+                            &mut colors,
+                            &mut uvs,
+                        )?;
                     } else if element.name == "face" {
-                        parse_ply_face_binary(&mut reader, endian, &element.properties, &mut faces)?;
+                        parse_ply_face_binary(
+                            &mut reader,
+                            endian,
+                            &element.properties,
+                            &mut faces,
+                        )?;
                     } else {
                         skip_ply_element_binary(&mut reader, endian, &element.properties)?;
                     }
@@ -446,7 +480,11 @@ fn parse_ply_header(lines: &[String]) -> Result<(PlyFormat, Vec<PlyElement>)> {
                     let count_ty = parse_ply_scalar(parts.next().unwrap_or(""))?;
                     let item_ty = parse_ply_scalar(parts.next().unwrap_or(""))?;
                     let name = parts.next().unwrap_or("").to_string();
-                    current_el.properties.push(PlyProperty::List { name, count_ty, item_ty });
+                    current_el.properties.push(PlyProperty::List {
+                        name,
+                        count_ty,
+                        item_ty,
+                    });
                 } else {
                     let ty = parse_ply_scalar(prop_type)?;
                     let name = parts.next().unwrap_or("").to_string();
@@ -566,11 +604,17 @@ fn parse_ply_vertex_ascii(
     Ok(())
 }
 
-fn parse_ply_face_ascii(line: &str, properties: &[PlyProperty], faces: &mut Vec<Face>) -> Result<()> {
+fn parse_ply_face_ascii(
+    line: &str,
+    properties: &[PlyProperty],
+    faces: &mut Vec<Face>,
+) -> Result<()> {
     let mut iter = line.split_whitespace();
     for prop in properties {
         match prop {
-            PlyProperty::List { name, .. } if name == "vertex_indices" || name == "vertex_index" => {
+            PlyProperty::List { name, .. }
+                if name == "vertex_indices" || name == "vertex_index" =>
+            {
                 let count_token = iter.next().context("PLY face missing list count")?;
                 let count: usize = count_token.parse().unwrap_or(0);
                 let mut indices = Vec::with_capacity(count);
@@ -656,7 +700,9 @@ fn parse_ply_vertex_binary<R: Read>(
                     _ => {}
                 }
             }
-            PlyProperty::List { count_ty, item_ty, .. } => {
+            PlyProperty::List {
+                count_ty, item_ty, ..
+            } => {
                 let count = read_binary_scalar(reader, *count_ty, endian)?.to_u64() as usize;
                 for _ in 0..count {
                     let _ = read_binary_scalar(reader, *item_ty, endian)?;
@@ -693,7 +739,11 @@ fn parse_ply_face_binary<R: Read>(
 ) -> Result<()> {
     for prop in properties {
         match prop {
-            PlyProperty::List { name, count_ty, item_ty } if name == "vertex_indices" || name == "vertex_index" => {
+            PlyProperty::List {
+                name,
+                count_ty,
+                item_ty,
+            } if name == "vertex_indices" || name == "vertex_index" => {
                 let count = read_binary_scalar(reader, *count_ty, endian)?.to_u64() as usize;
                 let mut indices = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -702,7 +752,9 @@ fn parse_ply_face_binary<R: Read>(
                 }
                 triangulate_face(&indices, faces);
             }
-            PlyProperty::List { count_ty, item_ty, .. } => {
+            PlyProperty::List {
+                count_ty, item_ty, ..
+            } => {
                 let count = read_binary_scalar(reader, *count_ty, endian)?.to_u64() as usize;
                 for _ in 0..count {
                     let _ = read_binary_scalar(reader, *item_ty, endian)?;
@@ -716,13 +768,19 @@ fn parse_ply_face_binary<R: Read>(
     Ok(())
 }
 
-fn skip_ply_element_binary<R: Read>(reader: &mut R, endian: PlyFormat, properties: &[PlyProperty]) -> Result<()> {
+fn skip_ply_element_binary<R: Read>(
+    reader: &mut R,
+    endian: PlyFormat,
+    properties: &[PlyProperty],
+) -> Result<()> {
     for prop in properties {
         match prop {
             PlyProperty::Scalar { ty, .. } => {
                 let _ = read_binary_scalar(reader, *ty, endian)?;
             }
-            PlyProperty::List { count_ty, item_ty, .. } => {
+            PlyProperty::List {
+                count_ty, item_ty, ..
+            } => {
                 let count = read_binary_scalar(reader, *count_ty, endian)?.to_u64() as usize;
                 for _ in 0..count {
                     let _ = read_binary_scalar(reader, *item_ty, endian)?;
@@ -735,13 +793,21 @@ fn skip_ply_element_binary<R: Read>(reader: &mut R, endian: PlyFormat, propertie
 
 fn parse_ascii_scalar(token: &str, ty: PlyScalar) -> Result<ScalarValue> {
     Ok(match ty {
-        PlyScalar::I8 | PlyScalar::I16 | PlyScalar::I32 => ScalarValue::I64(token.parse().unwrap_or(0)),
-        PlyScalar::U8 | PlyScalar::U16 | PlyScalar::U32 => ScalarValue::U64(token.parse().unwrap_or(0)),
+        PlyScalar::I8 | PlyScalar::I16 | PlyScalar::I32 => {
+            ScalarValue::I64(token.parse().unwrap_or(0))
+        }
+        PlyScalar::U8 | PlyScalar::U16 | PlyScalar::U32 => {
+            ScalarValue::U64(token.parse().unwrap_or(0))
+        }
         PlyScalar::F32 | PlyScalar::F64 => ScalarValue::F64(token.parse().unwrap_or(0.0)),
     })
 }
 
-fn read_binary_scalar<R: Read>(reader: &mut R, ty: PlyScalar, endian: PlyFormat) -> Result<ScalarValue> {
+fn read_binary_scalar<R: Read>(
+    reader: &mut R,
+    ty: PlyScalar,
+    endian: PlyFormat,
+) -> Result<ScalarValue> {
     Ok(match ty {
         PlyScalar::I8 => {
             let mut buf = [0u8; 1];

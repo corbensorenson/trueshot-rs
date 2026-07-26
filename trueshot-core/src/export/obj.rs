@@ -2,11 +2,11 @@
 //!
 //! Exports meshes to Wavefront OBJ with optional normals and UVs.
 
+use crate::export::write_provenance_for_export;
 use crate::reconstruction::Mesh;
 use anyhow::{Context, Result};
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use crate::export::write_provenance_for_export;
 
 /// Export mesh to OBJ format
 pub fn export_obj(mesh: &Mesh, path: &Path) -> Result<()> {

@@ -24,11 +24,19 @@ pub fn gpu_postprocess(
     let min_pixels_for_gpu = 5_000_000; // ~5M pixels
 
     if pixels < min_pixels_for_gpu {
-        tracing::debug!("Image too small for GPU postprocessing ({} pixels), using CPU", pixels);
+        tracing::debug!(
+            "Image too small for GPU postprocessing ({} pixels), using CPU",
+            pixels
+        );
         return Ok(None);
     }
 
-    tracing::info!("GPU postprocessing: {}x{} ({} pixels)", width, height, pixels);
+    tracing::info!(
+        "GPU postprocessing: {}x{} ({} pixels)",
+        width,
+        height,
+        pixels
+    );
 
     // Convert inputs to f32 for GPU
     let rgb_f32: Vec<f32> = linear_rgb.iter().map(|&v| v as f32).collect();
@@ -55,7 +63,7 @@ pub fn gpu_postprocess(
         input_size / (1024 * 1024),
         max_buffer_size / (1024 * 1024)
     );
-    
+
     let input_buffer = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Postprocess Input"),
         size: input_size,
@@ -78,76 +86,91 @@ pub fn gpu_postprocess(
     });
 
     // Upload data
-    gpu_ctx.queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&rgb_f32));
-    
+    gpu_ctx
+        .queue
+        .write_buffer(&input_buffer, 0, bytemuck::cast_slice(&rgb_f32));
+
     // Create shader
     let shader_source = generate_postprocess_shader(width, height);
-    let shader = gpu_ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Postprocess Shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    });
-    
+    let shader = gpu_ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Postprocess Shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+
     // Create bind group layout
-    let bind_group_layout = gpu_ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Postprocess Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+    let bind_group_layout =
+        gpu_ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Postprocess Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+    let bind_group = gpu_ctx
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Postprocess Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-        ],
-    });
-    
-    let bind_group = gpu_ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Postprocess Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buffer.as_entire_binding(),
-            },
-        ],
-    });
-    
+            ],
+        });
+
     // Create pipeline
-    let pipeline_layout = gpu_ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Postprocess Pipeline Layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
-    });
-    
-    let pipeline = gpu_ctx.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Postprocess Pipeline"),
-        layout: Some(&pipeline_layout),
-        module: &shader,
-        entry_point: "postprocess",
-    });
-    
+    let pipeline_layout = gpu_ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Postprocess Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+    let pipeline = gpu_ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Postprocess Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: "postprocess",
+        });
+
     // Execute
-    let mut encoder = gpu_ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Postprocess Encoder"),
-    });
-    
+    let mut encoder = gpu_ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Postprocess Encoder"),
+        });
+
     {
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Postprocess Pass"),
@@ -155,31 +178,31 @@ pub fn gpu_postprocess(
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        
+
         // Dispatch with 16x16 workgroups
         let workgroups_x = (width as u32 + 15) / 16;
         let workgroups_y = (height as u32 + 15) / 16;
         compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
-    
+
     // Copy to staging buffer
     encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_size);
-    
+
     gpu_ctx.queue.submit(Some(encoder.finish()));
-    
+
     // Read back results
     let buffer_slice = staging_buffer.slice(..);
     let (sender, receiver) = futures::channel::oneshot::channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
         sender.send(result).unwrap();
     });
-    
+
     gpu_ctx.device.poll(wgpu::Maintain::Wait);
-    
+
     pollster::block_on(receiver)
         .context("Failed to receive buffer mapping result")?
         .context("Failed to map buffer")?;
-    
+
     let data = buffer_slice.get_mapped_range();
     let output_f32: &[f32] = bytemuck::cast_slice(&data);
 
@@ -203,7 +226,8 @@ pub fn gpu_postprocess(
 
 /// Generate WGSL shader for postprocessing
 fn generate_postprocess_shader(width: usize, height: usize) -> String {
-    format!(r#"
+    format!(
+        r#"
 // Image dimensions
 const WIDTH: u32 = {}u;
 const HEIGHT: u32 = {}u;
@@ -260,5 +284,7 @@ fn postprocess(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     output[rgb_idx + 1u] = g;
     output[rgb_idx + 2u] = b;
 }}
-"#, width, height)
+"#,
+        width, height
+    )
 }

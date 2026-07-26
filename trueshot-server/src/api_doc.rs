@@ -63,6 +63,7 @@ use utoipa::OpenApi;
         crate::api::license::import_license,
         crate::api::license::get_license_devices,
         crate::api::license::activate_license_device,
+        crate::api::license::activate_license_key,
         crate::api::license::deactivate_license_device,
         crate::api::project::get_projects,
         crate::api::project::get_projects_legacy,

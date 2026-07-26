@@ -61,53 +61,53 @@ impl IntegrityChecker {
             max_verifications_per_window: 100,
         }
     }
-    
+
     /// Full integrity check
     pub fn verify(&self) -> IntegrityStatus {
         // Rate limiting
         if !self.check_rate_limit() {
             return IntegrityStatus::RateLimited;
         }
-        
+
         // Update nonce
         let nonce = VERIFICATION_NONCE.fetch_add(1, Ordering::SeqCst);
-        
+
         // Check for debugger
         if self.detect_debugger() {
             return IntegrityStatus::DebuggerAttached;
         }
-        
+
         // Check for clock tampering
         if self.detect_clock_tampering() {
             return IntegrityStatus::ClockTampered;
         }
-        
+
         // Verify code integrity
         if !self.verify_code_checksums(nonce) {
             return IntegrityStatus::TamperedBinary;
         }
-        
+
         IntegrityStatus::Valid
     }
-    
+
     /// Check rate limit
     fn check_rate_limit(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let last_reset = LAST_VERIFICATION_RESET.load(Ordering::SeqCst);
-        
+
         if now - last_reset > self.rate_limit_window {
             LAST_VERIFICATION_RESET.store(now, Ordering::SeqCst);
             VERIFICATION_COUNT.store(0, Ordering::SeqCst);
         }
-        
+
         let count = VERIFICATION_COUNT.fetch_add(1, Ordering::SeqCst);
         count < self.max_verifications_per_window
     }
-    
+
     /// Detect attached debugger
     fn detect_debugger(&self) -> bool {
         #[cfg(target_os = "linux")]
@@ -124,19 +124,19 @@ impl IntegrityChecker {
                 }
             }
         }
-        
+
         #[cfg(target_os = "macos")]
         {
             // Use sysctl to check for debugging
             // P_TRACED flag check
             use std::mem;
-            
+
             #[repr(C)]
             #[allow(non_camel_case_types)]
             struct kinfo_proc {
-                _data: [u8; 648],  // Simplified - actual structure is larger
+                _data: [u8; 648], // Simplified - actual structure is larger
             }
-            
+
             extern "C" {
                 fn sysctl(
                     name: *const i32,
@@ -147,7 +147,7 @@ impl IntegrityChecker {
                     newlen: usize,
                 ) -> i32;
             }
-            
+
             unsafe {
                 let mut info: kinfo_proc = mem::zeroed();
                 let mut size = mem::size_of::<kinfo_proc>();
@@ -157,7 +157,7 @@ impl IntegrityChecker {
                     1,  // KERN_PROC_PID
                     std::process::id() as i32,
                 ];
-                
+
                 if sysctl(
                     mib.as_ptr(),
                     4,
@@ -165,48 +165,49 @@ impl IntegrityChecker {
                     &mut size,
                     std::ptr::null(),
                     0,
-                ) == 0 {
+                ) == 0
+                {
                     // Check P_TRACED flag at offset (this is simplified)
                     // In real implementation, check kp_proc.p_flag & P_TRACED
                 }
             }
         }
-        
+
         #[cfg(target_os = "windows")]
         {
             extern "system" {
                 fn IsDebuggerPresent() -> i32;
             }
-            
+
             unsafe {
                 if IsDebuggerPresent() != 0 {
                     return true;
                 }
             }
         }
-        
+
         false
     }
-    
+
     /// Detect clock tampering
     fn detect_clock_tampering(&self) -> bool {
         let now = Instant::now();
         let mut last = self.last_clock_check.write().unwrap();
-        
+
         // If time went backwards significantly, clock was tampered
         // Note: Instant is monotonic, so this checks for system restart
         let elapsed = now.duration_since(*last);
         *last = now;
-        
+
         // If no time passed at all over many calls, something is wrong
         if elapsed == Duration::ZERO {
             // Could be legitimate if called quickly
             // In real implementation, track call patterns
         }
-        
+
         false
     }
-    
+
     /// Verify code section checksums
     fn verify_code_checksums(&self, _nonce: u64) -> bool {
         let expected = self
@@ -221,7 +222,9 @@ impl IntegrityChecker {
                 tracing::error!("Missing expected binary hash in production");
                 return false;
             }
-            tracing::warn!("No expected binary hash configured; integrity check skipped in non-production");
+            tracing::warn!(
+                "No expected binary hash configured; integrity check skipped in non-production"
+            );
             return true;
         };
 
@@ -240,7 +243,7 @@ impl IntegrityChecker {
             }
         }
     }
-    
+
     /// Add expected checksum for a code section
     pub fn add_expected_checksum(&mut self, name: &str, checksum: [u8; 32]) {
         self.expected_checksums.push((name.to_string(), checksum));
@@ -320,51 +323,50 @@ impl UsageCounter {
             max_scans_per_month: max_scans,
         }
     }
-    
+
     /// Record a scan
     pub fn record_scan(&self) -> Result<u32, UsageLimitError> {
         let current_month = self.current_month();
         let stored_month = SCAN_COUNT_MONTH.load(Ordering::SeqCst);
-        
+
         // Reset counter if month changed
         if current_month != stored_month {
             SCAN_COUNT_MONTH.store(current_month, Ordering::SeqCst);
             SCAN_COUNT.store(0, Ordering::SeqCst);
         }
-        
+
         let count = SCAN_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-        
+
         if let Some(max) = self.max_scans_per_month {
             if count > max {
-                SCAN_COUNT.fetch_sub(1, Ordering::SeqCst);  // Undo increment
+                SCAN_COUNT.fetch_sub(1, Ordering::SeqCst); // Undo increment
                 return Err(UsageLimitError::MonthlyLimitExceeded {
                     current: count - 1,
                     max,
                 });
             }
         }
-        
+
         Ok(count)
     }
-    
+
     /// Get current scan count
     pub fn current_count(&self) -> u32 {
         SCAN_COUNT.load(Ordering::SeqCst)
     }
-    
+
     /// Get remaining scans
     pub fn remaining(&self) -> Option<u32> {
-        self.max_scans_per_month.map(|max| {
-            max.saturating_sub(SCAN_COUNT.load(Ordering::SeqCst))
-        })
+        self.max_scans_per_month
+            .map(|max| max.saturating_sub(SCAN_COUNT.load(Ordering::SeqCst)))
     }
-    
+
     /// Reset counter (for testing)
     #[cfg(debug_assertions)]
     pub fn reset(&self) {
         SCAN_COUNT.store(0, Ordering::SeqCst);
     }
-    
+
     fn current_month(&self) -> u32 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -420,38 +422,38 @@ pub fn distributed_check_b() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_integrity_checker() {
         let checker = IntegrityChecker::new();
         let status = checker.verify();
         assert!(matches!(status, IntegrityStatus::Valid));
     }
-    
+
     #[test]
     fn test_usage_counter() {
         let counter = UsageCounter::new(Some(5));
         counter.reset();
-        
+
         for i in 1..=5 {
             assert_eq!(counter.record_scan().unwrap(), i);
         }
-        
+
         // Should fail on 6th
         assert!(counter.record_scan().is_err());
     }
-    
+
     #[test]
     fn test_checksum() {
         let data = b"test data";
         let checksum = compute_checksum(data);
         assert_eq!(checksum.len(), 32);
-        
+
         // Same data = same checksum
         let checksum2 = compute_checksum(data);
         assert_eq!(checksum, checksum2);
     }
-    
+
     #[test]
     fn test_distributed_checks() {
         // In dev mode, should pass

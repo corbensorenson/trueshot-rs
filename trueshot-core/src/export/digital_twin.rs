@@ -1,6 +1,6 @@
+use crate::export::write_provenance_for_export;
 use std::fs::File;
 use std::io::Write;
-use crate::export::write_provenance_for_export;
 
 /// Digital Twin Export (GLB with embedded metadata)
 /// Writes a prebuilt GLB payload and attaches provenance metadata.

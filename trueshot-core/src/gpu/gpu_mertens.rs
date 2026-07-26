@@ -74,85 +74,102 @@ pub fn gpu_compute_mertens_weights(
         mapped_at_creation: false,
     });
 
-    gpu_ctx.queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&images_f32));
-    gpu_ctx.queue.write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
+    gpu_ctx
+        .queue
+        .write_buffer(&input_buffer, 0, bytemuck::cast_slice(&images_f32));
+    gpu_ctx
+        .queue
+        .write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
 
-    let shader = gpu_ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Mertens Shader"),
-        source: wgpu::ShaderSource::Wgsl(MERTENS_SHADER.into()),
-    });
+    let shader = gpu_ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Mertens Shader"),
+            source: wgpu::ShaderSource::Wgsl(MERTENS_SHADER.into()),
+        });
 
-    let bind_group_layout = gpu_ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Mertens Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+    let bind_group_layout =
+        gpu_ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Mertens Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+    let pipeline_layout = gpu_ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Mertens Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+    let pipeline = gpu_ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Mertens Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: "compute_mertens",
+        });
+
+    let bind_group = gpu_ctx
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Mertens Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buffer.as_entire_binding(),
                 },
-                count: None,
-            },
-        ],
-    });
+            ],
+        });
 
-    let pipeline_layout = gpu_ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Mertens Pipeline Layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    let pipeline = gpu_ctx.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Mertens Pipeline"),
-        layout: Some(&pipeline_layout),
-        module: &shader,
-        entry_point: "compute_mertens",
-    });
-
-    let bind_group = gpu_ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Mertens Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = gpu_ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Mertens Encoder"),
-    });
+    let mut encoder = gpu_ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Mertens Encoder"),
+        });
 
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

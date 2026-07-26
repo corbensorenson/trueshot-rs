@@ -7,32 +7,31 @@
 //! - Efficient matching with pre-computed livescan poses
 //! - Focus-stacked and HDR image handling
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
-use std::sync::Arc;
-use rayon::prelude::*;
-use image::{GrayImage, RgbImage};
+use image::{GrayImage, ImageEncoder, RgbImage};
 use nalgebra as na;
 use ndarray::{Array2, Array3};
+use rayon::prelude::*;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use crate::hierarchical_grading::{compute_sharpness_map_from_rgb, grade_pixels, GradingParams};
-use crate::hierarchical_collapse::{collapse_foreground_single_pass, HierarchicalParams};
 use crate::align_raw::align_phasecorr_gray_with_scale;
+use crate::hierarchical_collapse::{collapse_foreground_single_pass, HierarchicalParams};
+use crate::hierarchical_grading::{compute_sharpness_map_from_rgb, grade_pixels, GradingParams};
 use crate::types::AlignmentInfo;
 
 // Re-export trueshot-sfm types for convenience
 pub use trueshot_sfm::{
-    SfmPipeline, SfmConfig, FeatureType,
-    CameraIntrinsics, CameraPose, Point3D,
-    SparseReconstruction, ImageData, ReprojectionStats,
+    CameraIntrinsics, CameraPose, FeatureType, ImageData, Point3D, ReprojectionStats, SfmConfig,
+    SfmPipeline, SparseReconstruction,
 };
 
 // Dense reconstruction
-pub use trueshot_sfm::dense::{DepthMap, PatchMatchConfig, patchmatch_stereo, fuse_depth_maps};
 pub use trueshot_sfm::dense::MvsInput;
+pub use trueshot_sfm::dense::{fuse_depth_maps, patchmatch_stereo, DepthMap, PatchMatchConfig};
 
-// Mesh generation  
-pub use trueshot_sfm::mesh::{Mesh, marching_cubes_reconstruction, OrientedPoint};
+// Mesh generation
+pub use trueshot_sfm::mesh::{marching_cubes_reconstruction, Mesh, OrientedPoint};
 
 /// Camera identifier for multi-camera setups
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -42,7 +41,7 @@ impl CameraId {
     pub fn webcam(idx: usize) -> Self {
         Self(format!("webcam_{}", idx))
     }
-    
+
     pub fn dslr(name: &str) -> Self {
         Self(format!("dslr_{}", name))
     }
@@ -91,6 +90,8 @@ pub struct HighResImage {
     pub exposure_value: Option<f32>,
     /// Bracketing group ID
     pub bracket_group: Option<u32>,
+    /// Decoded/fused pixels retained across feature extraction and dense MVS.
+    pub pixels: Option<Arc<RgbImage>>,
 }
 
 /// Reconstruction configuration for multi-camera setup
@@ -124,14 +125,16 @@ pub struct MultiCamConfig {
     pub dense_consistency_threshold: f32,
     /// Marching cubes resolution for mesh extraction
     pub mesh_resolution: u32,
+    /// Persist fused per-view PNGs for project reopen/resume.
+    pub persist_focus_stacks: bool,
 }
 
 impl Default for MultiCamConfig {
     fn default() -> Self {
         Self {
             num_webcams: 1,
-            livescan_feature_type: FeatureType::Orb,  // Fast
-            highres_feature_type: FeatureType::Sift,   // Quality
+            livescan_feature_type: FeatureType::Orb, // Fast
+            highres_feature_type: FeatureType::Sift, // Quality
             livescan_max_features: 500,
             highres_max_features: 8000,
             livescan_ba_iterations: 10,
@@ -143,6 +146,7 @@ impl Default for MultiCamConfig {
             dense_min_views: 2,
             dense_consistency_threshold: 0.01,
             mesh_resolution: 256,
+            persist_focus_stacks: true,
         }
     }
 }
@@ -150,31 +154,31 @@ impl Default for MultiCamConfig {
 /// Multi-camera SfM pipeline state
 pub struct MultiCamSfm {
     pub config: MultiCamConfig,
-    
+
     /// Livescan poses indexed by (camera_id, turntable_angle)
     pub livescan_poses: HashMap<(CameraId, i32), CameraPose>,
-    
+
     /// Livescan intrinsics per camera
     pub camera_intrinsics: HashMap<CameraId, CameraIntrinsics>,
-    
+
     /// Sparse point cloud from livescan
     pub livescan_points: Vec<Point3D>,
-    
+
     /// High-res images pending processing
     pub pending_highres: Vec<HighResImage>,
-    
+
     /// Focus stacking groups: bracket_group -> images
     pub focus_groups: HashMap<u32, Vec<HighResImage>>,
-    
+
     /// Final sparse reconstruction
     pub sparse_recon: Option<SparseReconstruction>,
-    
+
     /// Dense depth maps per view
     pub depth_maps: Vec<DepthMap>,
-    
+
     /// Final mesh
     pub mesh: Option<Mesh>,
-    
+
     /// Progress callback
     progress_callback: Option<Arc<dyn Fn(&str, f32) + Send + Sync>>,
 }
@@ -194,71 +198,69 @@ impl MultiCamSfm {
             progress_callback: None,
         }
     }
-    
+
     pub fn set_progress_callback<F>(&mut self, callback: F)
     where
         F: Fn(&str, f32) + Send + Sync + 'static,
     {
         self.progress_callback = Some(Arc::new(callback));
     }
-    
+
     fn report_progress(&self, stage: &str, progress: f32) {
         if let Some(cb) = &self.progress_callback {
             cb(stage, progress);
         }
     }
-    
+
     // =========================================================================
     // Phase 1: Livescan Processing (Real-time during scanning)
     // =========================================================================
-    
+
     /// Register a webcam with its intrinsics
     pub fn register_camera(&mut self, camera_id: CameraId, intrinsics: CameraIntrinsics) {
         self.camera_intrinsics.insert(camera_id, intrinsics);
     }
-    
+
     /// Process a livescan frame from a webcam
     /// Called in real-time during scanning
     pub fn process_livescan_frame(&mut self, frame: LivescanFrame) -> anyhow::Result<()> {
         // Quantize turntable angle to nearest degree for indexing
         let angle_key = (frame.turntable_angle + 0.5) as i32 % 360;
-        
+
         // Store pose for later high-res matching
-        self.livescan_poses.insert(
-            (frame.camera_id.clone(), angle_key),
-            frame.pose.clone(),
-        );
-        
+        self.livescan_poses
+            .insert((frame.camera_id.clone(), angle_key), frame.pose.clone());
+
         // Store intrinsics if not already present
         self.camera_intrinsics
             .entry(frame.camera_id)
             .or_insert(frame.intrinsics);
-        
+
         // For now, just store features for later matching
         // In production, we'd also triangulate points incrementally
-        
+
         Ok(())
     }
-    
+
     /// Get livescan pose nearest to a turntable angle
     pub fn get_livescan_pose(&self, camera_id: &CameraId, angle: f32) -> Option<&CameraPose> {
         let angle_key = (angle + 0.5) as i32 % 360;
         self.livescan_poses.get(&(camera_id.clone(), angle_key))
     }
-    
+
     /// Get number of registered livescan poses
     pub fn livescan_pose_count(&self) -> usize {
         self.livescan_poses.len()
     }
-    
+
     // =========================================================================
     // Phase 2: SD Card Ingestion (After scanning)
     // =========================================================================
-    
+
     /// Add high-res images from an SD card
     pub fn ingest_sd_card(&mut self, images: Vec<HighResImage>) -> anyhow::Result<()> {
         self.report_progress("Ingesting SD card", 0.0);
-        
+
         let total = images.len();
         for (i, image) in images.into_iter().enumerate() {
             // Group focus-stacked images
@@ -268,38 +270,41 @@ impl MultiCamSfm {
                     .or_default()
                     .push(image.clone());
             }
-            
+
             self.pending_highres.push(image);
-            
+
             self.report_progress("Ingesting SD card", (i + 1) as f32 / total as f32);
         }
-        
-        tracing::info!("Ingested {} high-res images, {} focus groups", 
-            self.pending_highres.len(), self.focus_groups.len());
-        
+
+        tracing::info!(
+            "Ingested {} high-res images, {} focus groups",
+            self.pending_highres.len(),
+            self.focus_groups.len()
+        );
+
         Ok(())
     }
-    
+
     // =========================================================================
     // Phase 3: High-Res Reconstruction (After all SD cards ingested)
     // =========================================================================
-    
+
     /// Run full reconstruction pipeline
     pub fn run_reconstruction(&mut self) -> anyhow::Result<SparseReconstruction> {
         self.report_progress("Starting reconstruction", 0.0);
-        
+
         // Step 1: Process focus stacks
         self.report_progress("Processing focus stacks", 0.1);
         let fused_images = self.process_focus_stacks()?;
-        
+
         // Step 2: Match high-res to livescan poses
         self.report_progress("Matching to livescan", 0.2);
         let matched = self.match_highres_to_livescan(&fused_images)?;
-        
+
         // Step 3: Feature extraction and matching
         self.report_progress("Extracting features", 0.3);
         let image_data = self.extract_highres_features(&matched)?;
-        
+
         // Step 4: Run SfM with livescan prior
         self.report_progress("Running SfM", 0.5);
         let sfm_config = SfmConfig {
@@ -308,49 +313,52 @@ impl MultiCamSfm {
             ba_iterations: self.config.final_ba_iterations,
             ..Default::default()
         };
-        
+
         let mut pipeline = SfmPipeline::new(sfm_config);
-        
+
         // Add images with livescan pose priors
         for (img_data, prior_pose) in image_data.iter().zip(matched.iter()) {
             pipeline.add_image_with_prior(img_data.clone(), prior_pose.1.clone())?;
         }
-        
+
         // Run reconstruction
         let recon = pipeline.run()?;
-        
+
         self.report_progress("SfM complete", 0.7);
-        
+
         // Step 5: Dense reconstruction (optional)
         if self.config.enable_dense {
             self.report_progress("Running dense MVS", 0.8);
-            self.run_dense_reconstruction(&recon)?;
+            self.run_dense_reconstruction(&recon, &matched)?;
         }
-        
+
         self.sparse_recon = Some(recon.clone());
         self.report_progress("Reconstruction complete", 1.0);
-        
+
         Ok(recon)
     }
-    
+
     fn process_focus_stacks(&self) -> anyhow::Result<Vec<HighResImage>> {
         // Group images by bracket_group for focus stacking
         if self.focus_groups.is_empty() {
             // No focus stacking needed - return all images directly
             return Ok(self.pending_highres.clone());
         }
-        
-        tracing::info!("Processing {} focus stacking groups", self.focus_groups.len());
-        
+
+        tracing::info!(
+            "Processing {} focus stacking groups",
+            self.focus_groups.len()
+        );
+
         let mut processed_images = Vec::new();
-        
+
         // Images not in any focus group go through directly
         for image in &self.pending_highres {
             if image.bracket_group.is_none() {
                 processed_images.push(image.clone());
             }
         }
-        
+
         // Process each focus group using hierarchical collapse
         for (group_id, group_images) in &self.focus_groups {
             if group_images.is_empty() {
@@ -402,15 +410,22 @@ impl MultiCamSfm {
             }
 
             for (plane, align) in focus_planes.iter_mut().zip(alignments.iter()) {
-                if align.dx.abs() < 1e-6 && align.dy.abs() < 1e-6 && (align.scale - 1.0).abs() < 1e-6 {
-                    plane.sharpness = compute_sharpness_map_from_rgb(&plane.rgb_array, &GradingParams::default())?;
+                if align.dx.abs() < 1e-6
+                    && align.dy.abs() < 1e-6
+                    && (align.scale - 1.0).abs() < 1e-6
+                {
+                    plane.sharpness = compute_sharpness_map_from_rgb(
+                        &plane.rgb_array,
+                        &GradingParams::default(),
+                    )?;
                     continue;
                 }
                 let aligned = apply_alignment_rgb(&plane.rgb, align);
                 plane.rgb = aligned;
                 plane.rgb_array = rgb_to_array(&plane.rgb);
                 plane.luma_array = rgb_to_luma_array(&plane.rgb);
-                plane.sharpness = compute_sharpness_map_from_rgb(&plane.rgb_array, &GradingParams::default())?;
+                plane.sharpness =
+                    compute_sharpness_map_from_rgb(&plane.rgb_array, &GradingParams::default())?;
             }
 
             let (height, width, _) = focus_planes[0].rgb_array.dim();
@@ -476,7 +491,11 @@ impl MultiCamSfm {
                 }
             }
 
-            let output_path = save_focus_stack(group_id, &focus_planes[0].images[0].path, &output)?;
+            let output_path = focus_stack_output_path(group_id, &focus_planes[0].images[0].path);
+            if self.config.persist_focus_stacks {
+                save_focus_stack(&output_path, &output)?;
+            }
+            let output = Arc::new(output);
 
             let representative = &focus_planes[0].images[0];
             processed_images.push(HighResImage {
@@ -489,18 +508,25 @@ impl MultiCamSfm {
                 focus_distance: representative.focus_distance,
                 exposure_value: representative.exposure_value,
                 bracket_group: None,
+                pixels: Some(output),
             });
         }
-        
-        tracing::info!("Processed focus stacks: {} output images from {} input images",
-            processed_images.len(), self.pending_highres.len());
-        
+
+        tracing::info!(
+            "Processed focus stacks: {} output images from {} input images",
+            processed_images.len(),
+            self.pending_highres.len()
+        );
+
         Ok(processed_images)
     }
-    
-    fn match_highres_to_livescan(&self, images: &[HighResImage]) -> anyhow::Result<Vec<(HighResImage, CameraPose)>> {
+
+    fn match_highres_to_livescan(
+        &self,
+        images: &[HighResImage],
+    ) -> anyhow::Result<Vec<(HighResImage, CameraPose)>> {
         let mut matched = Vec::new();
-        
+
         // Build a sorted index of livescan timestamps for binary search
         let mut livescan_timestamps: Vec<(u64, CameraId, i32)> = Vec::new();
         for (camera_id, angle) in self.livescan_poses.keys() {
@@ -510,17 +536,16 @@ impl MultiCamSfm {
             livescan_timestamps.push((estimated_ts, camera_id.clone(), *angle));
         }
         livescan_timestamps.sort_by_key(|x| x.0);
-        
+
         for image in images {
             let pose = if let Some(ts) = image.timestamp_ms {
                 // Find closest livescan pose by timestamp
                 match self.find_closest_pose_by_timestamp(ts, &livescan_timestamps) {
-                    Some((camera_id, angle)) => {
-                        self.livescan_poses
-                            .get(&(camera_id, angle))
-                            .cloned()
-                            .unwrap_or_else(CameraPose::identity)
-                    }
+                    Some((camera_id, angle)) => self
+                        .livescan_poses
+                        .get(&(camera_id, angle))
+                        .cloned()
+                        .unwrap_or_else(CameraPose::identity),
                     None => CameraPose::identity(),
                 }
             } else {
@@ -528,14 +553,17 @@ impl MultiCamSfm {
                 // This helps when DSLR EXIF doesn't have accurate timestamps
                 CameraPose::identity()
             };
-            
+
             matched.push((image.clone(), pose));
         }
-        
-        tracing::info!("Matched {} high-res images to livescan poses", matched.len());
+
+        tracing::info!(
+            "Matched {} high-res images to livescan poses",
+            matched.len()
+        );
         Ok(matched)
     }
-    
+
     /// Find the closest livescan pose by timestamp using binary search
     fn find_closest_pose_by_timestamp(
         &self,
@@ -545,16 +573,16 @@ impl MultiCamSfm {
         if sorted_timestamps.is_empty() {
             return None;
         }
-        
+
         // Binary search for closest
         let idx = sorted_timestamps
             .binary_search_by_key(&target_ts, |x| x.0)
             .unwrap_or_else(|x| x.min(sorted_timestamps.len() - 1));
-        
+
         // Check neighbors to find actual closest
         let mut best_idx = idx;
         let mut best_diff = (sorted_timestamps[idx].0 as i64 - target_ts as i64).unsigned_abs();
-        
+
         if idx > 0 {
             let diff = (sorted_timestamps[idx - 1].0 as i64 - target_ts as i64).unsigned_abs();
             if diff < best_diff {
@@ -562,29 +590,51 @@ impl MultiCamSfm {
                 best_diff = diff;
             }
         }
-        
+
         if idx + 1 < sorted_timestamps.len() {
             let diff = (sorted_timestamps[idx + 1].0 as i64 - target_ts as i64).unsigned_abs();
             if diff < best_diff {
                 best_idx = idx + 1;
             }
         }
-        
+
         let (_, camera_id, angle) = &sorted_timestamps[best_idx];
         Some((camera_id.clone(), *angle))
     }
-    
-    fn extract_highres_features(&self, images: &[(HighResImage, CameraPose)]) -> anyhow::Result<Vec<ImageData>> {
-        images.par_iter()
+
+    fn extract_highres_features(
+        &self,
+        images: &[(HighResImage, CameraPose)],
+    ) -> anyhow::Result<Vec<ImageData>> {
+        images
+            .par_iter()
             .map(|(img, _pose)| {
-                // Load image and extract features
-                ImageData::from_path(&img.path, &img.intrinsics)
+                if let Some(pixels) = &img.pixels {
+                    ImageData::from_rgb_image(
+                        &img.path,
+                        pixels,
+                        &img.intrinsics,
+                        self.config.highres_max_features,
+                    )
+                } else {
+                    ImageData::from_path_with_limit(
+                        &img.path,
+                        &img.intrinsics,
+                        self.config.highres_max_features,
+                    )
+                }
             })
             .collect()
     }
-    
-    fn run_dense_reconstruction(&mut self, sparse: &SparseReconstruction) -> anyhow::Result<()> {
-        let view_count = sparse.image_names.len()
+
+    fn run_dense_reconstruction(
+        &mut self,
+        sparse: &SparseReconstruction,
+        images: &[(HighResImage, CameraPose)],
+    ) -> anyhow::Result<()> {
+        let view_count = sparse
+            .image_names
+            .len()
             .min(sparse.poses.len())
             .min(sparse.cameras.len());
         if view_count < 2 {
@@ -592,13 +642,32 @@ impl MultiCamSfm {
             return Ok(());
         }
 
+        let in_memory: HashMap<String, Arc<RgbImage>> = images
+            .iter()
+            .filter_map(|(image, _)| {
+                image.pixels.as_ref().map(|pixels| {
+                    (
+                        image.path.to_string_lossy().into_owned(),
+                        Arc::clone(pixels),
+                    )
+                })
+            })
+            .collect();
         let mut views = Vec::with_capacity(view_count);
         for idx in 0..view_count {
             let path = PathBuf::from(&sparse.image_names[idx]);
-            let img = image::open(&path)
-                .map_err(|e| anyhow::anyhow!("Failed to load image {}: {}", path.display(), e))?;
-            let rgb = img.to_rgb8();
-            let gray = img.to_luma8();
+            let rgb = if let Some(pixels) = in_memory.get(&sparse.image_names[idx]) {
+                Arc::clone(pixels)
+            } else {
+                Arc::new(
+                    image::open(&path)
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to load image {}: {}", path.display(), e)
+                        })?
+                        .to_rgb8(),
+                )
+            };
+            let gray = image::imageops::grayscale(rgb.as_ref());
             views.push(ViewData {
                 rgb,
                 gray,
@@ -614,7 +683,8 @@ impl MultiCamSfm {
 
             let src_images: Vec<&GrayImage> = src_indices.iter().map(|&i| &views[i].gray).collect();
             let src_poses: Vec<&CameraPose> = src_indices.iter().map(|&i| &views[i].pose).collect();
-            let src_intrinsics: Vec<&CameraIntrinsics> = src_indices.iter().map(|&i| &views[i].intrinsics).collect();
+            let src_intrinsics: Vec<&CameraIntrinsics> =
+                src_indices.iter().map(|&i| &views[i].intrinsics).collect();
 
             let input = MvsInput {
                 ref_image: &ref_view.gray,
@@ -648,24 +718,25 @@ impl MultiCamSfm {
             return Ok(());
         }
 
-        let mut mesh = marching_cubes_reconstruction(&oriented_points, self.config.mesh_resolution)?;
+        let mut mesh =
+            marching_cubes_reconstruction(&oriented_points, self.config.mesh_resolution)?;
         mesh.compute_normals();
         self.mesh = Some(mesh);
         Ok(())
     }
-    
+
     // =========================================================================
     // Accessors
     // =========================================================================
-    
+
     pub fn sparse_reconstruction(&self) -> Option<&SparseReconstruction> {
         self.sparse_recon.as_ref()
     }
-    
+
     pub fn mesh(&self) -> Option<&Mesh> {
         self.mesh.as_ref()
     }
-    
+
     pub fn depth_maps(&self) -> &[DepthMap] {
         &self.depth_maps
     }
@@ -680,7 +751,7 @@ struct FocusPlane {
 }
 
 struct ViewData {
-    rgb: RgbImage,
+    rgb: Arc<RgbImage>,
     gray: GrayImage,
     intrinsics: CameraIntrinsics,
     pose: CameraPose,
@@ -702,15 +773,14 @@ fn select_mvs_sources(ref_idx: usize, views: &[ViewData], max_sources: usize) ->
         })
         .collect();
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    candidates.into_iter().take(max_sources).map(|(idx, _)| idx).collect()
+    candidates
+        .into_iter()
+        .take(max_sources)
+        .map(|(idx, _)| idx)
+        .collect()
 }
 
-fn backproject_point(
-    intrinsics: &CameraIntrinsics,
-    x: u32,
-    y: u32,
-    depth: f32,
-) -> na::Point3<f64> {
+fn backproject_point(intrinsics: &CameraIntrinsics, x: u32, y: u32, depth: f32) -> na::Point3<f64> {
     let x3d = (x as f64 - intrinsics.cx) * depth as f64 / intrinsics.fx;
     let y3d = (y as f64 - intrinsics.cy) * depth as f64 / intrinsics.fy;
     na::Point3::new(x3d, y3d, depth as f64)
@@ -792,9 +862,15 @@ fn collect_oriented_points(
                         continue;
                     }
 
-                    let src_x = (src_view.intrinsics.fx * point_src.x / point_src.z + src_view.intrinsics.cx) as i32;
-                    let src_y = (src_view.intrinsics.fy * point_src.y / point_src.z + src_view.intrinsics.cy) as i32;
-                    if src_x < 0 || src_y < 0 || src_x >= src_map.width as i32 || src_y >= src_map.height as i32 {
+                    let src_x = (src_view.intrinsics.fx * point_src.x / point_src.z
+                        + src_view.intrinsics.cx) as i32;
+                    let src_y = (src_view.intrinsics.fy * point_src.y / point_src.z
+                        + src_view.intrinsics.cy) as i32;
+                    if src_x < 0
+                        || src_y < 0
+                        || src_x >= src_map.width as i32
+                        || src_y >= src_map.height as i32
+                    {
                         continue;
                     }
 
@@ -909,7 +985,9 @@ fn exposure_weight(rgb: &RgbImage, exposure_value: Option<f32>) -> f64 {
     let mean = if count > 0 { sum / count as f64 } else { 0.5 };
     let sigma = 0.25;
     let base = (-((mean - 0.5) * (mean - 0.5)) / (2.0 * sigma * sigma)).exp();
-    let ev_boost = exposure_value.map(|ev| (-((ev as f64) * (ev as f64)) / 2.0).exp()).unwrap_or(1.0);
+    let ev_boost = exposure_value
+        .map(|ev| (-((ev as f64) * (ev as f64)) / 2.0).exp())
+        .unwrap_or(1.0);
     (base * ev_boost).max(1e-4)
 }
 
@@ -1011,16 +1089,50 @@ fn sample_bilinear_rgb(img: &RgbImage, x: f64, y: f64) -> image::Rgb<u8> {
     image::Rgb(out)
 }
 
-fn save_focus_stack(group_id: &u32, source_path: &PathBuf, output: &RgbImage) -> anyhow::Result<PathBuf> {
+fn focus_stack_output_path(group_id: &u32, source_path: &Path) -> PathBuf {
     let base_dir = source_path
         .parent()
         .map(|p| p.join("focus_stacks"))
         .unwrap_or_else(|| PathBuf::from("focus_stacks"));
+    base_dir.join(format!("focus_stack_{group_id}.png"))
+}
+
+fn save_focus_stack(output_path: &Path, output: &RgbImage) -> anyhow::Result<()> {
+    let base_dir = output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("focus_stacks"));
     std::fs::create_dir_all(&base_dir)?;
-    let filename = format!("focus_stack_{}_{}.png", group_id, chrono::Utc::now().timestamp_millis());
-    let output_path = base_dir.join(filename);
-    output.save(&output_path)?;
-    Ok(output_path)
+    let file_name = output_path
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "focus-stack.png".into());
+    let temporary =
+        output_path.with_file_name(format!(".{file_name}.{}.part", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        let mut writer = std::io::BufWriter::with_capacity(1024 * 1024, file);
+        image::codecs::png::PngEncoder::new(&mut writer).write_image(
+            output.as_raw(),
+            output.width(),
+            output.height(),
+            image::ExtendedColorType::Rgb8,
+        )?;
+        use std::io::Write;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+        std::fs::rename(&temporary, output_path)?;
+        #[cfg(unix)]
+        std::fs::File::open(base_dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Extension trait to add images with pose priors
@@ -1029,7 +1141,11 @@ trait SfmPipelineExt {
 }
 
 impl SfmPipelineExt for SfmPipeline {
-    fn add_image_with_prior(&mut self, mut image: ImageData, prior: CameraPose) -> anyhow::Result<()> {
+    fn add_image_with_prior(
+        &mut self,
+        mut image: ImageData,
+        prior: CameraPose,
+    ) -> anyhow::Result<()> {
         image.prior_pose = Some(prior);
         self.add_image(image)
     }
@@ -1038,38 +1154,39 @@ impl SfmPipelineExt for SfmPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_camera_id() {
         let webcam = CameraId::webcam(0);
         assert_eq!(webcam.0, "webcam_0");
-        
+
         let dslr = CameraId::dslr("nikon_d850");
         assert_eq!(dslr.0, "dslr_nikon_d850");
     }
-    
+
     #[test]
     fn test_multicam_config_default() {
         let config = MultiCamConfig::default();
         assert_eq!(config.num_webcams, 1);
         assert!(config.enable_dense);
+        assert!(config.persist_focus_stacks);
     }
-    
+
     #[test]
     fn test_multicam_sfm_creation() {
         let config = MultiCamConfig {
             num_webcams: 10,
             ..Default::default()
         };
-        
+
         let sfm = MultiCamSfm::new(config);
         assert_eq!(sfm.livescan_pose_count(), 0);
     }
-    
+
     #[test]
     fn test_register_camera() {
         let mut sfm = MultiCamSfm::new(MultiCamConfig::default());
-        
+
         let cam_id = CameraId::webcam(0);
         let intrinsics = CameraIntrinsics {
             fx: 500.0,
@@ -1079,9 +1196,19 @@ mod tests {
             width: 640,
             height: 480,
             distortion: vec![],
+            distortion_model: Default::default(),
         };
-        
+
         sfm.register_camera(cam_id.clone(), intrinsics);
         assert!(sfm.camera_intrinsics.contains_key(&cam_id));
+    }
+
+    #[test]
+    fn focus_stack_paths_are_deterministic() {
+        let source = PathBuf::from("/capture/angle/frame.nef");
+        assert_eq!(
+            focus_stack_output_path(&7, &source),
+            PathBuf::from("/capture/angle/focus_stacks/focus_stack_7.png")
+        );
     }
 }

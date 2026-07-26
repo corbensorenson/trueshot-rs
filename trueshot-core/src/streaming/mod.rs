@@ -66,7 +66,7 @@ impl StreamQuality {
             StreamQuality::Ultra => 1.0,
         }
     }
-    
+
     /// Get point/gaussian density factor
     pub fn density_factor(&self) -> f32 {
         match self {
@@ -76,7 +76,7 @@ impl StreamQuality {
             StreamQuality::Ultra => 1.0,
         }
     }
-    
+
     /// Get mesh LOD level
     pub fn mesh_lod(&self) -> u8 {
         match self {
@@ -281,7 +281,11 @@ pub struct ClientCapabilities {
 impl Default for ClientCapabilities {
     fn default() -> Self {
         Self {
-            stream_types: vec![StreamType::PointCloud, StreamType::Mesh, StreamType::Progress],
+            stream_types: vec![
+                StreamType::PointCloud,
+                StreamType::Mesh,
+                StreamType::Progress,
+            ],
             max_quality: StreamQuality::High,
             preferred_quality: StreamQuality::Medium,
             max_points_per_update: 100_000,
@@ -352,7 +356,7 @@ impl DeltaEncoder {
             threshold,
         }
     }
-    
+
     /// Encode point cloud with delta compression
     pub fn encode_point_cloud(
         &mut self,
@@ -367,23 +371,23 @@ impl DeltaEncoder {
             self.last_sequence = sequence;
             return (Vec::new(), positions.to_vec(), colors.to_vec(), false);
         }
-        
+
         // Find changed points
         let mut changed_indices = Vec::new();
         let mut changed_positions = Vec::new();
         let mut changed_colors = Vec::new();
-        
+
         for i in 0..positions.len() / 3 {
             let pos_idx = i * 3;
             let dx = (positions[pos_idx] - self.last_positions[pos_idx]).abs();
             let dy = (positions[pos_idx + 1] - self.last_positions[pos_idx + 1]).abs();
             let dz = (positions[pos_idx + 2] - self.last_positions[pos_idx + 2]).abs();
-            
+
             if dx > self.threshold || dy > self.threshold || dz > self.threshold {
                 changed_indices.push(i as u32);
                 changed_positions.extend_from_slice(&positions[pos_idx..pos_idx + 3]);
                 changed_colors.extend_from_slice(&colors[pos_idx..pos_idx + 3]);
-                
+
                 self.last_positions[pos_idx] = positions[pos_idx];
                 self.last_positions[pos_idx + 1] = positions[pos_idx + 1];
                 self.last_positions[pos_idx + 2] = positions[pos_idx + 2];
@@ -392,12 +396,12 @@ impl DeltaEncoder {
                 self.last_colors[pos_idx + 2] = colors[pos_idx + 2];
             }
         }
-        
+
         self.last_sequence = sequence;
-        
+
         (changed_indices, changed_positions, changed_colors, true)
     }
-    
+
     /// Reset encoder state
     pub fn reset(&mut self) {
         self.last_positions.clear();
@@ -424,9 +428,12 @@ pub struct StreamPacketBuilder {
 
 impl StreamPacketBuilder {
     pub fn new(quality: StreamQuality) -> Self {
-        Self { sequence: 0, quality }
+        Self {
+            sequence: 0,
+            quality,
+        }
     }
-    
+
     /// Create point cloud packet
     pub fn point_cloud(&mut self, chunk: PointCloudChunk) -> StreamPacket {
         self.sequence += 1;
@@ -442,7 +449,7 @@ impl StreamPacketBuilder {
             payload: StreamPayload::PointCloud(chunk),
         }
     }
-    
+
     /// Create gaussian packet
     pub fn gaussian(&mut self, chunk: GaussianChunk) -> StreamPacket {
         self.sequence += 1;
@@ -458,7 +465,7 @@ impl StreamPacketBuilder {
             payload: StreamPayload::Gaussian(chunk),
         }
     }
-    
+
     /// Create mesh packet
     pub fn mesh(&mut self, chunk: MeshChunk) -> StreamPacket {
         self.sequence += 1;
@@ -474,7 +481,7 @@ impl StreamPacketBuilder {
             payload: StreamPayload::Mesh(chunk),
         }
     }
-    
+
     /// Create avatar frame packet
     pub fn avatar(&mut self, frame: AvatarFrame) -> StreamPacket {
         self.sequence += 1;
@@ -485,12 +492,16 @@ impl StreamPacketBuilder {
                 stream_type: StreamType::Avatar,
                 quality: self.quality,
                 is_delta: !frame.is_keyframe,
-                delta_ref: if frame.is_keyframe { None } else { Some(self.sequence - 1) },
+                delta_ref: if frame.is_keyframe {
+                    None
+                } else {
+                    Some(self.sequence - 1)
+                },
             },
             payload: StreamPayload::Avatar(frame),
         }
     }
-    
+
     /// Create progress packet
     pub fn progress(&mut self, update: ProgressUpdate) -> StreamPacket {
         self.sequence += 1;
@@ -506,7 +517,7 @@ impl StreamPacketBuilder {
             payload: StreamPayload::Progress(update),
         }
     }
-    
+
     /// Create scene info packet
     pub fn scene_info(&mut self, info: SceneInfo) -> StreamPacket {
         self.sequence += 1;
@@ -522,7 +533,7 @@ impl StreamPacketBuilder {
             payload: StreamPayload::Scene(info),
         }
     }
-    
+
     /// Create heartbeat
     pub fn heartbeat(&mut self) -> StreamPacket {
         self.sequence += 1;
@@ -538,7 +549,7 @@ impl StreamPacketBuilder {
             payload: StreamPayload::Heartbeat,
         }
     }
-    
+
     fn now_ms() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
@@ -557,7 +568,7 @@ impl Default for StreamPacketBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_quality_factors() {
         assert_eq!(StreamQuality::Low.density_factor(), 0.1);
@@ -565,11 +576,11 @@ mod tests {
         assert_eq!(StreamQuality::Low.mesh_lod(), 3);
         assert_eq!(StreamQuality::Ultra.mesh_lod(), 0);
     }
-    
+
     #[test]
     fn test_packet_builder() {
         let mut builder = StreamPacketBuilder::new(StreamQuality::High);
-        
+
         let packet = builder.progress(ProgressUpdate {
             percent: 50.0,
             stage: "Processing".to_string(),
@@ -578,24 +589,24 @@ mod tests {
             message: "Extracting features".to_string(),
             warnings: vec![],
         });
-        
+
         assert_eq!(packet.header.sequence, 1);
         assert_eq!(packet.header.stream_type, StreamType::Progress);
     }
-    
+
     #[test]
     fn test_delta_encoder() {
         let mut encoder = DeltaEncoder::new(0.01);
-        
+
         let positions = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let colors = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        
+
         // First call - full update
         let (indices, pos, col, is_delta) = encoder.encode_point_cloud(&positions, &colors, 1);
         assert!(!is_delta);
         assert!(indices.is_empty());
         assert_eq!(pos.len(), 6);
-        
+
         // Second call with same data - no changes
         let (indices, pos, col, is_delta) = encoder.encode_point_cloud(&positions, &colors, 2);
         assert!(is_delta);

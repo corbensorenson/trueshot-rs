@@ -1,5 +1,5 @@
-use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,13 @@ impl ScanSession {
         }
     }
 
-    pub fn log_capture(&mut self, angle: f32, cameras: Vec<String>, capture_type: &str, file_count: usize) {
+    pub fn log_capture(
+        &mut self,
+        angle: f32,
+        cameras: Vec<String>,
+        capture_type: &str,
+        file_count: usize,
+    ) {
         self.events.push(CaptureEvent {
             timestamp: Utc::now(),
             turntable_angle: angle,

@@ -25,7 +25,7 @@ pub mod gpu_postprocess;
 
 // Re-export main types
 #[cfg(feature = "gpu")]
-pub use gpu_context::{GpuContext, get_gpu_context};
+pub use gpu_context::{get_gpu_context, GpuContext};
 
 #[cfg(feature = "gpu")]
 pub use gpu_collapse::gpu_collapse_pixels;
@@ -50,4 +50,3 @@ pub fn is_gpu_available() -> bool {
         false
     }
 }
-

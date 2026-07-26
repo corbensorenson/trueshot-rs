@@ -255,6 +255,12 @@ fn generate_brief_pattern() -> [(i8, i8, i8, i8); 256] {
 /// Detect SIFT-like features (simplified DoG approach)
 pub fn detect_sift(image: &DynamicImage, max_features: usize) -> (Vec<Keypoint>, Vec<Descriptor>) {
     let gray = image.to_luma8();
+    detect_sift_gray(&gray, max_features)
+}
+
+/// Detect SIFT-like features from an existing luma image without converting or
+/// reopening an encoded image.
+pub fn detect_sift_gray(gray: &GrayImage, max_features: usize) -> (Vec<Keypoint>, Vec<Descriptor>) {
     let (width, height) = gray.dimensions();
     
     // Build Gaussian pyramid

@@ -1,7 +1,7 @@
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Utc};
-use anyhow::{Result, Context};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ impl ScanProject {
     pub fn new(name: &str, base_dir: &Path) -> Result<Self> {
         let id = Uuid::new_v4();
         let root_path = base_dir.join(format!("{}_{}", name.replace(" ", "_"), id));
-        
+
         let project = Self {
             id,
             name: name.to_string(),
@@ -56,13 +56,13 @@ impl ScanProject {
             },
             status: ScanStatus::New,
         };
-        
+
         project.init_structure()?;
         project.save_manifest()?;
-        
+
         Ok(project)
     }
-    
+
     fn init_structure(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root_path)?;
         std::fs::create_dir_all(self.root_path.join("raw/images"))?; // Raw captures
@@ -71,22 +71,22 @@ impl ScanProject {
         std::fs::create_dir_all(self.root_path.join("logs"))?;
         Ok(())
     }
-    
+
     pub fn save_manifest(&self) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(self.root_path.join("project.json"), json)
             .context("Failed to save project manifest")?;
         Ok(())
     }
-    
+
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path.join("project.json"))?;
         let project: ScanProject = serde_json::from_str(&content)?;
         Ok(project)
     }
-    
+
     // --- Asset Management ---
-    
+
     pub fn add_image(&self, source: &Path) -> Result<PathBuf> {
         let dest_dir = self.root_path.join("raw/images");
         let filename = source.file_name().context("Invalid source filename")?;
@@ -94,7 +94,7 @@ impl ScanProject {
         std::fs::copy(source, &dest)?;
         Ok(dest)
     }
-    
+
     pub fn clean_intermediates(&self) -> Result<()> {
         if !self.settings.keep_intermediates {
             let p = self.root_path.join("processed");

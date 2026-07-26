@@ -10,7 +10,7 @@
 //! - Accessory attachment points
 
 pub mod animation;
-pub use animation::{ARKitBlendshapes, IKSolver, IKChain, IKTarget, AnimationDriver};
+pub use animation::{ARKitBlendshapes, AnimationDriver, IKChain, IKSolver, IKTarget};
 
 use nalgebra as na;
 use serde::{Deserialize, Serialize};
@@ -391,86 +391,83 @@ impl AvatarCaptureSession {
             config,
         }
     }
-    
+
     /// Start T-pose capture
     pub fn start_tpose_capture(&mut self) {
         self.state = AvatarCaptureState::CapturingTPose;
     }
-    
+
     /// Start expression capture
     pub fn start_expression_capture(&mut self) {
         self.state = AvatarCaptureState::CapturingExpressions;
     }
-    
+
     /// Start motion capture
     pub fn start_motion_capture(&mut self) {
         self.state = AvatarCaptureState::CapturingMotion;
     }
-    
+
     /// Start voice capture
     pub fn start_voice_capture(&mut self) {
         self.state = AvatarCaptureState::CapturingVoice;
     }
-    
+
     /// Add captured frame
     pub fn add_frame(&mut self, frame: CapturedAvatarFrame) {
         let camera_id = frame.camera_id.clone();
-        self.frames
-            .entry(camera_id)
-            .or_default()
-            .push(frame);
+        self.frames.entry(camera_id).or_default().push(frame);
     }
-    
+
     /// Add audio samples
     pub fn add_audio(&mut self, samples: &[f32]) {
         self.audio_samples.extend_from_slice(samples);
     }
-    
+
     /// Get current state
     pub fn state(&self) -> &AvatarCaptureState {
         &self.state
     }
-    
+
     /// Process capture into avatar
     pub fn process(&mut self) -> Result<Avatar, AvatarError> {
         self.state = AvatarCaptureState::Processing;
-        
+
         // 1. Fit SMPL-X body model
         let smpl_params = self.fit_smpl_body()?;
-        
+
         // 2. Generate skeleton with automatic rigging
         let skeleton = self.generate_skeleton(&smpl_params)?;
-        
+
         // 3. Reconstruct mesh from multi-view
         let (vertices, faces, uvs) = self.reconstruct_mesh()?;
-        
+
         // 4. Compute skin weights
         let skin_weights = self.compute_skin_weights(&vertices, &skeleton)?;
-        
+
         // 5. Separate clothing if enabled
         let clothing = if self.config.separate_clothing {
             self.separate_clothing(&vertices, &faces, &uvs, &smpl_params, &skeleton)?
         } else {
             Vec::new()
         };
-        
+
         // 6. Extract blendshapes if enabled
         let blendshapes = if self.config.extract_blendshapes {
             self.extract_blendshapes(&vertices, &skeleton)?
         } else {
             Vec::new()
         };
-        
+
         // 7. Generate voice profile
         let voice_profile = if !self.audio_samples.is_empty() {
             Some(self.generate_voice_profile()?)
         } else {
             None
         };
-        
+
         // 8. Create attachment points
         let attachments = self.create_attachment_points(&skeleton);
-        
+
         let body = AvatarBody {
             smpl_params,
             skeleton,
@@ -481,7 +478,7 @@ impl AvatarCaptureSession {
             texture: None,
             normal_map: None,
         };
-        
+
         let avatar = Avatar {
             id: uuid::Uuid::new_v4().to_string(),
             name: "New Avatar".to_string(),
@@ -499,13 +496,13 @@ impl AvatarCaptureSession {
                 software_version: env!("CARGO_PKG_VERSION").to_string(),
             },
         };
-        
+
         self.state = AvatarCaptureState::Complete;
         Ok(avatar)
     }
-    
+
     // ========== Internal Methods ==========
-    
+
     fn fit_smpl_body(&self) -> Result<SMPLXParams, AvatarError> {
         let mut params = SMPLXParams::default();
 
@@ -543,7 +540,7 @@ impl AvatarCaptureSession {
 
         Ok(params)
     }
-    
+
     fn generate_skeleton(&self, smpl_params: &SMPLXParams) -> Result<Skeleton, AvatarError> {
         let height = smplx_height_from_betas(&smpl_params.betas);
         let width_scale = 1.0 + smpl_params.betas[1] * 0.08;
@@ -554,16 +551,27 @@ impl AvatarCaptureSession {
             smpl_params.translation[2],
         );
 
-        let joint_world = default_smplx_joint_positions(height, width_scale, depth_scale, translation);
+        let joint_world =
+            default_smplx_joint_positions(height, width_scale, depth_scale, translation);
 
         let joints = SMPLX_JOINT_NAMES
             .iter()
             .enumerate()
             .map(|(i, name)| {
-                let parent = if i == 0 { None } else { Some(SMPLX_PARENTS[i] as usize) };
-                let world_pos = joint_world.get(i).cloned().unwrap_or_else(na::Point3::origin);
+                let parent = if i == 0 {
+                    None
+                } else {
+                    Some(SMPLX_PARENTS[i] as usize)
+                };
+                let world_pos = joint_world
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(na::Point3::origin);
                 let local_pos = if let Some(parent_idx) = parent {
-                    let parent_world = joint_world.get(parent_idx).cloned().unwrap_or_else(na::Point3::origin);
+                    let parent_world = joint_world
+                        .get(parent_idx)
+                        .cloned()
+                        .unwrap_or_else(na::Point3::origin);
                     na::Point3::from(world_pos.coords - parent_world.coords)
                 } else {
                     world_pos
@@ -593,9 +601,12 @@ impl AvatarCaptureSession {
 
         Ok(Skeleton { joints, root: 0 })
     }
-    
-    fn reconstruct_mesh(&self) -> Result<(Vec<na::Point3<f32>>, Vec<[u32; 3]>, Vec<[f32; 2]>), AvatarError> {
-        let temp_root = std::env::temp_dir().join(format!("trueshot_avatar_{}", uuid::Uuid::new_v4()));
+
+    fn reconstruct_mesh(
+        &self,
+    ) -> Result<(Vec<na::Point3<f32>>, Vec<[u32; 3]>, Vec<[f32; 2]>), AvatarError> {
+        let temp_root =
+            std::env::temp_dir().join(format!("trueshot_avatar_{}", uuid::Uuid::new_v4()));
         let images_dir = temp_root.join("raw").join("images");
         std::fs::create_dir_all(&images_dir)
             .map_err(|e| AvatarError::ProcessingError(format!("Failed to create temp dir: {e}")))?;
@@ -646,6 +657,7 @@ impl AvatarCaptureSession {
                     focus_distance: None,
                     exposure_value: None,
                     bracket_group: None,
+                    pixels: None,
                 });
             }
         }
@@ -661,12 +673,13 @@ impl AvatarCaptureSession {
         let mut sfm = MultiCamSfm::new(config);
         sfm.ingest_sd_card(images)
             .map_err(|e| AvatarError::ProcessingError(format!("Avatar ingest failed: {e}")))?;
-        sfm.run_reconstruction()
-            .map_err(|e| AvatarError::ProcessingError(format!("Avatar reconstruction failed: {e}")))?;
+        sfm.run_reconstruction().map_err(|e| {
+            AvatarError::ProcessingError(format!("Avatar reconstruction failed: {e}"))
+        })?;
 
-        let mesh = sfm
-            .mesh()
-            .ok_or_else(|| AvatarError::ProcessingError("Avatar reconstruction produced no mesh".to_string()))?;
+        let mesh = sfm.mesh().ok_or_else(|| {
+            AvatarError::ProcessingError("Avatar reconstruction produced no mesh".to_string())
+        })?;
         let vertices: Vec<na::Point3<f32>> = mesh
             .vertices
             .iter()
@@ -682,7 +695,7 @@ impl AvatarCaptureSession {
         let _ = std::fs::remove_dir_all(&temp_root);
         Ok((vertices, faces, uvs))
     }
-    
+
     fn compute_skin_weights(
         &self,
         vertices: &[na::Point3<f32>],
@@ -690,7 +703,7 @@ impl AvatarCaptureSession {
     ) -> Result<Vec<SkinWeight>, AvatarError> {
         compute_skin_weights_for_vertices(vertices, skeleton)
     }
-    
+
     fn separate_clothing(
         &self,
         vertices: &[na::Point3<f32>],
@@ -725,7 +738,11 @@ impl AvatarCaptureSession {
         for (idx, v) in vertices.iter().enumerate() {
             let rel = v.coords - axis_origin;
             let t = rel.dot(&axis_dir);
-            let height_norm = if height > 1e-4 { (t / height).clamp(0.0, 1.0) } else { 0.0 };
+            let height_norm = if height > 1e-4 {
+                (t / height).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let axis_point = axis_origin + axis_dir * t;
             let radial = (v.coords - axis_point).norm();
             let base_radius = body_radius(height_norm, height) * body_scale;
@@ -819,7 +836,7 @@ impl AvatarCaptureSession {
 
         Ok(layers)
     }
-    
+
     fn extract_blendshapes(
         &self,
         vertices: &[na::Point3<f32>],
@@ -827,8 +844,16 @@ impl AvatarCaptureSession {
     ) -> Result<Vec<Blendshape>, AvatarError> {
         // Extract blendshapes from expression frames
         let expression_names = [
-            "neutral", "smile", "frown", "surprise", "angry",
-            "eyebrowsUp", "eyebrowsDown", "eyesClosed", "mouthOpen", "pucker"
+            "neutral",
+            "smile",
+            "frown",
+            "surprise",
+            "angry",
+            "eyebrowsUp",
+            "eyebrowsDown",
+            "eyesClosed",
+            "mouthOpen",
+            "pucker",
         ];
 
         let weights = mean_expression_weights(&self.frames, expression_names.len());
@@ -847,7 +872,10 @@ impl AvatarCaptureSession {
         }
 
         let joint_map = skeleton_joint_map(skeleton);
-        let head = joint_map.get("head").cloned().unwrap_or_else(|| average_point(vertices));
+        let head = joint_map
+            .get("head")
+            .cloned()
+            .unwrap_or_else(|| average_point(vertices));
         let neck = joint_map.get("neck").cloned().unwrap_or_else(|| head);
         let height = body_height_from_vertices(vertices);
         let face_radius = 0.14 * height;
@@ -880,35 +908,155 @@ impl AvatarCaptureSession {
             let _dz = rel.dot(&forward);
 
             let falloff = (-0.5 * (dist / (0.5 * face_radius)).powi(2)).exp();
-            let mouth_factor = if dy < mouth_y { ((mouth_y - dy) / (0.08 * height)).clamp(0.0, 1.0) } else { 0.0 };
-            let eye_factor = if dy > eye_y && dy < brow_y { ((dy - eye_y) / (0.05 * height)).clamp(0.0, 1.0) } else { 0.0 };
-            let brow_factor = if dy >= brow_y { ((dy - brow_y) / (0.05 * height)).clamp(0.0, 1.0) } else { 0.0 };
+            let mouth_factor = if dy < mouth_y {
+                ((mouth_y - dy) / (0.08 * height)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let eye_factor = if dy > eye_y && dy < brow_y {
+                ((dy - eye_y) / (0.05 * height)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let brow_factor = if dy >= brow_y {
+                ((dy - brow_y) / (0.05 * height)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
 
-            apply_blendshape_delta(&mut blendshapes[1].deltas[idx], right, up, forward, dx, scale * 0.6, mouth_factor, 0.2, 0.15, 0.0, falloff); // smile
-            apply_blendshape_delta(&mut blendshapes[2].deltas[idx], right, up, forward, dx, scale * 0.5, mouth_factor, -0.2, 0.1, 0.0, falloff); // frown
-            apply_blendshape_delta(&mut blendshapes[3].deltas[idx], right, up, forward, dx, scale * 0.7, mouth_factor, 0.4, 0.0, 0.2, falloff); // surprise
-            apply_blendshape_delta(&mut blendshapes[4].deltas[idx], right, up, forward, dx, scale * 0.4, brow_factor, -0.25, -0.1, 0.0, falloff); // angry
-            apply_blendshape_delta(&mut blendshapes[5].deltas[idx], right, up, forward, dx, scale * 0.5, brow_factor, 0.3, 0.05, 0.0, falloff); // brows up
-            apply_blendshape_delta(&mut blendshapes[6].deltas[idx], right, up, forward, dx, scale * 0.4, brow_factor, -0.2, -0.05, 0.0, falloff); // brows down
-            apply_blendshape_delta(&mut blendshapes[7].deltas[idx], right, up, forward, dx, scale * 0.3, eye_factor, -0.15, 0.0, 0.0, falloff); // eyes closed
-            apply_blendshape_delta(&mut blendshapes[8].deltas[idx], right, up, forward, dx, scale * 0.6, mouth_factor, -0.25, 0.0, 0.2, falloff); // mouth open
-            apply_blendshape_delta(&mut blendshapes[9].deltas[idx], right, up, forward, dx, scale * 0.5, mouth_factor, 0.0, -0.25, 0.15, falloff); // pucker
+            apply_blendshape_delta(
+                &mut blendshapes[1].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.6,
+                mouth_factor,
+                0.2,
+                0.15,
+                0.0,
+                falloff,
+            ); // smile
+            apply_blendshape_delta(
+                &mut blendshapes[2].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.5,
+                mouth_factor,
+                -0.2,
+                0.1,
+                0.0,
+                falloff,
+            ); // frown
+            apply_blendshape_delta(
+                &mut blendshapes[3].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.7,
+                mouth_factor,
+                0.4,
+                0.0,
+                0.2,
+                falloff,
+            ); // surprise
+            apply_blendshape_delta(
+                &mut blendshapes[4].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.4,
+                brow_factor,
+                -0.25,
+                -0.1,
+                0.0,
+                falloff,
+            ); // angry
+            apply_blendshape_delta(
+                &mut blendshapes[5].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.5,
+                brow_factor,
+                0.3,
+                0.05,
+                0.0,
+                falloff,
+            ); // brows up
+            apply_blendshape_delta(
+                &mut blendshapes[6].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.4,
+                brow_factor,
+                -0.2,
+                -0.05,
+                0.0,
+                falloff,
+            ); // brows down
+            apply_blendshape_delta(
+                &mut blendshapes[7].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.3,
+                eye_factor,
+                -0.15,
+                0.0,
+                0.0,
+                falloff,
+            ); // eyes closed
+            apply_blendshape_delta(
+                &mut blendshapes[8].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.6,
+                mouth_factor,
+                -0.25,
+                0.0,
+                0.2,
+                falloff,
+            ); // mouth open
+            apply_blendshape_delta(
+                &mut blendshapes[9].deltas[idx],
+                right,
+                up,
+                forward,
+                dx,
+                scale * 0.5,
+                mouth_factor,
+                0.0,
+                -0.25,
+                0.15,
+                falloff,
+            ); // pucker
         }
 
         Ok(blendshapes)
     }
-    
+
     fn generate_voice_profile(&self) -> Result<VoiceProfile, AvatarError> {
         // Extract voice characteristics for TTS cloning
         Ok(VoiceProfile {
             reference_samples: vec![self.audio_samples.clone()],
             sample_rate: 48000,
             total_duration: self.audio_samples.len() as f32 / 48000.0,
-            embedding: None,  // Computed by TTS service
+            embedding: None, // Computed by TTS service
             settings: VoiceSettings::default(),
         })
     }
-    
+
     fn create_attachment_points(&self, skeleton: &Skeleton) -> Vec<AttachmentPoint> {
         vec![
             AttachmentPoint {
@@ -941,12 +1089,12 @@ impl AvatarCaptureSession {
             },
         ]
     }
-    
+
     fn total_capture_duration(&self) -> f32 {
         let frame_count = self.total_frames();
-        frame_count as f32 / 30.0  // Assuming 30fps
+        frame_count as f32 / 30.0 // Assuming 30fps
     }
-    
+
     fn total_frames(&self) -> usize {
         self.frames.values().map(|v| v.len()).sum()
     }
@@ -1093,17 +1241,85 @@ fn default_smplx_joint_positions(
     let left_dir = na::Vector3::new(-1.0, 0.0, 0.0);
     let right_dir = na::Vector3::new(1.0, 0.0, 0.0);
 
-    add_finger_chain(&mut joints, left_wrist, left_dir, finger_step, ["left_index1", "left_index2", "left_index3"], na::Vector3::new(0.0, 0.0, 0.03 * h));
-    add_finger_chain(&mut joints, left_wrist, left_dir, finger_step, ["left_middle1", "left_middle2", "left_middle3"], na::Vector3::new(0.0, 0.0, 0.02 * h));
-    add_finger_chain(&mut joints, left_wrist, left_dir, finger_step, ["left_ring1", "left_ring2", "left_ring3"], na::Vector3::new(0.0, 0.0, 0.01 * h));
-    add_finger_chain(&mut joints, left_wrist, left_dir, finger_step, ["left_pinky1", "left_pinky2", "left_pinky3"], na::Vector3::new(0.0, 0.0, 0.0));
-    add_thumb_chain(&mut joints, left_wrist, -1.0, finger_step, ["left_thumb1", "left_thumb2", "left_thumb3"]);
+    add_finger_chain(
+        &mut joints,
+        left_wrist,
+        left_dir,
+        finger_step,
+        ["left_index1", "left_index2", "left_index3"],
+        na::Vector3::new(0.0, 0.0, 0.03 * h),
+    );
+    add_finger_chain(
+        &mut joints,
+        left_wrist,
+        left_dir,
+        finger_step,
+        ["left_middle1", "left_middle2", "left_middle3"],
+        na::Vector3::new(0.0, 0.0, 0.02 * h),
+    );
+    add_finger_chain(
+        &mut joints,
+        left_wrist,
+        left_dir,
+        finger_step,
+        ["left_ring1", "left_ring2", "left_ring3"],
+        na::Vector3::new(0.0, 0.0, 0.01 * h),
+    );
+    add_finger_chain(
+        &mut joints,
+        left_wrist,
+        left_dir,
+        finger_step,
+        ["left_pinky1", "left_pinky2", "left_pinky3"],
+        na::Vector3::new(0.0, 0.0, 0.0),
+    );
+    add_thumb_chain(
+        &mut joints,
+        left_wrist,
+        -1.0,
+        finger_step,
+        ["left_thumb1", "left_thumb2", "left_thumb3"],
+    );
 
-    add_finger_chain(&mut joints, right_wrist, right_dir, finger_step, ["right_index1", "right_index2", "right_index3"], na::Vector3::new(0.0, 0.0, 0.03 * h));
-    add_finger_chain(&mut joints, right_wrist, right_dir, finger_step, ["right_middle1", "right_middle2", "right_middle3"], na::Vector3::new(0.0, 0.0, 0.02 * h));
-    add_finger_chain(&mut joints, right_wrist, right_dir, finger_step, ["right_ring1", "right_ring2", "right_ring3"], na::Vector3::new(0.0, 0.0, 0.01 * h));
-    add_finger_chain(&mut joints, right_wrist, right_dir, finger_step, ["right_pinky1", "right_pinky2", "right_pinky3"], na::Vector3::new(0.0, 0.0, 0.0));
-    add_thumb_chain(&mut joints, right_wrist, 1.0, finger_step, ["right_thumb1", "right_thumb2", "right_thumb3"]);
+    add_finger_chain(
+        &mut joints,
+        right_wrist,
+        right_dir,
+        finger_step,
+        ["right_index1", "right_index2", "right_index3"],
+        na::Vector3::new(0.0, 0.0, 0.03 * h),
+    );
+    add_finger_chain(
+        &mut joints,
+        right_wrist,
+        right_dir,
+        finger_step,
+        ["right_middle1", "right_middle2", "right_middle3"],
+        na::Vector3::new(0.0, 0.0, 0.02 * h),
+    );
+    add_finger_chain(
+        &mut joints,
+        right_wrist,
+        right_dir,
+        finger_step,
+        ["right_ring1", "right_ring2", "right_ring3"],
+        na::Vector3::new(0.0, 0.0, 0.01 * h),
+    );
+    add_finger_chain(
+        &mut joints,
+        right_wrist,
+        right_dir,
+        finger_step,
+        ["right_pinky1", "right_pinky2", "right_pinky3"],
+        na::Vector3::new(0.0, 0.0, 0.0),
+    );
+    add_thumb_chain(
+        &mut joints,
+        right_wrist,
+        1.0,
+        finger_step,
+        ["right_thumb1", "right_thumb2", "right_thumb3"],
+    );
 
     SMPLX_JOINT_NAMES
         .iter()
@@ -1146,7 +1362,10 @@ fn skeleton_world_positions(skeleton: &Skeleton) -> Vec<na::Point3<f32>> {
     for idx in 0..skeleton.joints.len() {
         let _ = world_position(idx, skeleton, &mut cache);
     }
-    cache.into_iter().map(|p| p.unwrap_or_else(na::Point3::origin)).collect()
+    cache
+        .into_iter()
+        .map(|p| p.unwrap_or_else(na::Point3::origin))
+        .collect()
 }
 
 fn world_position(
@@ -1203,7 +1422,9 @@ fn compute_skin_weights_for_vertices(
 
     let joint_positions = skeleton_world_positions(skeleton);
     if joint_positions.is_empty() {
-        return Err(AvatarError::ProcessingError("Skeleton has no joints".to_string()));
+        return Err(AvatarError::ProcessingError(
+            "Skeleton has no joints".to_string(),
+        ));
     }
 
     let mut weights = Vec::with_capacity(vertices.len());
@@ -1247,7 +1468,10 @@ fn skeleton_joint_map(skeleton: &Skeleton) -> HashMap<String, na::Point3<f32>> {
     let positions = skeleton_world_positions(skeleton);
     let mut map = HashMap::new();
     for (idx, joint) in skeleton.joints.iter().enumerate() {
-        let pos = positions.get(idx).cloned().unwrap_or_else(na::Point3::origin);
+        let pos = positions
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(na::Point3::origin);
         map.insert(joint.name.clone(), pos);
     }
     map
@@ -1258,7 +1482,10 @@ fn skeleton_body_axis(
     vertices: &[na::Point3<f32>],
 ) -> (na::Vector3<f32>, na::Vector3<f32>, f32) {
     let joint_map = skeleton_joint_map(skeleton);
-    let pelvis = joint_map.get("pelvis").cloned().unwrap_or_else(|| average_point(vertices));
+    let pelvis = joint_map
+        .get("pelvis")
+        .cloned()
+        .unwrap_or_else(|| average_point(vertices));
     let neck = joint_map.get("neck").cloned().unwrap_or_else(|| {
         let mut p = pelvis;
         p.y += 0.5 * body_height_from_vertices(vertices);
@@ -1429,37 +1656,75 @@ fn body_height_from_vertices(vertices: &[na::Point3<f32>]) -> f32 {
 fn sanitize_component(value: &str) -> String {
     value
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
 }
 
 // SMPL-X skeleton constants
 const SMPLX_JOINT_NAMES: [&str; 55] = [
-    "pelvis", "left_hip", "right_hip", "spine1", "left_knee",
-    "right_knee", "spine2", "left_ankle", "right_ankle", "spine3",
-    "left_foot", "right_foot", "neck", "left_collar", "right_collar",
-    "head", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "jaw", "left_eye_smplhf", "right_eye_smplhf",
+    "pelvis",
+    "left_hip",
+    "right_hip",
+    "spine1",
+    "left_knee",
+    "right_knee",
+    "spine2",
+    "left_ankle",
+    "right_ankle",
+    "spine3",
+    "left_foot",
+    "right_foot",
+    "neck",
+    "left_collar",
+    "right_collar",
+    "head",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+    "jaw",
+    "left_eye_smplhf",
+    "right_eye_smplhf",
     // Remaining joints for hands and face
-    "left_index1", "left_index2", "left_index3", "left_middle1", "left_middle2",
-    "left_middle3", "left_pinky1", "left_pinky2", "left_pinky3", "left_ring1",
-    "left_ring2", "left_ring3", "left_thumb1", "left_thumb2", "left_thumb3",
-    "right_index1", "right_index2", "right_index3", "right_middle1", "right_middle2",
-    "right_middle3", "right_pinky1", "right_pinky2", "right_pinky3", "right_ring1",
-    "right_ring2", "right_ring3", "right_thumb1", "right_thumb2", "right_thumb3",
+    "left_index1",
+    "left_index2",
+    "left_index3",
+    "left_middle1",
+    "left_middle2",
+    "left_middle3",
+    "left_pinky1",
+    "left_pinky2",
+    "left_pinky3",
+    "left_ring1",
+    "left_ring2",
+    "left_ring3",
+    "left_thumb1",
+    "left_thumb2",
+    "left_thumb3",
+    "right_index1",
+    "right_index2",
+    "right_index3",
+    "right_middle1",
+    "right_middle2",
+    "right_middle3",
+    "right_pinky1",
+    "right_pinky2",
+    "right_pinky3",
+    "right_ring1",
+    "right_ring2",
+    "right_ring3",
+    "right_thumb1",
+    "right_thumb2",
+    "right_thumb3",
 ];
 
 const SMPLX_PARENTS: [i32; 55] = [
-    -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19,
-    15, 15, 15,  // Face
-    20, 25, 26, 20, 28, 29, 20, 31, 32, 20, 34, 35, 20, 37, 38,  // Left hand
-    21, 40, 41, 21, 43, 44, 21, 46, 47, 21, 49, 50, 21, 52, 53,  // Right hand
+    -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 15, 15,
+    15, // Face
+    20, 25, 26, 20, 28, 29, 20, 31, 32, 20, 34, 35, 20, 37, 38, // Left hand
+    21, 40, 41, 21, 43, 44, 21, 46, 47, 21, 49, 50, 21, 52, 53, // Right hand
 ];
 
 // ============================================================================
@@ -1475,14 +1740,34 @@ pub struct AvatarEditor {
 
 #[derive(Clone, Debug)]
 pub enum AvatarEditAction {
-    ChangeClothingVisibility { layer_id: String, visible: bool },
-    AddClothing { layer: ClothingLayer },
-    RemoveClothing { layer_id: String },
-    SetBlendshapeWeight { name: String, weight: f32 },
-    SetTexture { target: TextureTarget, texture: TextureData },
-    AddAccessory { attachment_point: String, accessory: Accessory },
-    RemoveAccessory { attachment_point: String },
-    ChangeName { name: String },
+    ChangeClothingVisibility {
+        layer_id: String,
+        visible: bool,
+    },
+    AddClothing {
+        layer: ClothingLayer,
+    },
+    RemoveClothing {
+        layer_id: String,
+    },
+    SetBlendshapeWeight {
+        name: String,
+        weight: f32,
+    },
+    SetTexture {
+        target: TextureTarget,
+        texture: TextureData,
+    },
+    AddAccessory {
+        attachment_point: String,
+        accessory: Accessory,
+    },
+    RemoveAccessory {
+        attachment_point: String,
+    },
+    ChangeName {
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1511,21 +1796,22 @@ impl AvatarEditor {
             redo_stack: Vec::new(),
         }
     }
-    
+
     /// Toggle clothing layer visibility
     pub fn set_clothing_visibility(&mut self, layer_id: &str, visible: bool) {
         if let Some(layer) = self.avatar.clothing.iter_mut().find(|l| l.id == layer_id) {
             let old_visible = layer.visible;
             layer.visible = visible;
-            
-            self.undo_stack.push(AvatarEditAction::ChangeClothingVisibility {
-                layer_id: layer_id.to_string(),
-                visible: old_visible,
-            });
+
+            self.undo_stack
+                .push(AvatarEditAction::ChangeClothingVisibility {
+                    layer_id: layer_id.to_string(),
+                    visible: old_visible,
+                });
             self.redo_stack.clear();
         }
     }
-    
+
     /// Add new clothing layer
     pub fn add_clothing(&mut self, layer: ClothingLayer) {
         self.undo_stack.push(AvatarEditAction::RemoveClothing {
@@ -1534,22 +1820,23 @@ impl AvatarEditor {
         self.avatar.clothing.push(layer);
         self.redo_stack.clear();
     }
-    
+
     /// Remove clothing layer
     pub fn remove_clothing(&mut self, layer_id: &str) {
         if let Some(pos) = self.avatar.clothing.iter().position(|l| l.id == layer_id) {
             let layer = self.avatar.clothing.remove(pos);
-            self.undo_stack.push(AvatarEditAction::AddClothing { layer });
+            self.undo_stack
+                .push(AvatarEditAction::AddClothing { layer });
             self.redo_stack.clear();
         }
     }
-    
+
     /// Set blendshape weight
     pub fn set_blendshape_weight(&mut self, name: &str, weight: f32) {
         if let Some(bs) = self.avatar.blendshapes.iter_mut().find(|b| b.name == name) {
             let old_weight = bs.weight;
             bs.weight = weight.clamp(0.0, 1.0);
-            
+
             self.undo_stack.push(AvatarEditAction::SetBlendshapeWeight {
                 name: name.to_string(),
                 weight: old_weight,
@@ -1557,21 +1844,21 @@ impl AvatarEditor {
             self.redo_stack.clear();
         }
     }
-    
+
     /// Strip to base layer (censored body)
     pub fn strip_to_base(&mut self) {
         for layer in &mut self.avatar.clothing {
             layer.visible = false;
         }
     }
-    
+
     /// Restore all clothing
     pub fn restore_all_clothing(&mut self) {
         for layer in &mut self.avatar.clothing {
             layer.visible = true;
         }
     }
-    
+
     /// Undo last action
     pub fn undo(&mut self) -> bool {
         if let Some(action) = self.undo_stack.pop() {
@@ -1582,7 +1869,7 @@ impl AvatarEditor {
             false
         }
     }
-    
+
     /// Redo last undone action
     pub fn redo(&mut self) -> bool {
         if let Some(action) = self.redo_stack.pop() {
@@ -1593,7 +1880,7 @@ impl AvatarEditor {
             false
         }
     }
-    
+
     fn apply_action(&mut self, action: &AvatarEditAction) {
         match action {
             AvatarEditAction::ChangeClothingVisibility { layer_id, visible } => {
@@ -1609,17 +1896,17 @@ impl AvatarEditor {
             _ => {}
         }
     }
-    
+
     fn apply_action_inverse(&mut self, action: &AvatarEditAction) {
         // Same as apply_action for toggle operations
         self.apply_action(action);
     }
-    
+
     /// Get current avatar
     pub fn avatar(&self) -> &Avatar {
         &self.avatar
     }
-    
+
     /// Consume editor and return avatar
     pub fn finalize(self) -> Avatar {
         self.avatar
@@ -1656,25 +1943,25 @@ impl std::error::Error for AvatarError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_avatar_capture_session() {
         let config = AvatarCaptureConfig::default();
         let mut session = AvatarCaptureSession::new(config);
-        
+
         assert_eq!(*session.state(), AvatarCaptureState::Idle);
-        
+
         session.start_tpose_capture();
         assert_eq!(*session.state(), AvatarCaptureState::CapturingTPose);
     }
-    
+
     #[test]
     fn test_smplx_params_default() {
         let params = SMPLXParams::default();
         assert_eq!(params.betas, [0.0; 10]);
         assert_eq!(params.body_pose.len(), 21);
     }
-    
+
     #[test]
     fn test_avatar_editor() {
         let avatar = Avatar {
@@ -1682,7 +1969,10 @@ mod tests {
             name: "Test Avatar".to_string(),
             body: AvatarBody {
                 smpl_params: SMPLXParams::default(),
-                skeleton: Skeleton { joints: Vec::new(), root: 0 },
+                skeleton: Skeleton {
+                    joints: Vec::new(),
+                    root: 0,
+                },
                 vertices: Vec::new(),
                 faces: Vec::new(),
                 uvs: Vec::new(),
@@ -1690,20 +1980,18 @@ mod tests {
                 texture: None,
                 normal_map: None,
             },
-            clothing: vec![
-                ClothingLayer {
-                    id: "shirt".to_string(),
-                    name: "Shirt".to_string(),
-                    clothing_type: ClothingType::Top,
-                    vertices: Vec::new(),
-                    faces: Vec::new(),
-                    uvs: Vec::new(),
-                    body_offsets: Vec::new(),
-                    skin_weights: Vec::new(),
-                    texture: None,
-                    visible: true,
-                }
-            ],
+            clothing: vec![ClothingLayer {
+                id: "shirt".to_string(),
+                name: "Shirt".to_string(),
+                clothing_type: ClothingType::Top,
+                vertices: Vec::new(),
+                faces: Vec::new(),
+                uvs: Vec::new(),
+                body_offsets: Vec::new(),
+                skin_weights: Vec::new(),
+                texture: None,
+                visible: true,
+            }],
             blendshapes: Vec::new(),
             voice_profile: None,
             attachments: Vec::new(),
@@ -1716,13 +2004,13 @@ mod tests {
                 software_version: String::new(),
             },
         };
-        
+
         let mut editor = AvatarEditor::new(avatar);
-        
+
         // Hide clothing
         editor.set_clothing_visibility("shirt", false);
         assert!(!editor.avatar().clothing[0].visible);
-        
+
         // Undo
         editor.undo();
         assert!(editor.avatar().clothing[0].visible);

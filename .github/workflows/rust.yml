@@ -90,6 +90,12 @@ jobs:
     - name: Verify OpenAPI spec
       run: git diff --exit-code docs/openapi.json
 
+    - name: Check Feature Matrix Parity
+      run: ./scripts/check_feature_matrix.sh
+
+    - name: Check Local-First Boundary Classification
+      run: python ./scripts/check_local_first_boundary.py
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest

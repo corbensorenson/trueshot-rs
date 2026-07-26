@@ -8,12 +8,12 @@
 //!
 //! Achieves ~293x bandwidth reduction vs raw 4DGS streaming
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
-use serde::{Deserialize, Serialize};
 
-use super::scene_graph::{Transform3D, MeshData};
 use super::avatar::BlendshapePreset;
+use super::scene_graph::{MeshData, Transform3D};
 
 /// Protocol version for compatibility
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -26,28 +26,28 @@ pub const MAX_PACKET_SIZE: usize = 65536;
 pub enum StreamPacket {
     /// Initial scene graph structure
     SceneGraph(SceneGraphPacket),
-    
+
     /// Full Gaussian data (initial or major change)
     GaussianFull(GaussianFullPacket),
-    
+
     /// Gaussian delta update (incremental)
     GaussianDelta(GaussianDeltaPacket),
-    
+
     /// Mesh asset (one-time transfer)
     MeshAsset(MeshAssetPacket),
-    
+
     /// Object transform update (every frame)
     TransformUpdate(TransformUpdatePacket),
-    
+
     /// Avatar pose update (every frame)
     AvatarPose(AvatarPosePacket),
-    
+
     /// Texture data (chunked)
     TextureChunk(TextureChunkPacket),
-    
+
     /// Heartbeat / keep-alive
     Heartbeat(HeartbeatPacket),
-    
+
     /// Quality adjustment request
     QualityAdjust(QualityAdjustPacket),
 }
@@ -58,7 +58,7 @@ pub struct SceneGraphPacket {
     pub version: u32,
     pub scene_name: String,
     pub nodes: Vec<NodeDescriptor>,
-    pub hierarchy: Vec<(Uuid, Option<Uuid>)>,  // (child, parent)
+    pub hierarchy: Vec<(Uuid, Option<Uuid>)>, // (child, parent)
 }
 
 /// Node descriptor for scene graph
@@ -84,7 +84,7 @@ pub enum RepresentationType {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransformData {
     pub position: [f32; 3],
-    pub rotation: [f32; 4],  // Quaternion (x, y, z, w)
+    pub rotation: [f32; 4], // Quaternion (x, y, z, w)
     pub scale: [f32; 3],
 }
 
@@ -92,12 +92,7 @@ impl From<&Transform3D> for TransformData {
     fn from(t: &Transform3D) -> Self {
         Self {
             position: [t.position.x, t.position.y, t.position.z],
-            rotation: [
-                t.rotation.i,
-                t.rotation.j,
-                t.rotation.k,
-                t.rotation.w,
-            ],
+            rotation: [t.rotation.i, t.rotation.j, t.rotation.k, t.rotation.w],
             scale: [t.scale.x, t.scale.y, t.scale.z],
         }
     }
@@ -193,7 +188,9 @@ pub enum CompressionMethod {
     LZ4,
     Zstd,
     /// Vector quantization for Gaussians
-    VectorQuantized { codebook_size: u16 },
+    VectorQuantized {
+        codebook_size: u16,
+    },
     /// Delta encoding for temporal data
     DeltaEncoded,
 }
@@ -249,7 +246,7 @@ impl StreamEncoder {
             stats: EncoderStats::default(),
         }
     }
-    
+
     /// Encode scene graph structure
     pub fn encode_scene_graph(
         &mut self,
@@ -264,7 +261,7 @@ impl StreamEncoder {
             hierarchy,
         })
     }
-    
+
     /// Encode Gaussian data (full or delta)
     pub fn encode_gaussians(
         &mut self,
@@ -275,15 +272,15 @@ impl StreamEncoder {
         covariances: &[[f32; 6]],
     ) -> StreamPacket {
         let is_keyframe = self.frame_id % self.config.keyframe_interval as u64 == 0;
-        
+
         if is_keyframe || !self.config.enable_delta_encoding {
             // Full frame
             let data = self.compress_gaussians_full(positions, colors, opacities, covariances);
             self.reference_frames.insert(node_id, data.clone());
-            
+
             self.stats.gaussians_encoded += positions.len() as u64;
             self.stats.bytes_sent += data.len() as u64;
-            
+
             StreamPacket::GaussianFull(GaussianFullPacket {
                 node_id,
                 num_gaussians: positions.len() as u32,
@@ -294,9 +291,9 @@ impl StreamEncoder {
             // Delta frame
             let deformation = self.encode_delta(node_id, positions);
             let color_updates = self.detect_color_changes(node_id, colors);
-            
+
             self.frame_id += 1;
-            
+
             StreamPacket::GaussianDelta(GaussianDeltaPacket {
                 node_id,
                 frame_id: self.frame_id,
@@ -306,7 +303,7 @@ impl StreamEncoder {
             })
         }
     }
-    
+
     /// Compress Gaussians using vector quantization
     fn compress_gaussians_full(
         &self,
@@ -316,10 +313,10 @@ impl StreamEncoder {
         covariances: &[[f32; 6]],
     ) -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         // Header
         data.extend_from_slice(&(positions.len() as u32).to_le_bytes());
-        
+
         // Quantize and pack positions
         for pos in positions {
             for &v in pos {
@@ -328,19 +325,19 @@ impl StreamEncoder {
                 data.extend_from_slice(&quantized.to_le_bytes());
             }
         }
-        
+
         // Pack colors (8-bit per channel)
         for color in colors {
             data.push((color[0].clamp(0.0, 1.0) * 255.0) as u8);
             data.push((color[1].clamp(0.0, 1.0) * 255.0) as u8);
             data.push((color[2].clamp(0.0, 1.0) * 255.0) as u8);
         }
-        
+
         // Pack opacities (8-bit)
         for &opacity in opacities {
             data.push((opacity.clamp(0.0, 1.0) * 255.0) as u8);
         }
-        
+
         // Pack covariances (quantized)
         for cov in covariances {
             for &v in cov {
@@ -348,24 +345,20 @@ impl StreamEncoder {
                 data.extend_from_slice(&quantized.to_le_bytes());
             }
         }
-        
+
         // Apply compression
         match self.config.compression {
-            CompressionMethod::Zstd => {
-                zstd_compress(&data)
-            }
-            CompressionMethod::LZ4 => {
-                lz4_compress(&data)
-            }
+            CompressionMethod::Zstd => zstd_compress(&data),
+            CompressionMethod::LZ4 => lz4_compress(&data),
             _ => data,
         }
     }
-    
+
     /// Encode delta between frames
     fn encode_delta(&self, _node_id: Uuid, positions: &[[f32; 3]]) -> Vec<u8> {
         // Simplified delta encoding
         let mut data = Vec::with_capacity(positions.len() * 6);
-        
+
         for pos in positions {
             // Quantize delta to 16-bit (smaller range than absolute)
             for &v in pos {
@@ -373,17 +366,17 @@ impl StreamEncoder {
                 data.extend_from_slice(&quantized.to_le_bytes());
             }
         }
-        
+
         data
     }
-    
+
     /// Detect color changes (sparse update)
     fn detect_color_changes(&self, _node_id: Uuid, colors: &[[f32; 3]]) -> Vec<(u32, [u8; 3])> {
         // In production, compare against reference frame
         // For now, return empty (no changes)
         Vec::new()
     }
-    
+
     /// Encode mesh asset
     pub fn encode_mesh(
         &mut self,
@@ -393,10 +386,10 @@ impl StreamEncoder {
         texture_ids: Vec<Uuid>,
     ) -> StreamPacket {
         let data = self.compress_mesh(mesh);
-        
+
         self.stats.meshes_sent += 1;
         self.stats.bytes_sent += data.len() as u64;
-        
+
         StreamPacket::MeshAsset(MeshAssetPacket {
             node_id,
             lod_level,
@@ -406,11 +399,11 @@ impl StreamEncoder {
             texture_ids,
         })
     }
-    
+
     /// Compress mesh data
     fn compress_mesh(&self, mesh: &MeshData) -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         // Pack vertices
         for vertex in &mesh.vertices {
             for &v in &vertex.position {
@@ -423,7 +416,7 @@ impl StreamEncoder {
                 data.extend_from_slice(&v.to_le_bytes());
             }
         }
-        
+
         // Pack indices (delta-encoded)
         let mut prev_idx = 0u32;
         for &idx in &mesh.indices {
@@ -437,10 +430,10 @@ impl StreamEncoder {
             }
             prev_idx = idx;
         }
-        
+
         zstd_compress(&data)
     }
-    
+
     /// Encode transform updates
     pub fn encode_transforms(
         &mut self,
@@ -448,18 +441,19 @@ impl StreamEncoder {
         timestamp: f32,
     ) -> StreamPacket {
         self.frame_id += 1;
-        
-        let updates: Vec<_> = updates.iter()
+
+        let updates: Vec<_> = updates
+            .iter()
             .map(|(id, t)| (*id, TransformData::from(t)))
             .collect();
-        
+
         StreamPacket::TransformUpdate(TransformUpdatePacket {
             frame_id: self.frame_id,
             timestamp,
             updates,
         })
     }
-    
+
     /// Encode avatar pose
     pub fn encode_avatar_pose(
         &mut self,
@@ -469,7 +463,7 @@ impl StreamEncoder {
     ) -> StreamPacket {
         self.frame_id += 1;
         self.stats.avatar_updates += 1;
-        
+
         // Compress bone matrices
         let mut bone_data = Vec::with_capacity(bone_matrices.len() * 64);
         for matrix in bone_matrices {
@@ -477,13 +471,14 @@ impl StreamEncoder {
                 bone_data.extend_from_slice(&v.to_le_bytes());
             }
         }
-        
+
         // Only include non-zero blendshapes
-        let active_blendshapes: Vec<_> = blendshapes.iter()
+        let active_blendshapes: Vec<_> = blendshapes
+            .iter()
             .filter(|(_, w)| *w > 0.001)
             .cloned()
             .collect();
-        
+
         StreamPacket::AvatarPose(AvatarPosePacket {
             node_id,
             frame_id: self.frame_id,
@@ -491,12 +486,12 @@ impl StreamEncoder {
             blendshapes: active_blendshapes,
         })
     }
-    
+
     /// Get current statistics
     pub fn stats(&self) -> &EncoderStats {
         &self.stats
     }
-    
+
     /// Calculate current bitrate
     pub fn current_bitrate_kbps(&self) -> f32 {
         if self.frame_id == 0 {
@@ -545,11 +540,11 @@ impl StreamDecoder {
             stats: DecoderStats::default(),
         }
     }
-    
+
     /// Decode a stream packet
     pub fn decode(&mut self, packet: StreamPacket) -> Result<DecodedData, DecodeError> {
         self.stats.packets_received += 1;
-        
+
         match packet {
             StreamPacket::SceneGraph(p) => {
                 for node in p.nodes {
@@ -560,18 +555,18 @@ impl StreamDecoder {
                     node_count: self.scene_nodes.len(),
                 })
             }
-            
+
             StreamPacket::GaussianFull(p) => {
                 let data = self.decompress(&p.data, p.compression)?;
                 self.reference_frames.insert(p.node_id, data.clone());
-                
+
                 Ok(DecodedData::Gaussians {
                     node_id: p.node_id,
                     count: p.num_gaussians as usize,
                     is_keyframe: true,
                 })
             }
-            
+
             StreamPacket::GaussianDelta(p) => {
                 // Apply delta to reference frame
                 // (Simplified - would fully decode in production)
@@ -581,62 +576,55 @@ impl StreamDecoder {
                     is_keyframe: false,
                 })
             }
-            
+
             StreamPacket::MeshAsset(p) => {
                 let data = zstd_decompress(&p.data)?;
                 let mesh = self.decode_mesh(&data, p.vertex_count, p.index_count)?;
                 self.meshes.insert(p.node_id, mesh);
-                
+
                 Ok(DecodedData::Mesh {
                     node_id: p.node_id,
                     vertices: p.vertex_count as usize,
                     triangles: p.index_count as usize / 3,
                 })
             }
-            
-            StreamPacket::TransformUpdate(p) => {
-                Ok(DecodedData::Transforms {
-                    frame_id: p.frame_id,
-                    count: p.updates.len(),
-                })
-            }
-            
-            StreamPacket::AvatarPose(p) => {
-                Ok(DecodedData::AvatarPose {
-                    node_id: p.node_id,
-                    frame_id: p.frame_id,
-                })
-            }
-            
+
+            StreamPacket::TransformUpdate(p) => Ok(DecodedData::Transforms {
+                frame_id: p.frame_id,
+                count: p.updates.len(),
+            }),
+
+            StreamPacket::AvatarPose(p) => Ok(DecodedData::AvatarPose {
+                node_id: p.node_id,
+                frame_id: p.frame_id,
+            }),
+
             StreamPacket::TextureChunk(p) => {
-                let chunks = self.texture_chunks
+                let chunks = self
+                    .texture_chunks
                     .entry(p.texture_id)
                     .or_insert_with(|| vec![None; p.total_chunks as usize]);
-                
+
                 if p.chunk_index < chunks.len() as u32 {
                     chunks[p.chunk_index as usize] = Some(p.data);
                 }
-                
+
                 let complete = chunks.iter().all(|c| c.is_some());
-                
+
                 Ok(DecodedData::TextureChunk {
                     texture_id: p.texture_id,
                     complete,
                 })
             }
-            
-            StreamPacket::Heartbeat(p) => {
-                Ok(DecodedData::Heartbeat {
-                    server_frame: p.server_frame,
-                })
-            }
-            
-            StreamPacket::QualityAdjust(_) => {
-                Ok(DecodedData::QualityAdjust)
-            }
+
+            StreamPacket::Heartbeat(p) => Ok(DecodedData::Heartbeat {
+                server_frame: p.server_frame,
+            }),
+
+            StreamPacket::QualityAdjust(_) => Ok(DecodedData::QualityAdjust),
         }
     }
-    
+
     /// Decompress data
     fn decompress(&self, data: &[u8], method: CompressionMethod) -> Result<Vec<u8>, DecodeError> {
         match method {
@@ -646,7 +634,7 @@ impl StreamDecoder {
             _ => Ok(data.to_vec()),
         }
     }
-    
+
     /// Decode mesh from compressed data
     fn decode_mesh(
         &self,
@@ -656,41 +644,47 @@ impl StreamDecoder {
     ) -> Result<MeshData, DecodeError> {
         let mut cursor = 0;
         let mut vertices = Vec::with_capacity(vertex_count as usize);
-        
+
         // Decode vertices
         for _ in 0..vertex_count {
             if cursor + 32 > data.len() {
                 return Err(DecodeError::InsufficientData);
             }
-            
+
             let mut position = [0.0f32; 3];
             let mut normal = [0.0f32; 3];
             let mut uv = [0.0f32; 2];
-            
+
             for i in 0..3 {
                 position[i] = f32::from_le_bytes([
-                    data[cursor], data[cursor + 1],
-                    data[cursor + 2], data[cursor + 3],
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
                 ]);
                 cursor += 4;
             }
-            
+
             for i in 0..3 {
                 normal[i] = f32::from_le_bytes([
-                    data[cursor], data[cursor + 1],
-                    data[cursor + 2], data[cursor + 3],
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
                 ]);
                 cursor += 4;
             }
-            
+
             for i in 0..2 {
                 uv[i] = f32::from_le_bytes([
-                    data[cursor], data[cursor + 1],
-                    data[cursor + 2], data[cursor + 3],
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
                 ]);
                 cursor += 4;
             }
-            
+
             vertices.push(super::scene_graph::Vertex {
                 position,
                 normal,
@@ -698,40 +692,42 @@ impl StreamDecoder {
                 color: [1.0, 1.0, 1.0, 1.0],
             });
         }
-        
+
         // Decode indices (delta-encoded)
         let mut indices = Vec::with_capacity(index_count as usize);
         let mut prev_idx = 0i32;
-        
+
         while indices.len() < index_count as usize && cursor < data.len() {
             let byte = data[cursor] as i8;
             cursor += 1;
-            
+
             let delta = if byte as u8 == 0x80 {
                 if cursor + 4 > data.len() {
                     break;
                 }
                 let d = i32::from_le_bytes([
-                    data[cursor], data[cursor + 1],
-                    data[cursor + 2], data[cursor + 3],
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
                 ]);
                 cursor += 4;
                 d
             } else {
                 byte as i32
             };
-            
+
             prev_idx += delta;
             indices.push(prev_idx as u32);
         }
-        
+
         Ok(MeshData {
             vertices,
             indices,
             name: String::new(),
         })
     }
-    
+
     /// Get statistics
     pub fn stats(&self) -> &DecoderStats {
         &self.stats
@@ -747,13 +743,35 @@ impl Default for StreamDecoder {
 /// Decoded data types
 #[derive(Clone, Debug)]
 pub enum DecodedData {
-    SceneGraph { scene_name: String, node_count: usize },
-    Gaussians { node_id: Uuid, count: usize, is_keyframe: bool },
-    Mesh { node_id: Uuid, vertices: usize, triangles: usize },
-    Transforms { frame_id: u64, count: usize },
-    AvatarPose { node_id: Uuid, frame_id: u64 },
-    TextureChunk { texture_id: Uuid, complete: bool },
-    Heartbeat { server_frame: u64 },
+    SceneGraph {
+        scene_name: String,
+        node_count: usize,
+    },
+    Gaussians {
+        node_id: Uuid,
+        count: usize,
+        is_keyframe: bool,
+    },
+    Mesh {
+        node_id: Uuid,
+        vertices: usize,
+        triangles: usize,
+    },
+    Transforms {
+        frame_id: u64,
+        count: usize,
+    },
+    AvatarPose {
+        node_id: Uuid,
+        frame_id: u64,
+    },
+    TextureChunk {
+        texture_id: Uuid,
+        complete: bool,
+    },
+    Heartbeat {
+        server_frame: u64,
+    },
     QualityAdjust,
 }
 
@@ -793,23 +811,20 @@ fn lz4_decompress(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_encoder_creation() {
         let encoder = StreamEncoder::default();
         assert_eq!(encoder.frame_id, 0);
     }
-    
+
     #[test]
     fn test_transform_encoding() {
         let mut encoder = StreamEncoder::default();
-        
+
         let transform = Transform3D::default();
-        let packet = encoder.encode_transforms(
-            vec![(Uuid::new_v4(), transform)],
-            0.0,
-        );
-        
+        let packet = encoder.encode_transforms(vec![(Uuid::new_v4(), transform)], 0.0);
+
         match packet {
             StreamPacket::TransformUpdate(p) => {
                 assert_eq!(p.updates.len(), 1);
@@ -817,18 +832,14 @@ mod tests {
             _ => panic!("Wrong packet type"),
         }
     }
-    
+
     #[test]
     fn test_decoder_roundtrip() {
         let mut encoder = StreamEncoder::default();
         let mut decoder = StreamDecoder::default();
-        
-        let packet = encoder.encode_scene_graph(
-            vec![],
-            vec![],
-            "Test Scene",
-        );
-        
+
+        let packet = encoder.encode_scene_graph(vec![], vec![], "Test Scene");
+
         let result = decoder.decode(packet);
         assert!(result.is_ok());
     }

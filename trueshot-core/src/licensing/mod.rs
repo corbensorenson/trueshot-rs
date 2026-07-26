@@ -1,23 +1,23 @@
 //! TrueShot Licensing System
-//! 
+//!
 //! Device-bound licensing with cryptographic verification for commercial deployment.
 //! Supports offline verification with periodic heartbeat.
 
 mod device;
-mod license;
-mod manager;
+mod encryption;
 mod error;
 mod integrity;
-mod encryption;
+mod license;
+mod manager;
 
 pub use device::DeviceFingerprint;
-pub use license::{License, LicenseTier, LicenseFeatures, ActivatedDevice};
-pub use manager::{LicenseManager, LicenseStatus};
-pub use error::LicenseError;
-pub use integrity::{IntegrityChecker, IntegrityStatus, UsageCounter, UsageLimitError};
-pub use encryption::{LicenseVerifier, LicenseData, SignedLicense, LicenseType};
 #[cfg(any(test, feature = "dev_license"))]
 pub use encryption::generate_dev_license;
+pub use encryption::{LicenseData, LicenseType, LicenseVerifier, SignedLicense};
+pub use error::LicenseError;
+pub use integrity::{IntegrityChecker, IntegrityStatus, UsageCounter, UsageLimitError};
+pub use license::{ActivatedDevice, License, LicenseFeatures, LicenseTier};
+pub use manager::{LicenseManager, LicenseStatus};
 
 /// Feature flags that can be gated by license
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

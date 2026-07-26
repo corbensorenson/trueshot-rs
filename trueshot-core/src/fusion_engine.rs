@@ -1,17 +1,17 @@
 //! FusionEngine: Core image processing pipeline
 
-use crate::types::{Meta, BayerFrame, ProcessingOptions};
-use crate::preprocessing::preprocess_stack;
+use crate::demosaic_ahd::ahd_demosaic;
+use crate::hierarchical_collapse::{CollapseResult, HierarchicalParams, SRFactor};
+use crate::hierarchical_grading::GradingParams;
 use crate::hierarchical_pipeline::hierarchical_process;
 use crate::postprocess::postprocess;
-use crate::timing::HierarchicalTimer;
+use crate::preprocessing::preprocess_stack;
 use crate::timed_scope;
+use crate::timing::HierarchicalTimer;
+use crate::types::AlignmentInfo;
+use crate::types::{BayerFrame, Meta, ProcessingOptions};
 use anyhow::Result;
 use ndarray::{Array2, Array3};
-use crate::hierarchical_grading::GradingParams;
-use crate::hierarchical_collapse::{HierarchicalParams, SRFactor, CollapseResult};
-use crate::types::AlignmentInfo;
-use crate::demosaic_ahd::ahd_demosaic;
 
 pub struct FusionResult {
     /// Display-ready RGB image (sRGB, gamma corrected, 8-bit)
@@ -35,10 +35,10 @@ impl FusionEngine {
 
     /// Process a stack of Bayer frames into a final RGB image
     pub fn process(
-        &self, 
-        frames: Vec<BayerFrame>, 
-        meta: &Meta, 
-        _timer: &mut HierarchicalTimer
+        &self,
+        frames: Vec<BayerFrame>,
+        meta: &Meta,
+        _timer: &mut HierarchicalTimer,
     ) -> Result<FusionResult> {
         // 1. Preprocess
         let skip_align = false;
@@ -52,9 +52,7 @@ impl FusionEngine {
         });
 
         // 3. Post-process (f64 linear -> u8 sRGB)
-        let rgb_u8 = timed_scope!(timer, "postprocess", {
-            postprocess(&collapsed_rgb)?
-        });
+        let rgb_u8 = timed_scope!(timer, "postprocess", { postprocess(&collapsed_rgb)? });
 
         // 4. Prepare Mask
         let mask_u8 = stack.fg_mask.mapv(|b| if b { 255u8 } else { 0u8 });
@@ -71,11 +69,18 @@ impl FusionEngine {
         &self,
         stack: &crate::preprocessing::PreprocessedStack,
         meta: &Meta,
-    ) -> Result<(Array3<f64>, Array2<f64>)> { // Return Depth too
+    ) -> Result<(Array3<f64>, Array2<f64>)> {
+        // Return Depth too
         let num_frames = stack.frames.len();
-        
-        let alignments: Vec<AlignmentInfo> = stack.alignments.iter()
-            .map(|(dx, dy, scale)| AlignmentInfo { dx: *dx, dy: *dy, scale: *scale })
+
+        let alignments: Vec<AlignmentInfo> = stack
+            .alignments
+            .iter()
+            .map(|(dx, dy, scale)| AlignmentInfo {
+                dx: *dx,
+                dy: *dy,
+                scale: *scale,
+            })
             .collect();
 
         let exposures: Vec<f64> = (0..num_frames)
@@ -114,7 +119,7 @@ impl FusionEngine {
             meta.exposures.len(),
             &wb_multipliers,
         )?;
-        
+
         let depth_map = self.estimate_depth_map_from_focus(stack, meta);
 
         let rgb = match collapse_result {

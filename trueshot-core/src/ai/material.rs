@@ -1,3 +1,6 @@
+use crate::ai::model_cache::ensure_cached_model;
+use crate::ai::model_manifest::verify_model_manifest;
+use crate::security::provenance::{set_model_fingerprint, ModelFingerprint};
 use anyhow::Context;
 use image::{DynamicImage, GrayImage, Luma};
 use ort::session::builder::GraphOptimizationLevel;
@@ -5,9 +8,6 @@ use ort::session::Session;
 use ort::value::TensorRef;
 use ort::value::ValueType;
 use std::path::Path;
-use crate::ai::model_cache::ensure_cached_model;
-use crate::ai::model_manifest::verify_model_manifest;
-use crate::security::provenance::{set_model_fingerprint, ModelFingerprint};
 
 /// Spatially Varying BRDF Estimator
 /// Produces roughness/metallic maps using a physically inspired heuristic.
@@ -36,7 +36,9 @@ impl MaterialEstimator {
     pub fn new(model_path: &str) -> anyhow::Result<Self> {
         let path = model_path.trim();
         if path.is_empty() {
-            return Ok(Self { backend: MaterialBackend::Heuristic });
+            return Ok(Self {
+                backend: MaterialBackend::Heuristic,
+            });
         }
 
         let model_path = Path::new(path);
@@ -87,10 +89,7 @@ impl MaterialEstimator {
                 }
             })?;
 
-        let input = session
-            .inputs
-            .get(0)
-            .context("ONNX model has no inputs")?;
+        let input = session.inputs.get(0).context("ONNX model has no inputs")?;
         let input_name = input.name.clone();
         let layout = infer_layout(&input.input_type);
         let (target_width, target_height) = infer_target_dimensions(&input.input_type, layout);
@@ -116,10 +115,19 @@ impl MaterialEstimator {
                 target_width,
                 target_height,
             } => {
-                match run_onnx_material(session, input_name, *layout, *target_width, *target_height, img) {
+                match run_onnx_material(
+                    session,
+                    input_name,
+                    *layout,
+                    *target_width,
+                    *target_height,
+                    img,
+                ) {
                     Ok(result) => Ok(result),
                     Err(err) => {
-                        tracing::warn!("ONNX material estimation failed: {err}; falling back to heuristic");
+                        tracing::warn!(
+                            "ONNX material estimation failed: {err}; falling back to heuristic"
+                        );
                         Ok(heuristic_material_estimate(img))
                     }
                 }
@@ -179,7 +187,10 @@ fn heuristic_material_estimate(img: &DynamicImage) -> (DynamicImage, DynamicImag
         }
     }
 
-    (DynamicImage::ImageLuma8(roughness), DynamicImage::ImageLuma8(metallic))
+    (
+        DynamicImage::ImageLuma8(roughness),
+        DynamicImage::ImageLuma8(metallic),
+    )
 }
 
 fn srgb_to_linear(v: f32) -> f32 {
@@ -199,8 +210,7 @@ fn sobel_magnitude(luma: &[f32], width: usize, height: usize) -> Vec<f32> {
     let idx = |x: usize, y: usize| y * width + x;
     for y in 1..height - 1 {
         for x in 1..width - 1 {
-            let gx = -1.0 * luma[idx(x - 1, y - 1)]
-                + 1.0 * luma[idx(x + 1, y - 1)]
+            let gx = -1.0 * luma[idx(x - 1, y - 1)] + 1.0 * luma[idx(x + 1, y - 1)]
                 - 2.0 * luma[idx(x - 1, y)]
                 + 2.0 * luma[idx(x + 1, y)]
                 - 1.0 * luma[idx(x - 1, y + 1)]
@@ -234,7 +244,10 @@ fn infer_layout(value_type: &ValueType) -> ModelLayout {
     }
 }
 
-fn infer_target_dimensions(value_type: &ValueType, layout: ModelLayout) -> (Option<u32>, Option<u32>) {
+fn infer_target_dimensions(
+    value_type: &ValueType,
+    layout: ModelLayout,
+) -> (Option<u32>, Option<u32>) {
     if let ValueType::Tensor { shape, .. } = value_type {
         if shape.len() == 4 {
             let (h, w) = match layout {
@@ -280,7 +293,10 @@ fn run_onnx_material(
     let (mut roughness, mut metallic) = if outputs.len() >= 2 {
         let (shape_r, data_r) = outputs[0].try_extract_tensor::<f32>()?;
         let (shape_m, data_m) = outputs[1].try_extract_tensor::<f32>()?;
-        (build_single_map(shape_r, data_r)?, build_single_map(shape_m, data_m)?)
+        (
+            build_single_map(shape_r, data_r)?,
+            build_single_map(shape_m, data_m)?,
+        )
     } else {
         let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
         (
@@ -290,13 +306,26 @@ fn run_onnx_material(
     };
 
     if roughness.dimensions() != (orig_w, orig_h) {
-        roughness = image::imageops::resize(&roughness, orig_w, orig_h, image::imageops::FilterType::Lanczos3);
+        roughness = image::imageops::resize(
+            &roughness,
+            orig_w,
+            orig_h,
+            image::imageops::FilterType::Lanczos3,
+        );
     }
     if metallic.dimensions() != (orig_w, orig_h) {
-        metallic = image::imageops::resize(&metallic, orig_w, orig_h, image::imageops::FilterType::Lanczos3);
+        metallic = image::imageops::resize(
+            &metallic,
+            orig_w,
+            orig_h,
+            image::imageops::FilterType::Lanczos3,
+        );
     }
 
-    Ok((DynamicImage::ImageLuma8(roughness), DynamicImage::ImageLuma8(metallic)))
+    Ok((
+        DynamicImage::ImageLuma8(roughness),
+        DynamicImage::ImageLuma8(metallic),
+    ))
 }
 
 fn build_input_nchw(rgb: &image::RgbImage) -> (Vec<usize>, Vec<f32>) {

@@ -1,19 +1,20 @@
-use serde::{Serialize, Deserialize};
+use anyhow::{Context, Result};
+use chrono::Duration as ChronoDuration;
+use chrono::{DateTime, Utc};
+use redb::{Database, ReadableTable, TableDefinition};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use redb::{Database, TableDefinition, ReadableTable};
-use anyhow::{Result, Context};
-use std::path::Path;
-use chrono::Duration as ChronoDuration;
 
 // Table Definitions
 const MODELS: TableDefinition<&str, &str> = TableDefinition::new("models");
 const SEQUENCES: TableDefinition<&str, &str> = TableDefinition::new("sequences");
 const SEQUENCE_LEASES: TableDefinition<&str, &str> = TableDefinition::new("sequence_leases");
 const SEQUENCE_RUNTIME: TableDefinition<&str, &str> = TableDefinition::new("sequence_runtime");
-const CAMERA_CALIBRATIONS: TableDefinition<&str, &str> = TableDefinition::new("camera_calibrations");
+const CAMERA_CALIBRATIONS: TableDefinition<&str, &str> =
+    TableDefinition::new("camera_calibrations");
 const CAMERA_COLOR_CALIBRATIONS: TableDefinition<&str, &str> =
     TableDefinition::new("camera_color_calibrations");
 const MACHINES: TableDefinition<&str, &str> = TableDefinition::new("machines");
@@ -36,7 +37,7 @@ pub struct Sequence {
     pub id: Uuid,
     pub model_id: Uuid,
     pub name: String,
-    pub camera_preset: String, 
+    pub camera_preset: String,
     pub folder_path: String,
     pub status: SequenceStatus,
     pub created_at: DateTime<Utc>,
@@ -125,7 +126,7 @@ pub struct Inventory {
 impl Inventory {
     pub fn new(path: &Path) -> Result<Self> {
         let db = Database::create(path).context("Failed to open inventory DB")?;
-        
+
         // Initialize tables if needed
         let write_txn = db.begin_write()?;
         {
@@ -139,12 +140,12 @@ impl Inventory {
             let _ = write_txn.open_table(DEVICES)?;
         }
         write_txn.commit()?;
-        
+
         Ok(Self { db })
     }
-    
+
     // --- Models ---
-    
+
     pub fn create_model(&self, name: &str, description: &str) -> Result<Model> {
         let model = Model {
             id: Uuid::new_v4(),
@@ -155,7 +156,7 @@ impl Inventory {
             updated_at: Utc::now(),
             thumbnail_path: None,
         };
-        
+
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(MODELS)?;
@@ -164,16 +165,16 @@ impl Inventory {
             table.insert(id_str.as_str(), json.as_str())?;
         }
         write_txn.commit()?;
-        
+
         Ok(model)
     }
-    
+
     pub fn get_model(&self, id: &Uuid) -> Result<Option<Model>> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(MODELS)?;
         let id_str = id.to_string();
         let result = table.get(id_str.as_str())?;
-        
+
         if let Some(val) = result {
             let model: Model = serde_json::from_str(val.value())?;
             Ok(Some(model))
@@ -181,7 +182,7 @@ impl Inventory {
             Ok(None)
         }
     }
-    
+
     pub fn list_models(&self) -> Result<Vec<Model>> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(MODELS)?;
@@ -248,9 +249,9 @@ impl Inventory {
     }
 
     // --- Sequences ---
-    
+
     pub fn create_sequence(&self, model_id: Uuid, name: &str) -> Result<Sequence> {
-         let seq = Sequence {
+        let seq = Sequence {
             id: Uuid::new_v4(),
             model_id,
             name: name.to_string(),
@@ -259,7 +260,7 @@ impl Inventory {
             status: SequenceStatus::Planned,
             created_at: Utc::now(),
         };
-        
+
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(SEQUENCES)?;
@@ -268,11 +269,15 @@ impl Inventory {
             table.insert(id_str.as_str(), json.as_str())?;
         }
         write_txn.commit()?;
-        
+
         Ok(seq)
     }
 
-    pub fn update_sequence_status(&self, id: &Uuid, status: SequenceStatus) -> Result<Option<Sequence>> {
+    pub fn update_sequence_status(
+        &self,
+        id: &Uuid,
+        status: SequenceStatus,
+    ) -> Result<Option<Sequence>> {
         let write_txn = self.db.begin_write()?;
         let updated = {
             let mut table = write_txn.open_table(SEQUENCES)?;
@@ -596,9 +601,9 @@ impl Inventory {
         write_txn.commit()?;
         Ok(updated)
     }
-    
+
     pub fn list_sequences_for_model(&self, model_id: &Uuid) -> Result<Vec<Sequence>> {
-         let read_txn = self.db.begin_read()?;
+        let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(SEQUENCES)?;
         let mut seqs = Vec::new();
         for item in table.iter()? {
@@ -642,7 +647,7 @@ impl Inventory {
             status: "Online".to_string(),
             last_seen: Utc::now(),
         };
-        
+
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(MACHINES)?;
@@ -666,7 +671,13 @@ impl Inventory {
 
     // --- Devices ---
 
-    pub fn register_device(&self, machine_id: Uuid, name: &str, device_type: DeviceType, connection: &str) -> Result<Device> {
+    pub fn register_device(
+        &self,
+        machine_id: Uuid,
+        name: &str,
+        device_type: DeviceType,
+        connection: &str,
+    ) -> Result<Device> {
         let device = Device {
             id: Uuid::new_v4(),
             machine_id,
@@ -676,7 +687,7 @@ impl Inventory {
             config_json: "{}".to_string(),
             enabled: true,
         };
-        
+
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(DEVICES)?;

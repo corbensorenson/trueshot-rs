@@ -1,18 +1,19 @@
 //! Core data structures for the pixelcollapse2 pipeline.
 
 use ndarray::Array3;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Alignment information for each frame
 #[derive(Debug, Clone)]
 pub struct AlignmentInfo {
-    pub dx: f64,     // Subpixel shift in x
-    pub dy: f64,     // Subpixel shift in y
-    pub scale: f64,  // Magnification scale (1.0 = no change, >1.0 = zoomed in, <1.0 = zoomed out)
+    pub dx: f64,    // Subpixel shift in x
+    pub dy: f64,    // Subpixel shift in y
+    pub scale: f64, // Magnification scale (1.0 = no change, >1.0 = zoomed in, <1.0 = zoomed out)
 }
 
 /// Rectangle region in image coordinates (f64 for subpixel precision)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -22,7 +23,12 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Convert to integer bounds (inclusive)
@@ -61,35 +67,35 @@ pub struct BayerFrame {
 pub struct FrameMeta {
     pub path: PathBuf,
     pub focus_position: u16,
-    pub focus_step: u8,        // 0-6 for 7 steps
-    pub exposure_ev: f64,       // EV relative to reference
-    pub shutter_speed: f64,     // Actual shutter speed in seconds
+    pub focus_step: u8,     // 0-6 for 7 steps
+    pub exposure_ev: f64,   // EV relative to reference
+    pub shutter_speed: f64, // Actual shutter speed in seconds
     pub iso: u16,
-    pub aperture: f64,          // F-number
-    pub focal_length: f64,      // mm
-    pub rotation_deg: f32,      // Parsed from filename
-    pub vantage: String,        // "low", "mid", "high"
-    pub black_level: f64,       // From EXIF, typically 1024 for Z9
-    pub cam_mul: [f32; 4],      // Camera white balance multipliers [R, G, B, G2]
+    pub aperture: f64,     // F-number
+    pub focal_length: f64, // mm
+    pub rotation_deg: f32, // Parsed from filename
+    pub vantage: String,   // "low", "mid", "high"
+    pub black_level: f64,  // From EXIF, typically 1024 for Z9
+    pub cam_mul: [f32; 4], // Camera white balance multipliers [R, G, B, G2]
 }
 
 /// Sequence metadata for a complete capture set
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
-    pub focus_steps: u8,        // Typically 7
-    pub exposures: Vec<f64>,    // EV values, sorted (DEPRECATED - use shutter_speeds instead)
+    pub focus_steps: u8,          // Typically 7
+    pub exposures: Vec<f64>,      // EV values, sorted (DEPRECATED - use shutter_speeds instead)
     pub shutter_speeds: Vec<f64>, // Actual exposure times in seconds (for HDR weighting)
-    pub ref_focus: u8,          // Reference focus step (middle)
-    pub ref_exp: f64,           // Reference exposure EV (0.0)
-    pub rot_deg: f32,           // Rotation angle
-    pub vantage: String,        // Camera height
-    pub burst_factor: u8,       // Burst averaging factor (1 = no averaging)
-    pub bone_id: String,        // Identifier from filename
-    pub cam_mul: [f32; 4],      // Camera white balance multipliers [R, G, B, G2]
+    pub ref_focus: u8,            // Reference focus step (middle)
+    pub ref_exp: f64,             // Reference exposure EV (0.0)
+    pub rot_deg: f32,             // Rotation angle
+    pub vantage: String,          // Camera height
+    pub burst_factor: u8,         // Burst averaging factor (1 = no averaging)
+    pub bone_id: String,          // Identifier from filename
+    pub cam_mul: [f32; 4],        // Camera white balance multipliers [R, G, B, G2]
 }
 
 /// Complete sequence of frames for processing
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sequence {
     /// All frame paths, sorted by focus then exposure
     pub paths: Vec<PathBuf>,
@@ -100,11 +106,13 @@ pub struct Sequence {
 impl Sequence {
     /// Get reference frame index (middle focus, reference exposure)
     pub fn ref_index(&self) -> usize {
-        let exp_idx = self.meta.exposures
+        let exp_idx = self
+            .meta
+            .exposures
             .iter()
             .position(|&e| (e - self.meta.ref_exp).abs() < 0.01)
             .unwrap_or(self.meta.exposures.len() / 2);
-        
+
         self.meta.ref_focus as usize * self.meta.exposures.len() + exp_idx
     }
 
@@ -137,9 +145,9 @@ pub struct ProcessingOptions {
     pub full_decode: bool,
 
     // Algorithm parameters
-    pub noise_sigma: f64,       // Noise estimate
-    pub lambda_wavelet: f64,    // Wavelet sparsity weight
-    pub lambda_curvelet: f64,   // Curvelet sparsity weight
+    pub noise_sigma: f64,     // Noise estimate
+    pub lambda_wavelet: f64,  // Wavelet sparsity weight
+    pub lambda_curvelet: f64, // Curvelet sparsity weight
     pub num_focus_steps: u8,
     pub num_exposures: usize,
     pub ref_focus_step: u8,
@@ -210,11 +218,9 @@ pub struct ProcessingResult {
 }
 
 /// Quality metrics for validation
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct QualityMetrics {
-    pub psnr: Option<f64>,      // Peak signal-to-noise ratio
-    pub ssim: Option<f64>,      // Structural similarity
-    pub brisque: Option<f64>,   // Blind image quality score
+    pub psnr: Option<f64>,    // Peak signal-to-noise ratio
+    pub ssim: Option<f64>,    // Structural similarity
+    pub brisque: Option<f64>, // Blind image quality score
 }
-

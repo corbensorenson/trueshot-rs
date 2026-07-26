@@ -9,9 +9,11 @@
 
 use nalgebra as na;
 
-use super::scene_graph::{HybridScene, ObjectRepresentation, MeshData, Vertex};
-use super::transitions::{TransitionManager, TransitionBlend};
-use crate::gaussian_splatting::rasterizer_4d::{GpuRasterizer4D, Raster4DConfig, RenderedFrame4D, RasterCamera};
+use super::scene_graph::{HybridScene, MeshData, ObjectRepresentation, Vertex};
+use super::transitions::{TransitionBlend, TransitionManager};
+use crate::gaussian_splatting::rasterizer_4d::{
+    GpuRasterizer4D, Raster4DConfig, RasterCamera, RenderedFrame4D,
+};
 
 /// Camera for unified rendering
 #[derive(Clone, Debug)]
@@ -36,8 +38,9 @@ impl UnifiedCamera {
         target: na::Point3<f32>,
     ) -> Self {
         let projection = na::Perspective3::new(aspect, fov_y, near, far).to_homogeneous();
-        let view = na::Isometry3::look_at_rh(&position, &target, &na::Vector3::y()).to_homogeneous();
-        
+        let view =
+            na::Isometry3::look_at_rh(&position, &target, &na::Vector3::y()).to_homogeneous();
+
         Self {
             view,
             projection,
@@ -45,7 +48,7 @@ impl UnifiedCamera {
             height: 1080,
         }
     }
-    
+
     pub fn view_projection(&self) -> na::Matrix4<f32> {
         self.projection * self.view
     }
@@ -117,7 +120,7 @@ impl UnifiedRenderer {
             config,
         }
     }
-    
+
     /// Render a hybrid scene
     pub fn render(
         &mut self,
@@ -126,28 +129,30 @@ impl UnifiedRenderer {
         time: f32,
     ) -> UnifiedFrame {
         let start = std::time::Instant::now();
-        
+
         let width = camera.width as usize;
         let height = camera.height as usize;
-        
+
         // Initialize buffers
         let mut color_buffer = vec![self.config.background_color; width * height];
         let mut depth_buffer = vec![f32::MAX; width * height];
-        
+
         let mut stats = RenderStats::default();
-        
+
         // Update transitions
         if self.config.enable_transitions {
             let _completed = self.transitions.update();
         }
-        
+
         // Render each node type
         for node in scene.nodes() {
             match &node.representation {
-                ObjectRepresentation::Gaussian4D { scene: gs_scene, .. } => {
+                ObjectRepresentation::Gaussian4D {
+                    scene: gs_scene, ..
+                } => {
                     stats.gaussian_objects += 1;
                     stats.total_gaussians += gs_scene.num_gaussians();
-                    
+
                     // Render Gaussians
                     let raster_camera = RasterCamera {
                         view: camera.view,
@@ -169,11 +174,11 @@ impl UnifiedRenderer {
                         width,
                     );
                 }
-                
+
                 ObjectRepresentation::Mesh { geometry, .. } => {
                     stats.mesh_objects += 1;
                     stats.total_triangles += geometry.indices.len() / 3;
-                    
+
                     // Render mesh (simplified - would use GPU rasterization)
                     self.render_mesh(
                         geometry,
@@ -185,7 +190,7 @@ impl UnifiedRenderer {
                         height,
                     );
                 }
-                
+
                 ObjectRepresentation::Avatar { geometry, .. } => {
                     stats.avatar_objects += 1;
                     stats.total_triangles += geometry.indices.len() / 3;
@@ -200,25 +205,25 @@ impl UnifiedRenderer {
                         height,
                     );
                 }
-                
-                ObjectRepresentation::Transitioning {   progress, .. } => {
+
+                ObjectRepresentation::Transitioning { progress, .. } => {
                     stats.transitioning_objects += 1;
-                    
+
                     if self.config.enable_transitions {
                         let blend = TransitionBlend::from_progress(*progress);
                         // Render both with blend (simplified)
                         // Full implementation would render both and alpha blend
                     }
                 }
-                
+
                 ObjectRepresentation::Pending => {
                     // Skip pending objects
                 }
             }
         }
-        
+
         stats.render_time_ms = start.elapsed().as_secs_f32() * 1000.0;
-        
+
         UnifiedFrame {
             color: color_buffer,
             depth: depth_buffer,
@@ -227,7 +232,7 @@ impl UnifiedRenderer {
             stats,
         }
     }
-    
+
     /// Composite Gaussian frame into main buffer
     fn composite_gaussian_frame(
         &self,
@@ -248,7 +253,7 @@ impl UnifiedRenderer {
                     dst[1] = dst[1] * (1.0 - alpha) + color[1] * alpha;
                     dst[2] = dst[2] * (1.0 - alpha) + color[2] * alpha;
                     dst[3] = dst[3] * (1.0 - alpha) + alpha;
-                    
+
                     if alpha > 0.5 {
                         depth_buffer[i] = depth;
                     }
@@ -256,7 +261,7 @@ impl UnifiedRenderer {
             }
         }
     }
-    
+
     /// Render mesh to buffer (simplified software rasterization)
     fn render_mesh(
         &self,
@@ -269,23 +274,23 @@ impl UnifiedRenderer {
         height: usize,
     ) {
         let mvp = camera.view_projection() * transform;
-        
+
         // Software rasterization (barycentric)
         for tri in mesh.indices.chunks(3) {
             if tri.len() < 3 {
                 continue;
             }
-            
+
             // Get vertices
             let v0 = &mesh.vertices[tri[0] as usize];
             let v1 = &mesh.vertices[tri[1] as usize];
             let v2 = &mesh.vertices[tri[2] as usize];
-            
+
             // Project vertices
             let p0 = self.project_vertex(v0, &mvp, width, height);
             let p1 = self.project_vertex(v1, &mvp, width, height);
             let p2 = self.project_vertex(v2, &mvp, width, height);
-            
+
             if let (Some(p0), Some(p1), Some(p2)) = (p0, p1, p2) {
                 self.rasterize_triangle(
                     p0,
@@ -302,7 +307,7 @@ impl UnifiedRenderer {
             }
         }
     }
-    
+
     /// Project vertex to screen space
     fn project_vertex(
         &self,
@@ -318,17 +323,17 @@ impl UnifiedRenderer {
             1.0,
         );
         let clip = mvp * pos;
-        
+
         if clip.w <= 0.0 {
             return None;
         }
-        
+
         let ndc = na::Vector3::new(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
-        
+
         let screen_x = (ndc.x + 1.0) * 0.5 * width as f32;
         let screen_y = (1.0 - ndc.y) * 0.5 * height as f32;
         let depth = (ndc.z + 1.0) * 0.5;
-        
+
         Some((screen_x, screen_y, depth))
     }
 
@@ -402,7 +407,7 @@ impl UnifiedRenderer {
             }
         }
     }
-    
+
     /// Start a transition for an object
     pub fn start_transition(
         &mut self,
@@ -412,12 +417,12 @@ impl UnifiedRenderer {
     ) {
         self.transitions.start_transition(object_id, from, to);
     }
-    
+
     /// Get transition manager for external control
     pub fn transitions(&self) -> &TransitionManager {
         &self.transitions
     }
-    
+
     /// Get mutable transition manager
     pub fn transitions_mut(&mut self) -> &mut TransitionManager {
         &mut self.transitions
@@ -437,7 +442,7 @@ impl Default for UnifiedRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_camera_creation() {
         let camera = UnifiedCamera::perspective(
@@ -448,11 +453,11 @@ mod tests {
             na::Point3::new(0.0, 0.0, 5.0),
             na::Point3::origin(),
         );
-        
+
         let vp = camera.view_projection();
         assert!(!vp.is_identity(1e-6));
     }
-    
+
     #[test]
     fn test_renderer_creation() {
         let renderer = UnifiedRenderer::default();

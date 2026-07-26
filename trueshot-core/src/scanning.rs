@@ -4,12 +4,12 @@
 //! coverage gaps and automatically target them.
 //! Ported and mathematicaly purified from `MultiCam3DScanner`.
 
-pub mod profiles;
-pub mod workflow;
-pub mod session;
-pub mod rig;
 pub mod calibration;
+pub mod profiles;
+pub mod rig;
+pub mod session;
 pub mod tasks;
+pub mod workflow;
 
 use std::collections::HashSet;
 
@@ -77,9 +77,9 @@ impl SmartScanStrategy {
     fn is_visited(&self, angle: f32) -> bool {
         // Fuzzy match within 1 degree
         let a = angle.round() as i32;
-        self.visited_angles.contains(&a) || 
-        self.visited_angles.contains(&(a - 1)) || 
-        self.visited_angles.contains(&(a + 1))
+        self.visited_angles.contains(&a)
+            || self.visited_angles.contains(&(a - 1))
+            || self.visited_angles.contains(&(a + 1))
     }
 
     /// Analyze sparse point cloud for gaps
@@ -87,10 +87,10 @@ impl SmartScanStrategy {
     pub fn analyze_coverage(&mut self, points: &[(f64, f64, f64)]) {
         // SOTA: Spherical Histogram / Fibonacci Sphere binning
         // For simplicity in this v1: Sector analysis
-        
+
         let sectors = 36; // 10 degree sectors
         let mut sector_counts = vec![0; sectors];
-        
+
         for (x, _, z) in points {
             let angle = z.atan2(*x).to_degrees();
             let norm_angle = if angle < 0.0 { angle + 360.0 } else { angle };
@@ -100,7 +100,9 @@ impl SmartScanStrategy {
 
         // Identify sectors with low density relative to mean
         let total: usize = sector_counts.iter().sum();
-        if total == 0 { return; }
+        if total == 0 {
+            return;
+        }
         let mean = total as f64 / sectors as f64;
         let threshold = mean * 0.5;
 
@@ -112,7 +114,7 @@ impl SmartScanStrategy {
                 }
             }
         }
-        
+
         // Sort targets to optimize travel time (minimal rotation)
         self.target_angles.sort_by(|a, b| b.partial_cmp(a).unwrap());
     }

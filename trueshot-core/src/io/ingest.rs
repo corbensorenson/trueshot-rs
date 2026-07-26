@@ -1,8 +1,8 @@
-use anyhow::{Result, Context};
-use std::path::Path;
-use std::fs;
-use chrono::{DateTime, Utc};
 use crate::scanning::session::ScanSession;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use std::fs;
+use std::path::Path;
 
 pub struct IngestionManager;
 
@@ -22,7 +22,10 @@ impl IngestionManager {
             if path.is_file() {
                 if let Some(ext) = path.extension() {
                     let ext_str = ext.to_string_lossy().to_lowercase();
-                    if matches!(ext_str.as_str(), "jpg" | "jpeg" | "nef" | "cr2" | "arw" | "dng") {
+                    if matches!(
+                        ext_str.as_str(),
+                        "jpg" | "jpeg" | "nef" | "cr2" | "arw" | "dng"
+                    ) {
                         let metadata = fs::metadata(&path)?;
                         let created = metadata.created().unwrap_or(metadata.modified()?);
                         let created_utc: DateTime<Utc> = DateTime::from(created);
@@ -31,12 +34,12 @@ impl IngestionManager {
                 }
             }
         }
-        
+
         // Sort by time
         candidates.sort_by_key(|k| k.1);
 
         let mut copied_count = 0;
-        
+
         // 2. Iterate Sequence
         for event in &session.events {
             // Filter for HighRes events
@@ -51,44 +54,44 @@ impl IngestionManager {
             // Matching "bursts" is harder if clocks are widely offset.
             // Assumption: User synchronized clocks or we depend on relative gaps.
             // Simple approach: Clocks are within 30s.
-            
+
             // We use a sliding window logic or just simple distance check.
             let target_time = event.timestamp;
-            
+
             // Find ALL files within window [T-5s, T+10s]
             let mut matches = Vec::new();
             for (path, time) in &candidates {
-                 let diff = (*time - target_time).num_seconds().abs();
-                 if diff < 10 {
-                     matches.push(path.clone());
-                 }
+                let diff = (*time - target_time).num_seconds().abs();
+                if diff < 10 {
+                    matches.push(path.clone());
+                }
             }
-            
+
             // Refine: We expect `event.file_count_expected` files.
             // If we found more, maybe multiple cameras?
             // If we have 1 event, we take the closest ones?
             // This naive matching is risky if shots are fast.
             // Better: Consume candidates from the list.
-             
+
             // BUT: `candidates` loop is inefficient if we restart every time.
             // Optimization: Maintain an index.
-            
+
             // Let's assume sequential shooting.
             // We just peel off the first `file_count_expected` candidates that are "after" the previous event's last file time?
             // Safer: Just proximity for now.
-            
+
             for (i, src_path) in matches.iter().take(event.file_count_expected).enumerate() {
                 let ext = src_path.extension().unwrap_or_default().to_string_lossy();
                 let filename = format!("angle_{}_cam_{}.{}", event.turntable_angle, i, ext);
                 let dest_path = output_dir.join(filename);
-                
+
                 if !dest_path.exists() {
-                     fs::copy(src_path, &dest_path).context("Failed to copy image")?;
-                     copied_count += 1;
+                    fs::copy(src_path, &dest_path).context("Failed to copy image")?;
+                    copied_count += 1;
                 }
             }
         }
-        
+
         Ok(copied_count)
     }
 }

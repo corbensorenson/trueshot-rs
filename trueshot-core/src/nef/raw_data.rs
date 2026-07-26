@@ -13,7 +13,12 @@ pub struct Roi {
 
 impl Roi {
     pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn full_image(width: u32, height: u32) -> Self {
@@ -38,21 +43,13 @@ pub struct WarpMatrix {
 impl WarpMatrix {
     pub fn identity() -> Self {
         Self {
-            matrix: [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
     }
 
     pub fn translation(dx: f32, dy: f32) -> Self {
         Self {
-            matrix: [
-                [1.0, 0.0, dx],
-                [0.0, 1.0, dy],
-                [0.0, 0.0, 1.0],
-            ],
+            matrix: [[1.0, 0.0, dx], [0.0, 1.0, dy], [0.0, 0.0, 1.0]],
         }
     }
 
@@ -119,8 +116,13 @@ impl RawBuffer {
             return None;
         }
 
-        let mut cropped = RawBuffer::new(roi.width, roi.height, self.cfa_pattern, self.bits_per_sample);
-        
+        let mut cropped = RawBuffer::new(
+            roi.width,
+            roi.height,
+            self.cfa_pattern,
+            self.bits_per_sample,
+        );
+
         for y in 0..roi.height {
             for x in 0..roi.width {
                 if let Some(value) = self.get_pixel(roi.x + x, roi.y + y) {
@@ -135,7 +137,7 @@ impl RawBuffer {
     pub fn apply_mask(&mut self, mask: &[u8], mask_width: u32, mask_height: u32) {
         let mask_width = mask_width.min(self.width);
         let mask_height = mask_height.min(self.height);
-        
+
         for y in 0..mask_height {
             for x in 0..mask_width {
                 let mask_idx = (y * mask_width + x) as usize;
@@ -146,38 +148,48 @@ impl RawBuffer {
         }
     }
 
-    pub fn apply_warp(&self, warp: &WarpMatrix, output_width: u32, output_height: u32) -> RawBuffer {
-        let mut warped = RawBuffer::new(output_width, output_height, self.cfa_pattern, self.bits_per_sample);
-        
+    pub fn apply_warp(
+        &self,
+        warp: &WarpMatrix,
+        output_width: u32,
+        output_height: u32,
+    ) -> RawBuffer {
+        let mut warped = RawBuffer::new(
+            output_width,
+            output_height,
+            self.cfa_pattern,
+            self.bits_per_sample,
+        );
+
         for y in 0..output_height {
             for x in 0..output_width {
                 let (src_x, src_y) = warp.transform_point(x as f32, y as f32);
-                
+
                 // Bilinear interpolation
                 let x0 = src_x.floor() as u32;
                 let y0 = src_y.floor() as u32;
                 let x1 = x0 + 1;
                 let y1 = y0 + 1;
-                
+
                 if x1 < self.width && y1 < self.height {
                     let dx = src_x - x0 as f32;
                     let dy = src_y - y0 as f32;
-                    
+
                     let p00 = self.get_pixel(x0, y0).unwrap_or(0) as f32;
                     let p01 = self.get_pixel(x0, y1).unwrap_or(0) as f32;
                     let p10 = self.get_pixel(x1, y0).unwrap_or(0) as f32;
                     let p11 = self.get_pixel(x1, y1).unwrap_or(0) as f32;
-                    
-                    let interpolated = p00 * (1.0 - dx) * (1.0 - dy) +
-                                    p10 * dx * (1.0 - dy) +
-                                    p01 * (1.0 - dx) * dy +
-                                    p11 * dx * dy;
-                    
+
+                    let interpolated = p00 * (1.0 - dx) * (1.0 - dy)
+                        + p10 * dx * (1.0 - dy)
+                        + p01 * (1.0 - dx) * dy
+                        + p11 * dx * dy;
+
                     warped.set_pixel(x, y, interpolated as u16);
                 }
             }
         }
-        
+
         warped
     }
 

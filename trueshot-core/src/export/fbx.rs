@@ -25,9 +25,18 @@ pub fn export_fbx(mesh: &Mesh, path: &Path) -> Result<()> {
     writeln!(&mut out, "GlobalSettings:  {{")?;
     writeln!(&mut out, "    Version: 1000")?;
     writeln!(&mut out, "    Properties70:  {{")?;
-    writeln!(&mut out, "        P: \"UpAxis\", \"int\", \"Integer\", \"\", 1")?;
-    writeln!(&mut out, "        P: \"UpAxisSign\", \"int\", \"Integer\", \"\", 1")?;
-    writeln!(&mut out, "        P: \"UnitScaleFactor\", \"double\", \"Number\", \"\", 1")?;
+    writeln!(
+        &mut out,
+        "        P: \"UpAxis\", \"int\", \"Integer\", \"\", 1"
+    )?;
+    writeln!(
+        &mut out,
+        "        P: \"UpAxisSign\", \"int\", \"Integer\", \"\", 1"
+    )?;
+    writeln!(
+        &mut out,
+        "        P: \"UnitScaleFactor\", \"double\", \"Number\", \"\", 1"
+    )?;
     writeln!(&mut out, "    }}")?;
     writeln!(&mut out, "}}")?;
 
@@ -48,9 +57,18 @@ pub fn export_fbx(mesh: &Mesh, path: &Path) -> Result<()> {
     writeln!(&mut out, "    Model: 2, \"Model::Mesh\", \"Mesh\" {{")?;
     writeln!(&mut out, "        Version: 232")?;
     writeln!(&mut out, "        Properties70:  {{")?;
-    writeln!(&mut out, "            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\", 0,0,0")?;
-    writeln!(&mut out, "            P: \"Lcl Rotation\", \"Lcl Rotation\", \"\", \"A\", 0,0,0")?;
-    writeln!(&mut out, "            P: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\", 1,1,1")?;
+    writeln!(
+        &mut out,
+        "            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\", 0,0,0"
+    )?;
+    writeln!(
+        &mut out,
+        "            P: \"Lcl Rotation\", \"Lcl Rotation\", \"\", \"A\", 0,0,0"
+    )?;
+    writeln!(
+        &mut out,
+        "            P: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\", 1,1,1"
+    )?;
     writeln!(&mut out, "        }}")?;
     writeln!(&mut out, "    }}")?;
     writeln!(&mut out, "    Geometry: 1, \"Geometry::Mesh\", \"Mesh\" {{")?;
@@ -92,7 +110,10 @@ pub fn export_fbx(mesh: &Mesh, path: &Path) -> Result<()> {
         writeln!(&mut out, "        LayerElementNormal: 0 {{")?;
         writeln!(&mut out, "            Version: 101")?;
         writeln!(&mut out, "            Name: \"\"")?;
-        writeln!(&mut out, "            MappingInformationType: \"ByVertice\"")?;
+        writeln!(
+            &mut out,
+            "            MappingInformationType: \"ByVertice\""
+        )?;
         writeln!(&mut out, "            ReferenceInformationType: \"Direct\"")?;
         writeln!(
             &mut out,
@@ -114,13 +135,12 @@ pub fn export_fbx(mesh: &Mesh, path: &Path) -> Result<()> {
         writeln!(&mut out, "        LayerElementUV: 0 {{")?;
         writeln!(&mut out, "            Version: 101")?;
         writeln!(&mut out, "            Name: \"UVChannel_1\"")?;
-        writeln!(&mut out, "            MappingInformationType: \"ByVertice\"")?;
-        writeln!(&mut out, "            ReferenceInformationType: \"Direct\"")?;
         writeln!(
             &mut out,
-            "            UV: *{} {{",
-            mesh.uvs.len() * 2
+            "            MappingInformationType: \"ByVertice\""
         )?;
+        writeln!(&mut out, "            ReferenceInformationType: \"Direct\"")?;
+        writeln!(&mut out, "            UV: *{} {{", mesh.uvs.len() * 2)?;
         write!(&mut out, "                a: ")?;
         for (i, uv) in mesh.uvs.iter().enumerate() {
             let comma = if i < mesh.uvs.len() - 1 { "," } else { "" };
@@ -136,7 +156,10 @@ pub fn export_fbx(mesh: &Mesh, path: &Path) -> Result<()> {
         writeln!(&mut out, "        LayerElementColor: 0 {{")?;
         writeln!(&mut out, "            Version: 101")?;
         writeln!(&mut out, "            Name: \"\"")?;
-        writeln!(&mut out, "            MappingInformationType: \"ByVertice\"")?;
+        writeln!(
+            &mut out,
+            "            MappingInformationType: \"ByVertice\""
+        )?;
         writeln!(&mut out, "            ReferenceInformationType: \"Direct\"")?;
         writeln!(
             &mut out,
@@ -205,7 +228,9 @@ mod tests {
                 nalgebra::Point3::new(1.0, 0.0, 0.0),
                 nalgebra::Point3::new(0.0, 1.0, 0.0),
             ],
-            faces: vec![crate::reconstruction::Face { vertices: [0, 1, 2] }],
+            faces: vec![crate::reconstruction::Face {
+                vertices: [0, 1, 2],
+            }],
             normals: vec![],
             colors: vec![],
             uvs: vec![],

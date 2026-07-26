@@ -1,16 +1,15 @@
 //! 4D Gaussian Splatting Trainer
-//! 
+//!
 //! Trains 4D Gaussian representations from synchronized multi-camera footage.
 //! Optimizes spatial, temporal, and appearance parameters jointly.
 
-use std::collections::HashMap;
 use nalgebra as na;
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 use super::gaussian_4d::{
-    Gaussian4D, Dynamic4DScene, SlicedGaussian3D, 
-    SyncedCamera, Scene4DMetadata,
-    Covariance4D, TemporalSH,
+    Covariance4D, Dynamic4DScene, Gaussian4D, Scene4DMetadata, SlicedGaussian3D, SyncedCamera,
+    TemporalSH,
 };
 
 /// Configuration for 4DGS training
@@ -95,17 +94,17 @@ impl MultiCameraFootage {
             fps,
         }
     }
-    
+
     /// Add a frame
     pub fn add_frame(&mut self, camera_id: usize, frame_idx: usize, image: image::RgbImage) {
         self.frames.insert((camera_id, frame_idx), image);
     }
-    
+
     /// Get a frame
     pub fn get_frame(&self, camera_id: usize, frame_idx: usize) -> Option<&image::RgbImage> {
         self.frames.get(&(camera_id, frame_idx))
     }
-    
+
     /// Get normalized time for frame index
     pub fn frame_to_time(&self, frame_idx: usize) -> f32 {
         if self.num_frames <= 1 {
@@ -185,11 +184,11 @@ impl OptimizerState4D {
             t: 0,
         }
     }
-    
+
     fn step(&mut self) {
         self.t += 1;
     }
-    
+
     fn resize(&mut self, new_size: usize) {
         self.m_position.resize(new_size, na::Vector4::zeros());
         self.v_position.resize(new_size, na::Vector4::zeros());
@@ -219,23 +218,21 @@ impl Trainer4D {
         let gaussians: Vec<Gaussian4D> = initial_points
             .iter()
             .enumerate()
-            .map(|(id, (pos, color))| {
-                Gaussian4D {
-                    id,
-                    center: na::Vector4::new(pos.x, pos.y, pos.z, 0.5),
-                    covariance: Covariance4D::default(),
-                    color: *color,
-                    sh_coeffs: [[0.0; 9]; 3],
-                    temporal_sh: TemporalSH::default(),
-                    opacity: 0.5,
-                    time_range: (0.0, 1.0),
-                    velocity: na::Vector3::zeros(),
-                }
+            .map(|(id, (pos, color))| Gaussian4D {
+                id,
+                center: na::Vector4::new(pos.x, pos.y, pos.z, 0.5),
+                covariance: Covariance4D::default(),
+                color: *color,
+                sh_coeffs: [[0.0; 9]; 3],
+                temporal_sh: TemporalSH::default(),
+                opacity: 0.5,
+                time_range: (0.0, 1.0),
+                velocity: na::Vector3::zeros(),
             })
             .collect();
-        
+
         let num_gaussians = gaussians.len();
-        
+
         let scene = Dynamic4DScene {
             gaussians,
             duration_seconds,
@@ -244,7 +241,7 @@ impl Trainer4D {
             cameras: Vec::new(),
             metadata: Scene4DMetadata::default(),
         };
-        
+
         Self {
             scene,
             config,
@@ -254,90 +251,84 @@ impl Trainer4D {
             best_loss: f32::INFINITY,
         }
     }
-    
+
     /// Create from synchronized multi-camera footage
     pub fn from_footage(
         footage: &MultiCameraFootage,
         initial_points: Vec<(na::Point3<f32>, [f32; 3])>,
         config: Training4DConfig,
     ) -> Self {
-        let mut trainer = Self::new(
-            &initial_points,
-            footage.duration,
-            footage.fps,
-            config,
-        );
-        
+        let mut trainer = Self::new(&initial_points, footage.duration, footage.fps, config);
+
         trainer.scene.cameras = footage.cameras.clone();
         trainer.scene.num_cameras = footage.cameras.len();
-        
+
         trainer
     }
-    
+
     /// Run a single training iteration
     pub fn train_step(&mut self, footage: &MultiCameraFootage) -> f32 {
         self.iteration += 1;
         self.optimizer_state.step();
-        
+
         // Sample random frames across time
         let frame_samples = self.sample_training_frames(footage);
-        
+
         // Compute loss and gradients for each frame
         let mut total_loss = 0.0;
         let mut gradients = Gradients4D::new(self.scene.num_gaussians());
-        
+
         for (camera_id, frame_idx, time) in frame_samples {
             if let Some(gt_image) = footage.get_frame(camera_id, frame_idx) {
                 if let Some(camera) = footage.cameras.get(camera_id) {
                     // Slice scene at this time
                     let sliced = self.scene.slice_at_time(time * self.scene.duration_seconds);
-                    
+
                     // Render
                     let rendered = self.render_frame(&sliced, camera);
-                    
+
                     // Compute loss
-                    let (loss, grads) = self.compute_loss_and_gradients(
-                        &rendered, gt_image, &sliced, time, camera,
-                    );
-                    
+                    let (loss, grads) =
+                        self.compute_loss_and_gradients(&rendered, gt_image, &sliced, time, camera);
+
                     total_loss += loss;
                     gradients.accumulate(&grads);
                 }
             }
         }
-        
+
         total_loss /= self.config.frames_per_batch as f32;
-        
+
         // Add temporal smoothness loss
         let temporal_loss = self.compute_temporal_smoothness_loss();
         total_loss += self.config.temporal_smoothness_weight * temporal_loss;
-        
+
         // Apply gradients
         self.apply_gradients(&gradients);
-        
+
         // Densification and pruning
         if self.should_densify() {
             self.densify(&gradients);
         }
-        
+
         if self.iteration % 1000 == 0 {
             self.prune();
         }
-        
+
         // Track loss
         self.loss_history.push(total_loss);
         if total_loss < self.best_loss {
             self.best_loss = total_loss;
         }
-        
+
         total_loss
     }
-    
+
     /// Sample frames for training batch
     fn sample_training_frames(&self, footage: &MultiCameraFootage) -> Vec<(usize, usize, f32)> {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        
+
         (0..self.config.frames_per_batch)
             .map(|_| {
                 let camera_id = rng.gen_range(0..footage.cameras.len());
@@ -347,33 +338,38 @@ impl Trainer4D {
             })
             .collect()
     }
-    
+
     /// Render a frame from sliced 3D Gaussians
-    fn render_frame(&self, gaussians: &[SlicedGaussian3D], camera: &SyncedCamera) -> image::RgbImage {
+    fn render_frame(
+        &self,
+        gaussians: &[SlicedGaussian3D],
+        camera: &SyncedCamera,
+    ) -> image::RgbImage {
         let width = camera.intrinsics.width;
         let height = camera.intrinsics.height;
-        
+
         // CPU rendering with projected covariance splats
         let mut image = image::RgbImage::new(width, height);
-        
+
         // Sort by depth
         let cam_pos = na::Point3::from(na::Vector3::from(camera.extrinsics.translation));
-        let mut sorted_gaussians: Vec<_> = gaussians.iter()
+        let mut sorted_gaussians: Vec<_> = gaussians
+            .iter()
             .map(|g| {
                 let dist = (g.position - cam_pos).norm_squared();
                 (g, dist)
             })
             .collect();
         sorted_gaussians.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        
+
         // Splat each Gaussian
         for (gaussian, _) in sorted_gaussians {
             self.splat_gaussian(&mut image, gaussian, camera);
         }
-        
+
         image
     }
-    
+
     /// Splat a single Gaussian onto the image
     fn splat_gaussian(
         &self,
@@ -382,17 +378,17 @@ impl Trainer4D {
         camera: &SyncedCamera,
     ) {
         let intr = &camera.intrinsics;
-        
+
         // Project to 2D
         let rot = na::Matrix3::from_row_slice(&camera.extrinsics.rotation);
         let trans = na::Vector3::from(camera.extrinsics.translation);
-        
+
         let p_cam = rot * gaussian.position.coords + trans;
-        
+
         if p_cam.z <= 0.01 {
-            return;  // Behind camera
+            return; // Behind camera
         }
-        
+
         let fx = intr.fx.max(1e-6);
         let fy = intr.fy.max(1e-6);
         let cx = intr.cx;
@@ -455,23 +451,23 @@ impl Trainer4D {
         } else {
             (gaussian.color, [1.0f32; 3])
         };
-        
+
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 let px = x + dx;
                 let py = y + dy;
-                
-                if px >= 0 && px < image.width() as i32 && 
-                   py >= 0 && py < image.height() as i32 {
+
+                if px >= 0 && px < image.width() as i32 && py >= 0 && py < image.height() as i32 {
                     let dx_f = dx as f32;
                     let dy_f = dy as f32;
-                    let exponent = -0.5 * (inv00 * dx_f * dx_f + 2.0 * inv01 * dx_f * dy_f + inv11 * dy_f * dy_f);
+                    let exponent = -0.5
+                        * (inv00 * dx_f * dx_f + 2.0 * inv01 * dx_f * dy_f + inv11 * dy_f * dy_f);
                     let weight = exponent.exp();
                     let alpha = (gaussian.opacity * weight).clamp(0.0, 0.99);
                     if alpha < 0.01 {
                         continue;
                     }
-                    
+
                     let pixel = image.get_pixel_mut(px as u32, py as u32);
                     for c in 0..3 {
                         let old = pixel[c] as f32 / 255.0;
@@ -483,7 +479,7 @@ impl Trainer4D {
             }
         }
     }
-    
+
     /// Compute loss and gradients
     fn compute_loss_and_gradients(
         &self,
@@ -580,7 +576,8 @@ impl Trainer4D {
                     let dx = px as f32 + 0.5 - u;
                     let dy = py as f32 + 0.5 - v;
 
-                    let quad = inv_cov[0] * dx * dx + 2.0 * inv_cov[1] * dx * dy + inv_cov[2] * dy * dy;
+                    let quad =
+                        inv_cov[0] * dx * dx + 2.0 * inv_cov[1] * dx * dy + inv_cov[2] * dy * dy;
                     let power = -0.5 * quad;
                     if power > 0.0 {
                         continue;
@@ -626,7 +623,8 @@ impl Trainer4D {
                     let temporal_weight = g.temporal_weight;
                     let d_loss_d_temporal_weight = d_loss_d_opacity * g.base_opacity;
                     let d_weight_d_center = temporal_weight * (g.temporal_dt / t_var);
-                    let d_weight_d_tvar = temporal_weight * 0.5 * g.temporal_dt * g.temporal_dt / (t_var * t_var);
+                    let d_weight_d_tvar =
+                        temporal_weight * 0.5 * g.temporal_dt * g.temporal_dt / (t_var * t_var);
                     grad_time += d_loss_d_temporal_weight * d_weight_d_center;
                     grad_tvar += d_loss_d_temporal_weight * d_weight_d_tvar;
 
@@ -650,11 +648,7 @@ impl Trainer4D {
                     grad_cam.y += d_loss_dv * dv_dy;
                     grad_cam.z += d_loss_du * du_dz + d_loss_dv * dv_dz;
 
-                    let d_loss_d_color = [
-                        error[0] * alpha,
-                        error[1] * alpha,
-                        error[2] * alpha,
-                    ];
+                    let d_loss_d_color = [error[0] * alpha, error[1] * alpha, error[2] * alpha];
 
                     if use_sh {
                         for channel in 0..3 {
@@ -666,8 +660,11 @@ impl Trainer4D {
                                     d_loss_d_color[channel] * clamp_mask[channel] * basis[i];
                                 let coeff_idx = channel * 9 + i;
                                 for k in 0..3 {
-                                    gradients.temporal_sh[g.id][coeff_idx][k] +=
-                                        d_loss_d_color[channel] * clamp_mask[channel] * basis[i] * temporal_basis[k];
+                                    gradients.temporal_sh[g.id][coeff_idx][k] += d_loss_d_color
+                                        [channel]
+                                        * clamp_mask[channel]
+                                        * basis[i]
+                                        * temporal_basis[k];
                                 }
                             }
                         }
@@ -688,7 +685,10 @@ impl Trainer4D {
             gradients.opacity[g.id] += grad_opacity;
             gradients.covariance[g.id][9] += grad_tvar;
 
-            if grad_inv_cov[0].abs() > 0.0 || grad_inv_cov[1].abs() > 0.0 || grad_inv_cov[2].abs() > 0.0 {
+            if grad_inv_cov[0].abs() > 0.0
+                || grad_inv_cov[1].abs() > 0.0
+                || grad_inv_cov[2].abs() > 0.0
+            {
                 let inv_cov_mat = na::Matrix2::new(inv_cov[0], inv_cov[1], inv_cov[1], inv_cov[2]);
                 let grad_inv_mat = na::Matrix2::new(
                     grad_inv_cov[0],
@@ -698,8 +698,12 @@ impl Trainer4D {
                 );
                 let grad_cov2d = -inv_cov_mat * grad_inv_mat * inv_cov_mat;
                 let j = na::Matrix2x3::new(
-                    fx * inv_z, 0.0, -fx * p_cam.x * inv_z2,
-                    0.0, fy * inv_z, -fy * p_cam.y * inv_z2,
+                    fx * inv_z,
+                    0.0,
+                    -fx * p_cam.x * inv_z2,
+                    0.0,
+                    fy * inv_z,
+                    -fy * p_cam.y * inv_z2,
                 );
                 let grad_cov3d = j.transpose() * grad_cov2d * j;
 
@@ -714,11 +718,13 @@ impl Trainer4D {
 
         (l1_loss, gradients)
     }
-    
+
     /// Compute temporal smoothness loss
     fn compute_temporal_smoothness_loss(&self) -> f32 {
         // Encourage smooth motion trajectories
-        self.scene.gaussians.par_iter()
+        self.scene
+            .gaussians
+            .par_iter()
             .map(|g| {
                 // Penalize large velocities
                 let velocity_mag = g.velocity.norm_squared();
@@ -729,7 +735,7 @@ impl Trainer4D {
             .sum::<f32>()
             / self.scene.num_gaussians() as f32
     }
-    
+
     /// Apply gradients using Adam optimizer
     fn apply_gradients(&mut self, gradients: &Gradients4D) {
         let t = self.optimizer_state.t as i32;
@@ -743,10 +749,10 @@ impl Trainer4D {
         for i in 0..n {
             // Position (xyz + t)
             let g = gradients.position[i];
-            self.optimizer_state.m_position[i] = self.optimizer_state.m_position[i] * beta1
-                + g * (1.0 - beta1);
-            self.optimizer_state.v_position[i] = self.optimizer_state.v_position[i] * beta2
-                + g.component_mul(&g) * (1.0 - beta2);
+            self.optimizer_state.m_position[i] =
+                self.optimizer_state.m_position[i] * beta1 + g * (1.0 - beta1);
+            self.optimizer_state.v_position[i] =
+                self.optimizer_state.v_position[i] * beta2 + g.component_mul(&g) * (1.0 - beta2);
             let m_hat = self.optimizer_state.m_position[i] / bias_correction1;
             let v_hat = self.optimizer_state.v_position[i] / bias_correction2;
             let update = m_hat.component_div(&(v_hat.map(|x| x.sqrt()) + na::Vector4::repeat(eps)));
@@ -762,8 +768,9 @@ impl Trainer4D {
             for c in 0..10 {
                 self.optimizer_state.m_covariance[i][c] =
                     self.optimizer_state.m_covariance[i][c] * beta1 + g_cov[c] * (1.0 - beta1);
-                self.optimizer_state.v_covariance[i][c] =
-                    self.optimizer_state.v_covariance[i][c] * beta2 + g_cov[c] * g_cov[c] * (1.0 - beta2);
+                self.optimizer_state.v_covariance[i][c] = self.optimizer_state.v_covariance[i][c]
+                    * beta2
+                    + g_cov[c] * g_cov[c] * (1.0 - beta2);
                 let m_hat = self.optimizer_state.m_covariance[i][c] / bias_correction1;
                 let v_hat = self.optimizer_state.v_covariance[i][c] / bias_correction2;
                 let update = m_hat / (v_hat.sqrt() + eps);
@@ -781,13 +788,14 @@ impl Trainer4D {
             for c in 0..3 {
                 self.optimizer_state.m_color[i][c] =
                     self.optimizer_state.m_color[i][c] * beta1 + g_color[c] * (1.0 - beta1);
-                self.optimizer_state.v_color[i][c] =
-                    self.optimizer_state.v_color[i][c] * beta2 + g_color[c] * g_color[c] * (1.0 - beta2);
+                self.optimizer_state.v_color[i][c] = self.optimizer_state.v_color[i][c] * beta2
+                    + g_color[c] * g_color[c] * (1.0 - beta2);
                 let m_hat = self.optimizer_state.m_color[i][c] / bias_correction1;
                 let v_hat = self.optimizer_state.v_color[i][c] / bias_correction2;
                 let update = m_hat / (v_hat.sqrt() + eps);
-                self.scene.gaussians[i].color[c] =
-                    (self.scene.gaussians[i].color[c] - self.config.lr_color * update).clamp(0.0, 1.0);
+                self.scene.gaussians[i].color[c] = (self.scene.gaussians[i].color[c]
+                    - self.config.lr_color * update)
+                    .clamp(0.0, 1.0);
             }
 
             // SH coefficients (degree 2)
@@ -824,20 +832,23 @@ impl Trainer4D {
                 for k in 0..3 {
                     let gk = g_temporal_sh[coeff][k];
                     self.optimizer_state.m_temporal_sh[i][coeff][k] =
-                        self.optimizer_state.m_temporal_sh[i][coeff][k] * beta1 + gk * (1.0 - beta1);
+                        self.optimizer_state.m_temporal_sh[i][coeff][k] * beta1
+                            + gk * (1.0 - beta1);
                     self.optimizer_state.v_temporal_sh[i][coeff][k] =
-                        self.optimizer_state.v_temporal_sh[i][coeff][k] * beta2 + gk * gk * (1.0 - beta2);
+                        self.optimizer_state.v_temporal_sh[i][coeff][k] * beta2
+                            + gk * gk * (1.0 - beta2);
                     let m_hat = self.optimizer_state.m_temporal_sh[i][coeff][k] / bias_correction1;
                     let v_hat = self.optimizer_state.v_temporal_sh[i][coeff][k] / bias_correction2;
                     let update = m_hat / (v_hat.sqrt() + eps);
-                    self.scene.gaussians[i].temporal_sh.coeffs[coeff][k] -= self.config.lr_temporal * update;
+                    self.scene.gaussians[i].temporal_sh.coeffs[coeff][k] -=
+                        self.config.lr_temporal * update;
                 }
             }
 
             // Velocity
             let g_vel = gradients.velocity[i];
-            self.optimizer_state.m_velocity[i] = self.optimizer_state.m_velocity[i] * beta1
-                + g_vel * (1.0 - beta1);
+            self.optimizer_state.m_velocity[i] =
+                self.optimizer_state.m_velocity[i] * beta1 + g_vel * (1.0 - beta1);
             self.optimizer_state.v_velocity[i] = self.optimizer_state.v_velocity[i] * beta2
                 + g_vel.component_mul(&g_vel) * (1.0 - beta2);
             let m_hat = self.optimizer_state.m_velocity[i] / bias_correction1;
@@ -846,21 +857,23 @@ impl Trainer4D {
             self.scene.gaussians[i].velocity -= self.config.lr_temporal * update;
         }
     }
-    
+
     /// Check if we should densify
     fn should_densify(&self) -> bool {
-        self.iteration >= self.config.densify_from_iter &&
-        self.iteration <= self.config.densify_until_iter &&
-        self.iteration % self.config.densification_interval == 0
+        self.iteration >= self.config.densify_from_iter
+            && self.iteration <= self.config.densify_until_iter
+            && self.iteration % self.config.densification_interval == 0
     }
-    
+
     /// Densify Gaussians based on gradients
     fn densify(&mut self, gradients: &Gradients4D) {
         let mut to_split = Vec::new();
         let mut to_clone = Vec::new();
-        
+
         for (i, g) in self.scene.gaussians.iter().enumerate() {
-            let grad = gradients.position.get(i)
+            let grad = gradients
+                .position
+                .get(i)
                 .map(|v| na::Vector3::new(v.x, v.y, v.z))
                 .unwrap_or_else(na::Vector3::zeros);
             let grad_magnitude = grad.norm();
@@ -874,74 +887,74 @@ impl Trainer4D {
                 }
             }
         }
-        
+
         // Split large Gaussians
         for &idx in to_split.iter().rev() {
             let original = self.scene.gaussians[idx].clone();
-            
+
             // Create two smaller Gaussians
-            let offset = na::Vector3::new(0.01, 0.0, 0.0);  // Simplified
-            
+            let offset = na::Vector3::new(0.01, 0.0, 0.0); // Simplified
+
             let mut g1 = original.clone();
             g1.center.x += offset.x;
             g1.id = self.scene.gaussians.len();
-            
+
             let mut g2 = original;
             g2.center.x -= offset.x;
-            
+
             self.scene.gaussians[idx] = g2;
             self.scene.gaussians.push(g1);
         }
-        
+
         // Clone small Gaussians
         for &idx in to_clone.iter() {
             let mut clone = self.scene.gaussians[idx].clone();
             clone.id = self.scene.gaussians.len();
             self.scene.gaussians.push(clone);
         }
-        
+
         // Resize optimizer state
         self.optimizer_state.resize(self.scene.num_gaussians());
     }
-    
+
     /// Prune low-opacity Gaussians
     fn prune(&mut self) {
         let threshold = self.config.prune_opacity_threshold;
         let before = self.scene.num_gaussians();
-        
+
         self.scene.gaussians.retain(|g| g.opacity > threshold);
-        
+
         let after = self.scene.num_gaussians();
         if after != before {
             self.optimizer_state.resize(after);
         }
     }
-    
+
     /// Get the trained scene
     pub fn get_scene(&self) -> &Dynamic4DScene {
         &self.scene
     }
-    
+
     /// Get training progress
     pub fn progress(&self) -> f32 {
         self.iteration as f32 / self.config.iterations as f32
     }
-    
+
     /// Get current loss
     pub fn current_loss(&self) -> f32 {
         self.loss_history.last().copied().unwrap_or(f32::INFINITY)
     }
-    
+
     /// Get best loss
     pub fn best_loss(&self) -> f32 {
         self.best_loss
     }
-    
+
     /// Check if training is complete
     pub fn is_complete(&self) -> bool {
         self.iteration >= self.config.iterations
     }
-    
+
     /// Finalize and return the trained scene
     pub fn finalize(mut self) -> Dynamic4DScene {
         self.scene.metadata.training_iterations = self.iteration;
@@ -974,7 +987,7 @@ impl Gradients4D {
             velocity: vec![na::Vector3::zeros(); num_gaussians],
         }
     }
-    
+
     fn accumulate(&mut self, other: &Gradients4D) {
         for (a, b) in self.position.iter_mut().zip(other.position.iter()) {
             *a += b;
@@ -1013,7 +1026,9 @@ impl Gradients4D {
 }
 
 fn has_sh_coeffs_d2(coeffs: &[[f32; 9]; 3]) -> bool {
-    coeffs.iter().any(|channel| channel.iter().any(|v| v.abs() > 1e-6))
+    coeffs
+        .iter()
+        .any(|channel| channel.iter().any(|v| v.abs() > 1e-6))
 }
 
 fn eval_sh_basis_d2(view_dir: na::Vector3<f32>) -> [f32; 9] {
@@ -1053,10 +1068,7 @@ fn eval_sh_basis_d2(view_dir: na::Vector3<f32>) -> [f32; 9] {
     ]
 }
 
-fn eval_sh_color_d2(
-    coeffs: &[[f32; 9]; 3],
-    basis: &[f32; 9],
-) -> ([f32; 3], [f32; 3], [f32; 3]) {
+fn eval_sh_color_d2(coeffs: &[[f32; 9]; 3], basis: &[f32; 9]) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let mut raw = [0.0f32; 3];
     let mut color = [0.0f32; 3];
     let mut mask = [1.0f32; 3];
@@ -1145,19 +1157,19 @@ fn invert_cov2d_4d(cov: &[f32; 3]) -> Option<([f32; 3], f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_trainer_creation() {
         let points = vec![
             (na::Point3::new(0.0, 0.0, 0.0), [1.0, 0.0, 0.0]),
             (na::Point3::new(1.0, 0.0, 0.0), [0.0, 1.0, 0.0]),
         ];
-        
+
         let trainer = Trainer4D::new(&points, 5.0, 30.0, Training4DConfig::default());
         assert_eq!(trainer.scene.num_gaussians(), 2);
         assert_eq!(trainer.iteration, 0);
     }
-    
+
     #[test]
     fn test_config_defaults() {
         let config = Training4DConfig::default();

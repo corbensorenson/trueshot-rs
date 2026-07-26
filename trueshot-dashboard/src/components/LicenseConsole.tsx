@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
     createLicenseTrial,
     importLicense,
+    activateLicenseKey,
     getLicenseBundles,
     getLicenseDevices,
     getLicenseStatus,
@@ -64,6 +65,7 @@ export const LicenseConsole = ({ isOpen, onClose }: LicenseConsoleProps) => {
     const [actionBusy, setActionBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [licenseDraft, setLicenseDraft] = useState('');
+    const [licenseKeyDraft, setLicenseKeyDraft] = useState('');
     const [deviceBusy, setDeviceBusy] = useState<string | null>(null);
 
     const refresh = async () => {
@@ -133,6 +135,22 @@ export const LicenseConsole = ({ isOpen, onClose }: LicenseConsoleProps) => {
             await refresh();
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : 'Failed to import license';
+            setError(message);
+        } finally {
+            setActionBusy(false);
+        }
+    };
+
+    const handleActivateKey = async () => {
+        if (!licenseKeyDraft.trim()) return;
+        setActionBusy(true);
+        setError(null);
+        try {
+            await activateLicenseKey({ license_key: licenseKeyDraft.trim() });
+            setLicenseKeyDraft('');
+            await refresh();
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : 'Failed to activate license';
             setError(message);
         } finally {
             setActionBusy(false);
@@ -260,6 +278,24 @@ export const LicenseConsole = ({ isOpen, onClose }: LicenseConsoleProps) => {
                 <div className="mt-6 grid grid-cols-2 gap-4">
                     <div className="rounded-xl border border-[color:var(--ts-border)] bg-[color:color-mix(in_srgb,var(--ts-surface-strong)_70%,transparent)] p-4">
                         <div className="text-[10px] uppercase tracking-[0.25em] text-[color:var(--ts-muted)]">License activation</div>
+                        <div className="mt-3 text-xs text-[color:var(--ts-muted)]">
+                            Enter your license key to activate this device online.
+                        </div>
+                        <div className="mt-3 flex items-center gap-3">
+                            <input
+                                value={licenseKeyDraft}
+                                onChange={(e) => setLicenseKeyDraft(e.target.value)}
+                                className="flex-1 rounded-lg border border-[color:var(--ts-border)] bg-[color:var(--ts-surface)] px-3 py-2 text-xs text-[color:var(--ts-text)]"
+                                placeholder="XXXX-XXXX-XXXX-XXXX"
+                            />
+                            <button
+                                onClick={handleActivateKey}
+                                disabled={actionBusy || !licenseKeyDraft.trim()}
+                                className="rounded-lg bg-accent-cyan px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-black disabled:opacity-60"
+                            >
+                                Activate Key
+                            </button>
+                        </div>
                         <div className="mt-3 text-xs text-[color:var(--ts-muted)]">
                             Paste the license JSON payload to activate this device. Activation consumes a seat.
                         </div>

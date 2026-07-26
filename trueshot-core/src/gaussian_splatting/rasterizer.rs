@@ -1,8 +1,8 @@
 //! GPU Rasterizer for 3D Gaussian Splatting
-//! 
+//!
 //! High-performance tile-based rasterization using WGPU compute shaders.
 //! Supports real-time 4K rendering of millions of Gaussians.
-//! 
+//!
 //! Architecture:
 //! 1. Project Gaussians to 2D
 //! 2. Sort by depth
@@ -10,8 +10,8 @@
 //! 4. Per-tile alpha blending
 //! 5. Final compositing
 
-use anyhow::Result;
 use super::gaussian::SH_COEFFS_TOTAL;
+use anyhow::Result;
 #[cfg(not(feature = "wgpu"))]
 use nalgebra as na;
 use std::sync::Arc;
@@ -95,14 +95,14 @@ pub struct GpuRasterizer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     config: RasterizerConfig,
-    
+
     // Pipelines
     project_pipeline: wgpu::ComputePipeline,
     sort_pipeline: wgpu::ComputePipeline,
     tile_pipeline: wgpu::ComputePipeline,
     gradient_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
-    
+
     // Buffers
     gaussian_buffer: wgpu::Buffer,
     projected_buffer: wgpu::Buffer,
@@ -112,12 +112,12 @@ pub struct GpuRasterizer {
     output_texture: wgpu::Texture,
     ground_truth_texture: wgpu::Texture,
     gradient_buffer: wgpu::Buffer,
-    
+
     // Bind groups
     project_bind_group: wgpu::BindGroup,
     gradient_bind_group: wgpu::BindGroup,
     render_bind_group: wgpu::BindGroup,
-    
+
     // Stats
     num_gaussians: u32,
 }
@@ -154,8 +154,9 @@ impl GpuRasterizer {
 
         let num_tiles_x = (config.width + config.tile_size - 1) / config.tile_size;
         let num_tiles_y = (config.height + config.tile_size - 1) / config.tile_size;
-        let tile_buffer_size = (num_tiles_x * num_tiles_y * (1 + config.max_gaussians_per_tile) * 4) as u64;
-        
+        let tile_buffer_size =
+            (num_tiles_x * num_tiles_y * (1 + config.max_gaussians_per_tile) * 4) as u64;
+
         let tile_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Tile Buffer"),
             size: tile_buffer_size,
@@ -194,9 +195,9 @@ impl GpuRasterizer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT 
-                 | wgpu::TextureUsages::COPY_SRC 
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
 
@@ -223,68 +224,70 @@ impl GpuRasterizer {
         });
 
         // Bind group layouts
-        let compute_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Compute Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let compute_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Compute Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
 
         // Compute pipelines
-        let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Compute Pipeline Layout"),
-            bind_group_layouts: &[&compute_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let compute_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[&compute_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let project_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Project Pipeline"),
@@ -307,67 +310,69 @@ impl GpuRasterizer {
             entry_point: "bin_to_tiles",
         });
 
-        let gradient_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Gradient Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let gradient_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Gradient Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
 
-        let gradient_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Gradient Pipeline Layout"),
-            bind_group_layouts: &[&compute_bind_group_layout, &gradient_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let gradient_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Gradient Pipeline Layout"),
+                bind_group_layouts: &[&compute_bind_group_layout, &gradient_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let gradient_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Gradient Pipeline"),
@@ -404,7 +409,8 @@ impl GpuRasterizer {
             ],
         });
 
-        let output_texture_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_texture_view =
+            output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let ground_truth_texture_view =
             ground_truth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -436,37 +442,39 @@ impl GpuRasterizer {
         });
 
         // Render pipeline for final compositing
-        let render_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Render Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let render_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Render Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&render_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&render_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -536,11 +544,8 @@ impl GpuRasterizer {
     /// Upload Gaussian data to GPU
     pub fn upload_gaussians(&mut self, gaussians: &[Gaussian3DGpu]) {
         self.num_gaussians = gaussians.len() as u32;
-        self.queue.write_buffer(
-            &self.gaussian_buffer,
-            0,
-            bytemuck::cast_slice(gaussians),
-        );
+        self.queue
+            .write_buffer(&self.gaussian_buffer, 0, bytemuck::cast_slice(gaussians));
     }
 
     /// Set camera for rendering
@@ -554,9 +559,11 @@ impl GpuRasterizer {
 
     /// Render frame
     pub fn render(&self) -> Result<()> {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         let workgroups = (self.num_gaussians + 255) / 256;
 
@@ -595,7 +602,9 @@ impl GpuRasterizer {
 
         // 4. Render with alpha blending
         {
-            let view = self.output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let view = self
+                .output_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -661,9 +670,11 @@ impl GpuRasterizer {
 
     /// Compute image-space gradients on GPU (per-pixel accumulation)
     pub fn compute_gradients(&self) -> Result<()> {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Gradient Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Gradient Encoder"),
+            });
 
         let workgroups = (self.num_gaussians + 255) / 256;
         {
@@ -692,9 +703,11 @@ impl GpuRasterizer {
             mapped_at_creation: false,
         });
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Gradient Copy Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Gradient Copy Encoder"),
+            });
         encoder.copy_buffer_to_buffer(&self.gradient_buffer, 0, &staging_buffer, 0, buffer_size);
         self.queue.submit(std::iter::once(encoder.finish()));
 
@@ -727,9 +740,11 @@ impl GpuRasterizer {
             mapped_at_creation: false,
         });
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Copy Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Copy Encoder"),
+            });
 
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
@@ -1893,9 +1908,13 @@ impl GpuRasterizer {
             }
 
             let min_x = (screen_x - radius).floor().max(0.0) as i32;
-            let max_x = (screen_x + radius).ceil().min(self.config.width as f32 - 1.0) as i32;
+            let max_x = (screen_x + radius)
+                .ceil()
+                .min(self.config.width as f32 - 1.0) as i32;
             let min_y = (screen_y - radius).floor().max(0.0) as i32;
-            let max_y = (screen_y + radius).ceil().min(self.config.height as f32 - 1.0) as i32;
+            let max_y = (screen_y + radius)
+                .ceil()
+                .min(self.config.height as f32 - 1.0) as i32;
 
             let view_dir = (-cam_pos).normalize();
             let basis = eval_sh_basis_cpu(view_dir);
@@ -1913,8 +1932,7 @@ impl GpuRasterizer {
                     let dx = x as f32 + 0.5 - screen_x;
                     let dy = y as f32 + 0.5 - screen_y;
                     let power = -0.5
-                        * (cov2d.z * dx * dx * inv_det
-                            - 2.0 * cov2d.y * dx * dy * inv_det
+                        * (cov2d.z * dx * dx * inv_det - 2.0 * cov2d.y * dx * dy * inv_det
                             + cov2d.x * dy * dy * inv_det);
                     if power > 0.0 {
                         continue;
@@ -1953,10 +1971,8 @@ impl GpuRasterizer {
 #[cfg(not(feature = "wgpu"))]
 fn mat4_from_array(m: &[[f32; 4]; 4]) -> na::Matrix4<f32> {
     na::Matrix4::new(
-        m[0][0], m[0][1], m[0][2], m[0][3],
-        m[1][0], m[1][1], m[1][2], m[1][3],
-        m[2][0], m[2][1], m[2][2], m[2][3],
-        m[3][0], m[3][1], m[3][2], m[3][3],
+        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
+        m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
     )
 }
 
@@ -1970,12 +1986,20 @@ fn compute_cov3d(scale: na::Vector3<f32>, rotation: [f32; 4]) -> na::Matrix3<f32
 }
 
 #[cfg(not(feature = "wgpu"))]
-fn project_cov3d_to_2d(cov3d: na::Matrix3<f32>, cam_pos: na::Vector3<f32>, focal: f32) -> na::Vector3<f32> {
+fn project_cov3d_to_2d(
+    cov3d: na::Matrix3<f32>,
+    cam_pos: na::Vector3<f32>,
+    focal: f32,
+) -> na::Vector3<f32> {
     let z = cam_pos.z;
     let z2 = z * z;
     let j = na::Matrix2x3::new(
-        focal / z, 0.0, -focal * cam_pos.x / z2,
-        0.0, focal / z, -focal * cam_pos.y / z2,
+        focal / z,
+        0.0,
+        -focal * cam_pos.x / z2,
+        0.0,
+        focal / z,
+        -focal * cam_pos.y / z2,
     );
     let cov2d = j * cov3d * j.transpose();
     na::Vector3::new(cov2d[(0, 0)] + 0.3, cov2d[(0, 1)], cov2d[(1, 1)] + 0.3)
@@ -2051,7 +2075,10 @@ fn eval_sh_basis_cpu(view_dir: na::Vector3<f32>) -> [f32; SH_COEFFS_PER_CHANNEL]
 }
 
 #[cfg(not(feature = "wgpu"))]
-fn eval_sh_color_cpu(coeffs: &[f32; SH_COEFFS_TOTAL], basis: &[f32; SH_COEFFS_PER_CHANNEL]) -> [f32; 3] {
+fn eval_sh_color_cpu(
+    coeffs: &[f32; SH_COEFFS_TOTAL],
+    basis: &[f32; SH_COEFFS_PER_CHANNEL],
+) -> [f32; 3] {
     let mut color = [0.0f32; 3];
     for channel in 0..3 {
         let base = channel * SH_COEFFS_PER_CHANNEL;

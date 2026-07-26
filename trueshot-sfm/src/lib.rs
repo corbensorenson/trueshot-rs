@@ -210,9 +210,40 @@ pub struct ImageData {
 impl ImageData {
     /// Create ImageData from path with intrinsics
     pub fn from_path(path: &Path, intrinsics: &CameraIntrinsics) -> anyhow::Result<Self> {
+        Self::from_path_with_limit(path, intrinsics, 8000)
+    }
+
+    pub fn from_path_with_limit(
+        path: &Path,
+        intrinsics: &CameraIntrinsics,
+        max_features: usize,
+    ) -> anyhow::Result<Self> {
         let img = image::open(path)?;
-        let (keypoints, descriptors) = features::detect_sift(&img, 8000);
+        let (keypoints, descriptors) = features::detect_sift(&img, max_features);
         
+        Ok(Self {
+            id: 0,
+            path: path.to_path_buf(),
+            intrinsics: intrinsics.clone(),
+            pose: None,
+            prior_pose: None,
+            keypoints,
+            descriptors,
+            rolling_shutter: None,
+            camera_motion: None,
+        })
+    }
+
+    /// Create feature data from an in-memory RGB view while preserving the
+    /// intended durable path as the view identifier.
+    pub fn from_rgb_image(
+        path: &Path,
+        image: &image::RgbImage,
+        intrinsics: &CameraIntrinsics,
+        max_features: usize,
+    ) -> anyhow::Result<Self> {
+        let gray = image::imageops::grayscale(image);
+        let (keypoints, descriptors) = features::detect_sift_gray(&gray, max_features);
         Ok(Self {
             id: 0,
             path: path.to_path_buf(),
@@ -760,5 +791,36 @@ mod num_cpus {
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
+    }
+}
+
+#[cfg(test)]
+mod in_memory_image_tests {
+    use super::*;
+
+    #[test]
+    fn image_data_accepts_pixels_without_reopening_path() {
+        let path = Path::new("/definitely/not/persisted/fused-view.png");
+        let mut image = image::RgbImage::new(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let value = if (x / 8 + y / 8) % 2 == 0 { 16 } else { 240 };
+                image.put_pixel(x, y, image::Rgb([value, 255 - value, value]));
+            }
+        }
+        let intrinsics = CameraIntrinsics {
+            fx: 50.0,
+            fy: 50.0,
+            cx: 32.0,
+            cy: 32.0,
+            width: 64,
+            height: 64,
+            distortion: Vec::new(),
+            distortion_model: DistortionModel::None,
+        };
+        let data = ImageData::from_rgb_image(path, &image, &intrinsics, 128).unwrap();
+        assert_eq!(data.path, path);
+        assert_eq!(data.keypoints.len(), data.descriptors.len());
+        assert!(data.keypoints.len() <= 128);
     }
 }

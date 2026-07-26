@@ -4,12 +4,12 @@ use std::collections::HashMap;
 /// Direction to rotate object
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RotationDirection {
-    Left,      // Rotate left (counterclockwise)
-    Right,     // Rotate right (clockwise)
-    Up,        // Tilt up
-    Down,      // Tilt down
-    Flip,      // Flip over to show bottom
-    Any,       // Any rotation is fine
+    Left,  // Rotate left (counterclockwise)
+    Right, // Rotate right (clockwise)
+    Up,    // Tilt up
+    Down,  // Tilt down
+    Flip,  // Flip over to show bottom
+    Any,   // Any rotation is fine
 }
 
 impl RotationDirection {
@@ -55,7 +55,11 @@ impl GuidanceMessage {
         match self {
             Self::StartScanning => "Click 'Start New Scan' to begin".to_string(),
             Self::RotateObject => "Slowly rotate the object".to_string(),
-            Self::RotateInDirection(dir) => format!("{} {} to scan missing areas", dir.to_arrow(), dir.to_description()),
+            Self::RotateInDirection(dir) => format!(
+                "{} {} to scan missing areas",
+                dir.to_arrow(),
+                dir.to_description()
+            ),
             Self::RotateToShowCavity => "Rotate to show hidden areas".to_string(),
             Self::MoveCloser => "Move cameras closer for more detail".to_string(),
             Self::MoveFurther => "Move cameras back to see full object".to_string(),
@@ -85,30 +89,34 @@ impl GuidanceSystem {
     }
 
     /// Analyze current reconstruction and provide guidance
-    pub fn analyze(&mut self, stats: &ReconstructionStats, point_cloud: &[ColoredPoint]) -> GuidanceMessage {
+    pub fn analyze(
+        &mut self,
+        stats: &ReconstructionStats,
+        point_cloud: &[ColoredPoint],
+    ) -> GuidanceMessage {
         self.total_frames_processed += 1;
-        
+
         // No data yet
         if stats.point_count == 0 {
             return GuidanceMessage::StartScanning;
         }
-        
+
         // Check for progress
         let point_increase = stats.point_count.saturating_sub(self.last_point_count);
-        
+
         if point_increase < 10 {
             self.frames_without_progress += 1;
         } else {
             self.frames_without_progress = 0;
         }
-        
+
         self.last_point_count = stats.point_count;
-        
+
         // Early stage - just starting
         if stats.point_count < 100 {
             return GuidanceMessage::RotateObject;
         }
-        
+
         // Check coverage quality
         let coverage = self.analyze_coverage(point_cloud);
         self.last_coverage = Some(coverage.clone());
@@ -149,11 +157,11 @@ impl GuidanceSystem {
         if points.is_empty() {
             return CoverageAnalysis::default();
         }
-        
+
         // Divide space into voxels and count points per voxel
         let voxel_size = 0.05; // 5cm voxels
         let mut voxel_counts: HashMap<(i32, i32, i32), usize> = HashMap::new();
-        
+
         for point in points {
             let voxel = (
                 (point.position.x / voxel_size).floor() as i32,
@@ -162,38 +170,40 @@ impl GuidanceSystem {
             );
             *voxel_counts.entry(voxel).or_insert(0) += 1;
         }
-        
+
         // Calculate statistics
         let total_voxels = voxel_counts.len();
         let occupied_voxels = voxel_counts.values().filter(|&&c| c > 0).count();
-        
+
         let counts: Vec<usize> = voxel_counts.values().copied().collect();
         let avg_density = if !counts.is_empty() {
             counts.iter().sum::<usize>() as f32 / counts.len() as f32
         } else {
             0.0
         };
-        
+
         // Check for gaps (voxels with very few points surrounded by occupied voxels)
         let has_gaps = self.detect_gaps(&voxel_counts);
-        
+
         // Uniformity: how evenly distributed are the points
         let variance = if counts.len() > 1 {
             let mean = avg_density;
-            let var = counts.iter()
+            let var = counts
+                .iter()
                 .map(|&c| (c as f32 - mean).powi(2))
-                .sum::<f32>() / counts.len() as f32;
+                .sum::<f32>()
+                / counts.len() as f32;
             var.sqrt()
         } else {
             0.0
         };
-        
+
         let uniformity = if avg_density > 0.0 {
             (1.0 - (variance / avg_density).min(1.0)).max(0.0)
         } else {
             0.0
         };
-        
+
         CoverageAnalysis {
             total_voxels,
             occupied_voxels,
@@ -221,7 +231,8 @@ impl GuidanceSystem {
                 (voxel.0, voxel.1, voxel.2 - 1),
             ];
 
-            let empty_neighbors = neighbors.iter()
+            let empty_neighbors = neighbors
+                .iter()
                 .filter(|n| !voxel_counts.contains_key(n))
                 .count();
 
@@ -243,17 +254,29 @@ impl GuidanceSystem {
 
         // Analyze point distribution in different directions
         // Count points in each hemisphere
-        let mut left_count = 0;   // Negative X
-        let mut right_count = 0;  // Positive X
-        let mut top_count = 0;    // Positive Y
+        let mut left_count = 0; // Negative X
+        let mut right_count = 0; // Positive X
+        let mut top_count = 0; // Positive Y
         let mut bottom_count = 0; // Negative Y
-        let mut front_count = 0;  // Positive Z
-        let mut back_count = 0;   // Negative Z
+        let mut front_count = 0; // Positive Z
+        let mut back_count = 0; // Negative Z
 
         for point in points {
-            if point.position.x < 0.0 { left_count += 1; } else { right_count += 1; }
-            if point.position.y < 0.0 { bottom_count += 1; } else { top_count += 1; }
-            if point.position.z < 0.0 { back_count += 1; } else { front_count += 1; }
+            if point.position.x < 0.0 {
+                left_count += 1;
+            } else {
+                right_count += 1;
+            }
+            if point.position.y < 0.0 {
+                bottom_count += 1;
+            } else {
+                top_count += 1;
+            }
+            if point.position.z < 0.0 {
+                back_count += 1;
+            } else {
+                front_count += 1;
+            }
         }
 
         // Find the direction with the least coverage
@@ -301,7 +324,8 @@ impl GuidanceSystem {
     /// Get coverage statistics for display
     pub fn get_coverage_stats(&self) -> Option<CoverageStats> {
         self.last_coverage.as_ref().map(|cov| CoverageStats {
-            coverage_percent: (cov.occupied_voxels as f32 / cov.total_voxels.max(1) as f32 * 100.0).min(100.0),
+            coverage_percent: (cov.occupied_voxels as f32 / cov.total_voxels.max(1) as f32 * 100.0)
+                .min(100.0),
             uniformity_percent: (cov.uniformity * 100.0).min(100.0),
             has_gaps: cov.has_gaps,
             total_voxels: cov.total_voxels,
@@ -340,8 +364,8 @@ impl Default for CoverageAnalysis {
 /// Public coverage statistics for UI display
 #[derive(Debug, Clone)]
 pub struct CoverageStats {
-    pub coverage_percent: f32,    // 0-100%
-    pub uniformity_percent: f32,  // 0-100%
+    pub coverage_percent: f32,   // 0-100%
+    pub uniformity_percent: f32, // 0-100%
     pub has_gaps: bool,
     pub total_voxels: usize,
 }

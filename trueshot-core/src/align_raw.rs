@@ -7,7 +7,7 @@
 //! - Bayer-aware processing (green channel only for alignment)
 
 use ndarray::Array2;
-use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
 /// Align two raw Bayer frames using multi-scale FFT phase correlation
@@ -19,7 +19,11 @@ use std::f64::consts::PI;
 ///
 /// # Returns
 /// * `(dx, dy)` - Subpixel shift in pixels (frame is shifted by this amount to align with reference)
-pub fn align_phasecorr_bayer(reference: &Array2<f64>, frame: &Array2<f64>, num_levels: usize) -> (f64, f64) {
+pub fn align_phasecorr_bayer(
+    reference: &Array2<f64>,
+    frame: &Array2<f64>,
+    num_levels: usize,
+) -> (f64, f64) {
     // Extract green channel for alignment (highest resolution, least noise)
     let ref_green = extract_green_channel_from_array(reference);
     let frame_green = extract_green_channel_from_array(frame);
@@ -37,7 +41,11 @@ pub fn align_phasecorr_bayer(reference: &Array2<f64>, frame: &Array2<f64>, num_l
 ///
 /// # Returns
 /// * `(dx, dy, scale)` - Subpixel shift and magnification scale
-pub fn align_phasecorr_bayer_with_scale(reference: &Array2<f64>, frame: &Array2<f64>, num_levels: usize) -> (f64, f64, f64) {
+pub fn align_phasecorr_bayer_with_scale(
+    reference: &Array2<f64>,
+    frame: &Array2<f64>,
+    num_levels: usize,
+) -> (f64, f64, f64) {
     // Extract green channel for alignment (highest resolution, least noise)
     let ref_green = extract_green_channel_from_array(reference);
     let frame_green = extract_green_channel_from_array(frame);
@@ -60,7 +68,11 @@ pub fn align_phasecorr_bayer_with_scale(reference: &Array2<f64>, frame: &Array2<
 ///
 /// # Returns
 /// * `(dx, dy, scale)` - Subpixel shift and magnification scale
-pub fn align_phasecorr_gray_with_scale(reference: &Array2<f64>, frame: &Array2<f64>, num_levels: usize) -> (f64, f64, f64) {
+pub fn align_phasecorr_gray_with_scale(
+    reference: &Array2<f64>,
+    frame: &Array2<f64>,
+    num_levels: usize,
+) -> (f64, f64, f64) {
     let (dx, dy) = multiscale_phase_correlation(reference, frame, num_levels);
     let scale = estimate_scale(reference, frame);
     (dx, dy, scale)
@@ -87,29 +99,39 @@ fn extract_green_channel_from_array(bayer: &Array2<f64>) -> Array2<f64> {
 }
 
 /// Multi-scale phase correlation (coarse-to-fine)
-fn multiscale_phase_correlation(ref_img: &Array2<f64>, frame_img: &Array2<f64>, num_levels: usize) -> (f64, f64) {
+fn multiscale_phase_correlation(
+    ref_img: &Array2<f64>,
+    frame_img: &Array2<f64>,
+    num_levels: usize,
+) -> (f64, f64) {
     let mut total_dx = 0.0;
     let mut total_dy = 0.0;
-    
+
     // Build pyramids
     let ref_pyramid = build_pyramid(ref_img, num_levels);
     let frame_pyramid = build_pyramid(frame_img, num_levels);
-    
+
     // Start from coarsest level
     for level in (0..num_levels).rev() {
         let scale = 2.0_f64.powi(level as i32);
-        
+
         // Compute phase correlation at this level
         let (dx, dy) = phase_correlation_fft(&ref_pyramid[level], &frame_pyramid[level]);
-        
+
         // Accumulate shift (scaled to original resolution)
         total_dx += dx * scale;
         total_dy += dy * scale;
-        
-        tracing::trace!("Level {}: shift=({:.2}, {:.2}), total=({:.2}, {:.2})", 
-                       level, dx * scale, dy * scale, total_dx, total_dy);
+
+        tracing::trace!(
+            "Level {}: shift=({:.2}, {:.2}), total=({:.2}, {:.2})",
+            level,
+            dx * scale,
+            dy * scale,
+            total_dx,
+            total_dy
+        );
     }
-    
+
     (total_dx, total_dy)
 }
 
@@ -117,13 +139,13 @@ fn multiscale_phase_correlation(ref_img: &Array2<f64>, frame_img: &Array2<f64>, 
 fn build_pyramid(img: &Array2<f64>, num_levels: usize) -> Vec<Array2<f64>> {
     let mut pyramid = Vec::with_capacity(num_levels);
     pyramid.push(img.clone());
-    
+
     for level in 1..num_levels {
         let prev = &pyramid[level - 1];
         let downsampled = downsample_2x(prev);
         pyramid.push(downsampled);
     }
-    
+
     pyramid
 }
 
@@ -132,35 +154,35 @@ fn downsample_2x(img: &Array2<f64>) -> Array2<f64> {
     let (h, w) = img.dim();
     let new_h = h / 2;
     let new_w = w / 2;
-    
+
     let mut result = Array2::<f64>::zeros((new_h, new_w));
-    
+
     for y in 0..new_h {
         for x in 0..new_w {
-            let sum = img[[y * 2, x * 2]] 
-                    + img[[y * 2, x * 2 + 1]]
-                    + img[[y * 2 + 1, x * 2]]
-                    + img[[y * 2 + 1, x * 2 + 1]];
+            let sum = img[[y * 2, x * 2]]
+                + img[[y * 2, x * 2 + 1]]
+                + img[[y * 2 + 1, x * 2]]
+                + img[[y * 2 + 1, x * 2 + 1]];
             result[[y, x]] = sum / 4.0;
         }
     }
-    
+
     result
 }
 
 /// Phase correlation using FFT
 fn phase_correlation_fft(ref_img: &Array2<f64>, frame_img: &Array2<f64>) -> (f64, f64) {
     let (height, width) = ref_img.dim();
-    
+
     // Apply Hanning window to reduce edge effects
     let window = hanning_window_2d(height, width);
     let ref_windowed = ref_img * &window;
     let frame_windowed = frame_img * &window;
-    
+
     // Compute FFTs
     let ref_fft = fft_2d(&ref_windowed);
     let frame_fft = fft_2d(&frame_windowed);
-    
+
     // Compute cross-power spectrum
     let mut cross_power = Array2::<Complex<f64>>::zeros((height, width));
     for y in 0..height {
@@ -174,10 +196,10 @@ fn phase_correlation_fft(ref_img: &Array2<f64>, frame_img: &Array2<f64>) -> (f64
             }
         }
     }
-    
+
     // Inverse FFT to get correlation surface
     let correlation = ifft_2d(&cross_power);
-    
+
     // Find peak with subpixel accuracy
     find_subpixel_peak(&correlation, height, width)
 }
@@ -185,7 +207,7 @@ fn phase_correlation_fft(ref_img: &Array2<f64>, frame_img: &Array2<f64>) -> (f64
 /// Create 2D Hanning window
 fn hanning_window_2d(height: usize, width: usize) -> Array2<f64> {
     let mut window = Array2::<f64>::zeros((height, width));
-    
+
     for y in 0..height {
         for x in 0..width {
             let wy = 0.5 * (1.0 - (2.0 * PI * y as f64 / height as f64).cos());
@@ -193,7 +215,7 @@ fn hanning_window_2d(height: usize, width: usize) -> Array2<f64> {
             window[[y, x]] = wy * wx;
         }
     }
-    
+
     window
 }
 
@@ -203,7 +225,7 @@ fn fft_2d(img: &Array2<f64>) -> Array2<Complex<f64>> {
     let mut planner = FftPlanner::new();
     let fft_row = planner.plan_fft_forward(width);
     let fft_col = planner.plan_fft_forward(height);
-    
+
     // Convert to complex
     let mut data = Array2::<Complex<f64>>::zeros((height, width));
     for y in 0..height {
@@ -211,7 +233,7 @@ fn fft_2d(img: &Array2<f64>) -> Array2<Complex<f64>> {
             data[[y, x]] = Complex::new(img[[y, x]], 0.0);
         }
     }
-    
+
     // FFT rows
     for y in 0..height {
         let mut row: Vec<Complex<f64>> = data.row(y).to_vec();
@@ -220,7 +242,7 @@ fn fft_2d(img: &Array2<f64>) -> Array2<Complex<f64>> {
             data[[y, x]] = row[x];
         }
     }
-    
+
     // FFT columns
     for x in 0..width {
         let mut col: Vec<Complex<f64>> = data.column(x).to_vec();
@@ -229,7 +251,7 @@ fn fft_2d(img: &Array2<f64>) -> Array2<Complex<f64>> {
             data[[y, x]] = col[y];
         }
     }
-    
+
     data
 }
 
@@ -239,9 +261,9 @@ fn ifft_2d(fft: &Array2<Complex<f64>>) -> Array2<f64> {
     let mut planner = FftPlanner::new();
     let ifft_row = planner.plan_fft_inverse(width);
     let ifft_col = planner.plan_fft_inverse(height);
-    
+
     let mut data = fft.clone();
-    
+
     // IFFT rows
     for y in 0..height {
         let mut row: Vec<Complex<f64>> = data.row(y).to_vec();
@@ -250,7 +272,7 @@ fn ifft_2d(fft: &Array2<Complex<f64>>) -> Array2<f64> {
             data[[y, x]] = row[x];
         }
     }
-    
+
     // IFFT columns
     for x in 0..width {
         let mut col: Vec<Complex<f64>> = data.column(x).to_vec();
@@ -259,7 +281,7 @@ fn ifft_2d(fft: &Array2<Complex<f64>>) -> Array2<f64> {
             data[[y, x]] = col[y];
         }
     }
-    
+
     // Extract magnitude and normalize
     let mut result = Array2::<f64>::zeros((height, width));
     let norm = (width * height) as f64;
@@ -268,7 +290,7 @@ fn ifft_2d(fft: &Array2<Complex<f64>>) -> Array2<f64> {
             result[[y, x]] = data[[y, x]].norm() / norm;
         }
     }
-    
+
     result
 }
 
@@ -278,7 +300,7 @@ fn find_subpixel_peak(correlation: &Array2<f64>, height: usize, width: usize) ->
     let mut max_val = 0.0;
     let mut max_y = 0;
     let mut max_x = 0;
-    
+
     for y in 0..height {
         for x in 0..width {
             let val = correlation[[y, x]];
@@ -289,11 +311,11 @@ fn find_subpixel_peak(correlation: &Array2<f64>, height: usize, width: usize) ->
             }
         }
     }
-    
+
     // Subpixel refinement using parabolic interpolation
     let (dx, dy) = if max_x > 0 && max_x < width - 1 && max_y > 0 && max_y < height - 1 {
         let c = correlation[[max_y, max_x]];
-        
+
         // X direction
         let left = correlation[[max_y, max_x - 1]];
         let right = correlation[[max_y, max_x + 1]];
@@ -302,7 +324,7 @@ fn find_subpixel_peak(correlation: &Array2<f64>, height: usize, width: usize) ->
         } else {
             0.0
         };
-        
+
         // Y direction
         let top = correlation[[max_y - 1, max_x]];
         let bottom = correlation[[max_y + 1, max_x]];
@@ -311,23 +333,23 @@ fn find_subpixel_peak(correlation: &Array2<f64>, height: usize, width: usize) ->
         } else {
             0.0
         };
-        
+
         (dx_sub, dy_sub)
     } else {
         (0.0, 0.0)
     };
-    
+
     // Convert to shift (handle wraparound)
     let mut shift_x = max_x as f64 + dx;
     let mut shift_y = max_y as f64 + dy;
-    
+
     if shift_x > width as f64 / 2.0 {
         shift_x -= width as f64;
     }
     if shift_y > height as f64 / 2.0 {
         shift_y -= height as f64;
     }
-    
+
     (shift_x, shift_y)
 }
 
@@ -362,8 +384,9 @@ fn estimate_scale(reference: &Array2<f64>, frame: &Array2<f64>) -> f64 {
 
     // Coarse search
     for &scale in &coarse_scales {
-        let score = compute_scale_score(reference, frame, scale, ref_mean,
-                                       start_x, start_y, crop_w, crop_h, width, height);
+        let score = compute_scale_score(
+            reference, frame, scale, ref_mean, start_x, start_y, crop_w, crop_h, width, height,
+        );
         if score > best_score {
             best_score = score;
             best_scale = scale;
@@ -377,8 +400,9 @@ fn estimate_scale(reference: &Array2<f64>, frame: &Array2<f64>) -> f64 {
 
     let mut fine_scale = fine_start;
     while fine_scale <= fine_end {
-        let score = compute_scale_score(reference, frame, fine_scale, ref_mean,
-                                       start_x, start_y, crop_w, crop_h, width, height);
+        let score = compute_scale_score(
+            reference, frame, fine_scale, ref_mean, start_x, start_y, crop_w, crop_h, width, height,
+        );
         if score > best_score {
             best_score = score;
             best_scale = fine_scale;

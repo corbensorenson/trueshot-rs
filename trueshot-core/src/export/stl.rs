@@ -2,11 +2,11 @@
 //!
 //! Exports triangle meshes to binary STL.
 
+use crate::export::write_provenance_for_export;
 use crate::reconstruction::Mesh;
 use anyhow::{Context, Result};
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use crate::export::write_provenance_for_export;
 
 /// Export mesh to binary STL format
 pub fn export_stl(mesh: &Mesh, path: &Path) -> Result<()> {

@@ -12,15 +12,15 @@
 //! - Normal estimation from Gaussian covariances
 //! - UV unwrapping with minimal distortion
 
+use nalgebra as na;
+use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 use uuid::Uuid;
-use nalgebra as na;
-use rayon::prelude::*;
 
-use crate::gaussian_splatting::gaussian_4d::Gaussian4D;
-use super::scene_graph::{MeshData, Vertex, MeshLOD};
+use super::scene_graph::{MeshData, MeshLOD, Vertex};
 use super::segmentation::BoundingBox3D;
+use crate::gaussian_splatting::gaussian_4d::Gaussian4D;
 
 /// Configuration for meshification pipeline
 #[derive(Clone, Debug)]
@@ -88,11 +88,11 @@ pub struct CameraPose {
 }
 
 /// 3D voxel grid for accumulating observations
-/// 
+///
 /// This is a specialized grid for the meshification pipeline that stores
 /// accumulated density values. It uses the same structure as the unified
 /// `mesh::VoxelGrid<f32>` but with methods specific to Gaussian accumulation.
-/// 
+///
 /// For general voxel operations, see `crate::mesh::VoxelGrid<T>`.
 #[derive(Clone)]
 pub struct VoxelGrid {
@@ -115,7 +115,7 @@ impl VoxelGrid {
             ((size.z / voxel_size).ceil() as usize).max(1),
         ];
         let total = dims[0] * dims[1] * dims[2];
-        
+
         Self {
             dims,
             origin: bounds.min,
@@ -123,25 +123,27 @@ impl VoxelGrid {
             data: vec![0.0; total],
         }
     }
-    
+
     /// Get voxel index from world position
     pub fn world_to_voxel(&self, pos: &na::Point3<f32>) -> Option<[usize; 3]> {
         let local = pos - self.origin;
         let vx = (local.x / self.voxel_size).floor() as i32;
         let vy = (local.y / self.voxel_size).floor() as i32;
         let vz = (local.z / self.voxel_size).floor() as i32;
-        
-        if vx >= 0 && vy >= 0 && vz >= 0 
+
+        if vx >= 0
+            && vy >= 0
+            && vz >= 0
             && (vx as usize) < self.dims[0]
             && (vy as usize) < self.dims[1]
-            && (vz as usize) < self.dims[2] 
+            && (vz as usize) < self.dims[2]
         {
             Some([vx as usize, vy as usize, vz as usize])
         } else {
             None
         }
     }
-    
+
     /// Get world position of voxel center
     pub fn voxel_to_world(&self, voxel: [usize; 3]) -> na::Point3<f32> {
         na::Point3::new(
@@ -150,23 +152,23 @@ impl VoxelGrid {
             self.origin.z + (voxel[2] as f32 + 0.5) * self.voxel_size,
         )
     }
-    
+
     /// Get linear index from 3D voxel coordinates
     pub fn index(&self, voxel: [usize; 3]) -> usize {
         voxel[2] * self.dims[1] * self.dims[0] + voxel[1] * self.dims[0] + voxel[0]
     }
-    
+
     /// Get value at voxel
     pub fn get(&self, voxel: [usize; 3]) -> f32 {
         self.data[self.index(voxel)]
     }
-    
+
     /// Set value at voxel
     pub fn set(&mut self, voxel: [usize; 3], value: f32) {
         let idx = self.index(voxel);
         self.data[idx] = value;
     }
-    
+
     /// Add to value at voxel (atomic for parallel)
     pub fn accumulate(&mut self, voxel: [usize; 3], value: f32) {
         let idx = self.index(voxel);
@@ -202,7 +204,7 @@ pub struct MeshificationResult {
 pub struct TextureAtlas {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<[u8; 4]>,  // RGBA
+    pub data: Vec<[u8; 4]>, // RGBA
     pub uv_islands: Vec<UVIsland>,
 }
 
@@ -247,48 +249,55 @@ impl MeshificationPipeline {
             completed: VecDeque::new(),
         }
     }
-    
+
     /// Queue an object for meshification
     pub fn queue(&mut self, object_id: Uuid, gaussians: Vec<Gaussian4D>, bounds: BoundingBox3D) {
         let voxel_size = self.config.voxel_size;
         let min_stable_frames = self.config.min_stable_frames;
-        
+
         // Initialize or update observations
-        let observation = self.observations.entry(object_id).or_insert_with(|| {
-            ObjectObservation {
+        let observation = self
+            .observations
+            .entry(object_id)
+            .or_insert_with(|| ObjectObservation {
                 depth_accumulator: VoxelGrid::new(&bounds, voxel_size),
                 color_accumulator: VoxelGrid::new(&bounds, voxel_size),
                 observation_counts: VoxelGrid::new(&bounds, voxel_size),
                 camera_poses: Vec::new(),
                 frame_indices: Vec::new(),
                 quality_scores: Vec::new(),
-            }
-        });
-        
+            });
+
         // Accumulate Gaussian contributions to voxel grid (inlined to avoid borrow issues)
         for gaussian in &gaussians {
             let pos = na::Point3::new(gaussian.center.x, gaussian.center.y, gaussian.center.z);
-            
+
             if let Some(voxel) = observation.depth_accumulator.world_to_voxel(&pos) {
                 // Accumulate opacity-weighted position
-                observation.depth_accumulator.accumulate(voxel, gaussian.opacity);
-                
+                observation
+                    .depth_accumulator
+                    .accumulate(voxel, gaussian.opacity);
+
                 // Accumulate color (using base color - SH DC term)
                 let color_value = (gaussian.color[0] + gaussian.color[1] + gaussian.color[2]) / 3.0;
-                observation.color_accumulator.accumulate(voxel, color_value * gaussian.opacity);
-                
+                observation
+                    .color_accumulator
+                    .accumulate(voxel, color_value * gaussian.opacity);
+
                 // Count observation
                 observation.observation_counts.accumulate(voxel, 1.0);
             }
         }
-        
-        observation.frame_indices.push(observation.frame_indices.len());
+
+        observation
+            .frame_indices
+            .push(observation.frame_indices.len());
         observation.quality_scores.push(1.0);
-        
+
         // Check if ready for meshification
         let ready = observation.frame_indices.len() >= min_stable_frames;
         let obs_clone = observation.clone();
-        
+
         if ready {
             let job = MeshificationJob {
                 object_id,
@@ -302,51 +311,50 @@ impl MeshificationPipeline {
         }
     }
 
-    
     /// Process pending jobs (call from background thread)
     pub fn process(&mut self) -> Vec<MeshificationResult> {
         let mut results = Vec::new();
-        
+
         while let Some(job) = self.pending_jobs.pop_front() {
             let start = Instant::now();
-            
+
             // 1. Extract surface using marching cubes
             let (vertices, indices) = self.extract_surface(&job);
-            
+
             if vertices.is_empty() {
                 continue;
             }
-            
+
             // 2. Estimate normals from Gaussian covariances
             let vertices = if self.config.estimate_normals {
                 self.estimate_normals(vertices, &job.gaussians)
             } else {
                 vertices
             };
-            
+
             // 3. Smooth normals
             let vertices = if self.config.smooth_normals {
                 self.smooth_normals(vertices, &indices)
             } else {
                 vertices
             };
-            
+
             // 4. Generate UV coordinates
             let vertices = self.generate_uvs(vertices, &indices);
-            
+
             // 5. Bake texture from spherical harmonics
             let texture = self.bake_texture(&vertices, &indices, &job.gaussians);
-            
+
             // 6. Generate LOD levels
             let lod_levels = self.generate_lods(&vertices, &indices);
-            
+
             // Create base mesh
             let mesh = MeshData {
                 vertices: vertices.clone(),
                 indices: indices.clone(),
                 name: format!("mesh_{}", job.object_id),
             };
-            
+
             let result = MeshificationResult {
                 object_id: job.object_id,
                 mesh,
@@ -356,23 +364,23 @@ impl MeshificationPipeline {
                 vertex_count: vertices.len(),
                 triangle_count: indices.len() / 3,
             };
-            
+
             results.push(result.clone());
             self.completed.push_back(result);
         }
-        
+
         results
     }
-    
+
     /// Extract surface using marching cubes
     fn extract_surface(&self, job: &MeshificationJob) -> (Vec<Vertex>, Vec<u32>) {
         let grid = &job.observations.depth_accumulator;
         let counts = &job.observations.observation_counts;
-        
+
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut vertex_map: HashMap<[i32; 3], u32> = HashMap::new();
-        
+
         // Iterate through voxel grid
         for z in 0..grid.dims[2].saturating_sub(1) {
             for y in 0..grid.dims[1].saturating_sub(1) {
@@ -388,7 +396,7 @@ impl MeshificationPipeline {
                         self.get_normalized_density(grid, counts, [x + 1, y + 1, z + 1]),
                         self.get_normalized_density(grid, counts, [x, y + 1, z + 1]),
                     ];
-                    
+
                     // Calculate cube index
                     let mut cube_index = 0u8;
                     for i in 0..8 {
@@ -396,29 +404,29 @@ impl MeshificationPipeline {
                             cube_index |= 1 << i;
                         }
                     }
-                    
+
                     // Skip empty or full cubes
                     if cube_index == 0 || cube_index == 255 {
                         continue;
                     }
-                    
+
                     // Generate triangles using marching cubes lookup
                     let triangles = MARCHING_CUBES_TRIANGLES[cube_index as usize];
-                    
+
                     for tri in triangles.chunks(3) {
                         if tri[0] < 0 {
                             break;
                         }
-                        
+
                         for &edge in tri {
                             if edge < 0 {
                                 break;
                             }
-                            
+
                             // Get edge endpoints and interpolate
                             let (v1, v2) = EDGE_VERTICES[edge as usize];
                             let corner_offsets = CUBE_CORNERS;
-                            
+
                             let p1 = [
                                 x + corner_offsets[v1][0],
                                 y + corner_offsets[v1][1],
@@ -429,20 +437,23 @@ impl MeshificationPipeline {
                                 y + corner_offsets[v2][1],
                                 z + corner_offsets[v2][2],
                             ];
-                            
+
                             // Interpolate along edge
                             let t = if (cube[v2] - cube[v1]).abs() > 0.0001 {
                                 (self.config.surface_threshold - cube[v1]) / (cube[v2] - cube[v1])
                             } else {
                                 0.5
                             };
-                            
+
                             let interp = [
-                                (p1[0] as i32 * 2 + ((p2[0] as i32 - p1[0] as i32) * (t * 2.0) as i32)),
-                                (p1[1] as i32 * 2 + ((p2[1] as i32 - p1[1] as i32) * (t * 2.0) as i32)),
-                                (p1[2] as i32 * 2 + ((p2[2] as i32 - p1[2] as i32) * (t * 2.0) as i32)),
+                                (p1[0] as i32 * 2
+                                    + ((p2[0] as i32 - p1[0] as i32) * (t * 2.0) as i32)),
+                                (p1[1] as i32 * 2
+                                    + ((p2[1] as i32 - p1[1] as i32) * (t * 2.0) as i32)),
+                                (p1[2] as i32 * 2
+                                    + ((p2[2] as i32 - p1[2] as i32) * (t * 2.0) as i32)),
                             ];
-                            
+
                             // Get or create vertex
                             let vertex_idx = *vertex_map.entry(interp).or_insert_with(|| {
                                 let world_pos = na::Point3::new(
@@ -450,29 +461,34 @@ impl MeshificationPipeline {
                                     grid.origin.y + (interp[1] as f32 * 0.5) * grid.voxel_size,
                                     grid.origin.z + (interp[2] as f32 * 0.5) * grid.voxel_size,
                                 );
-                                
+
                                 let idx = vertices.len() as u32;
                                 vertices.push(Vertex {
                                     position: [world_pos.x, world_pos.y, world_pos.z],
-                                    normal: [0.0, 1.0, 0.0],  // Will be computed later
+                                    normal: [0.0, 1.0, 0.0], // Will be computed later
                                     uv: [0.0, 0.0],          // Will be computed later
                                     color: [1.0, 1.0, 1.0, 1.0],
                                 });
                                 idx
                             });
-                            
+
                             indices.push(vertex_idx);
                         }
                     }
                 }
             }
         }
-        
+
         (vertices, indices)
     }
-    
+
     /// Get normalized density at voxel
-    fn get_normalized_density(&self, grid: &VoxelGrid, counts: &VoxelGrid, voxel: [usize; 3]) -> f32 {
+    fn get_normalized_density(
+        &self,
+        grid: &VoxelGrid,
+        counts: &VoxelGrid,
+        voxel: [usize; 3],
+    ) -> f32 {
         let count = counts.get(voxel);
         if count > 0.0 {
             grid.get(voxel) / count
@@ -480,12 +496,12 @@ impl MeshificationPipeline {
             0.0
         }
     }
-    
+
     /// Estimate normals from nearest Gaussian covariances
     fn estimate_normals(&self, mut vertices: Vec<Vertex>, gaussians: &[Gaussian4D]) -> Vec<Vertex> {
         vertices.par_iter_mut().for_each(|vertex| {
             let pos = na::Point3::new(vertex.position[0], vertex.position[1], vertex.position[2]);
-            
+
             // Find nearest Gaussians
             let mut nearest = Vec::new();
             for g in gaussians {
@@ -495,42 +511,42 @@ impl MeshificationPipeline {
                     nearest.push((dist, g));
                 }
             }
-            
+
             if nearest.is_empty() {
                 return;
             }
-            
+
             nearest.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
             nearest.truncate(5);
-            
+
             // Average normals from Gaussian covariances (smallest eigenvector)
             let mut normal = na::Vector3::<f32>::zeros();
             let mut weight_sum = 0.0;
-            
+
             for (dist, g) in nearest {
                 let weight = 1.0 / (dist + 0.01);
-                
+
                 // Get spatial covariance and find smallest eigenvector (surface normal)
                 let cov = g.covariance.spatial_covariance();
-                
+
                 // Simplified: use Z column as normal approximation
                 // Full implementation would do eigendecomposition
                 let n = na::Vector3::new(cov[(0, 2)], cov[(1, 2)], cov[(2, 2)]).normalize();
-                
+
                 normal += n * weight;
                 weight_sum += weight;
             }
-            
+
             if weight_sum > 0.0 {
                 normal /= weight_sum;
                 normal = normal.normalize();
                 vertex.normal = [normal.x, normal.y, normal.z];
             }
         });
-        
+
         vertices
     }
-    
+
     /// Smooth normals by averaging neighbors
     fn smooth_normals(&self, mut vertices: Vec<Vertex>, indices: &[u32]) -> Vec<Vertex> {
         // Build adjacency
@@ -547,43 +563,43 @@ impl MeshificationPipeline {
                 }
             }
         }
-        
+
         // Smooth
         let original_normals: Vec<_> = vertices.iter().map(|v| v.normal).collect();
-        
+
         for (i, vertex) in vertices.iter_mut().enumerate() {
             let neighbors = adjacency.get(&(i as u32)).cloned().unwrap_or_default();
             if neighbors.is_empty() {
                 continue;
             }
-            
+
             let mut avg = na::Vector3::new(
                 original_normals[i][0],
                 original_normals[i][1],
                 original_normals[i][2],
             );
-            
+
             for &n in &neighbors {
                 let n_normal = original_normals[n as usize];
                 avg += na::Vector3::new(n_normal[0], n_normal[1], n_normal[2]);
             }
-            
+
             avg = avg.normalize();
             vertex.normal = [avg.x, avg.y, avg.z];
         }
-        
+
         vertices
     }
-    
+
     /// Generate UV coordinates using box projection
     fn generate_uvs(&self, mut vertices: Vec<Vertex>, _indices: &[u32]) -> Vec<Vertex> {
         for vertex in &mut vertices {
             let normal = na::Vector3::new(vertex.normal[0], vertex.normal[1], vertex.normal[2]);
             let pos = vertex.position;
-            
+
             // Box projection - select axis with largest normal component
             let abs_normal = [normal.x.abs(), normal.y.abs(), normal.z.abs()];
-            
+
             let (u, v) = if abs_normal[0] >= abs_normal[1] && abs_normal[0] >= abs_normal[2] {
                 // Project onto YZ plane
                 (pos[1], pos[2])
@@ -594,19 +610,24 @@ impl MeshificationPipeline {
                 // Project onto XY plane
                 (pos[0], pos[1])
             };
-            
+
             // Normalize to 0-1 range (assuming object centered around origin)
             vertex.uv = [
                 (u * 0.5 + 0.5).clamp(0.0, 1.0),
                 (v * 0.5 + 0.5).clamp(0.0, 1.0),
             ];
         }
-        
+
         vertices
     }
-    
+
     /// Bake texture from spherical harmonics
-    fn bake_texture(&self, vertices: &[Vertex], indices: &[u32], gaussians: &[Gaussian4D]) -> TextureAtlas {
+    fn bake_texture(
+        &self,
+        vertices: &[Vertex],
+        indices: &[u32],
+        gaussians: &[Gaussian4D],
+    ) -> TextureAtlas {
         let res = self.config.texture_resolution as usize;
         let mut texture = TextureAtlas {
             width: res as u32,
@@ -614,18 +635,18 @@ impl MeshificationPipeline {
             data: vec![[128, 128, 128, 255]; res * res],
             uv_islands: Vec::new(),
         };
-        
+
         // For each texel, find corresponding 3D position and sample Gaussian colors
         for y in 0..res {
             for x in 0..res {
                 let u = (x as f32 + 0.5) / res as f32;
                 let v = (y as f32 + 0.5) / res as f32;
-                
+
                 // Find triangles that cover this UV
                 if let Some((pos, normal)) = self.sample_mesh_at_uv(vertices, indices, u, v) {
                     // Sample Gaussian color at this position
                     let color = self.sample_gaussian_color(&pos, &normal, gaussians);
-                    
+
                     let idx = y * res + x;
                     texture.data[idx] = [
                         (color[0] * 255.0).clamp(0.0, 255.0) as u8,
@@ -636,10 +657,10 @@ impl MeshificationPipeline {
                 }
             }
         }
-        
+
         texture
     }
-    
+
     /// Sample mesh position at UV coordinate
     fn sample_mesh_at_uv(
         &self,
@@ -652,16 +673,16 @@ impl MeshificationPipeline {
             if tri.len() < 3 {
                 continue;
             }
-            
+
             let v0 = &vertices[tri[0] as usize];
             let v1 = &vertices[tri[1] as usize];
             let v2 = &vertices[tri[2] as usize];
-            
+
             // Check if UV is inside triangle
             let uv0 = [v0.uv[0], v0.uv[1]];
             let uv1 = [v1.uv[0], v1.uv[1]];
             let uv2 = [v2.uv[0], v2.uv[1]];
-            
+
             if let Some((w0, w1, w2)) = barycentric_2d(u, v, uv0, uv1, uv2) {
                 if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
                     // Interpolate position
@@ -670,21 +691,22 @@ impl MeshificationPipeline {
                         v0.position[1] * w0 + v1.position[1] * w1 + v2.position[1] * w2,
                         v0.position[2] * w0 + v1.position[2] * w1 + v2.position[2] * w2,
                     );
-                    
+
                     let normal = na::Vector3::new(
                         v0.normal[0] * w0 + v1.normal[0] * w1 + v2.normal[0] * w2,
                         v0.normal[1] * w0 + v1.normal[1] * w1 + v2.normal[1] * w2,
                         v0.normal[2] * w0 + v1.normal[2] * w1 + v2.normal[2] * w2,
-                    ).normalize();
-                    
+                    )
+                    .normalize();
+
                     return Some((pos, normal));
                 }
             }
         }
-        
+
         None
     }
-    
+
     /// Sample Gaussian color at position
     fn sample_gaussian_color(
         &self,
@@ -695,15 +717,15 @@ impl MeshificationPipeline {
         let mut color = [0.0f32; 3];
         let mut weight_sum = 0.0f32;
         let view = view_dir.normalize();
-        
+
         for g in gaussians {
             let g_pos = na::Point3::new(g.center.x, g.center.y, g.center.z);
             let dist = na::distance(pos, &g_pos);
-            
+
             if dist > 0.5 {
                 continue;
             }
-            
+
             let weight = g.opacity * (-dist * dist * 10.0).exp();
 
             let base = if has_sh_coeffs(&g.sh_coeffs) {
@@ -715,10 +737,10 @@ impl MeshificationPipeline {
             color[0] += base[0] * weight;
             color[1] += base[1] * weight;
             color[2] += base[2] * weight;
-            
+
             weight_sum += weight;
         }
-        
+
         if weight_sum > 0.0 {
             color[0] /= weight_sum;
             color[1] /= weight_sum;
@@ -726,17 +748,17 @@ impl MeshificationPipeline {
         } else {
             color = [0.5, 0.5, 0.5];
         }
-        
+
         color
     }
-    
+
     /// Generate LOD levels via edge collapse
     fn generate_lods(&self, vertices: &[Vertex], indices: &[u32]) -> Vec<MeshLOD> {
         let mut lods = Vec::new();
-        
+
         for (level, &ratio) in self.config.lod_ratios.iter().enumerate() {
             let target_tris = (indices.len() / 3) as f32 * ratio;
-            
+
             if level == 0 {
                 // LOD 0 is full resolution
                 lods.push(MeshLOD {
@@ -751,7 +773,7 @@ impl MeshificationPipeline {
             } else {
                 // Simplified decimation (production would use QEM)
                 let decimated = self.decimate_mesh(vertices, indices, target_tris as usize);
-                
+
                 lods.push(MeshLOD {
                     level: level as u8,
                     geometry: decimated,
@@ -759,10 +781,10 @@ impl MeshificationPipeline {
                 });
             }
         }
-        
+
         lods
     }
-    
+
     /// Simple mesh decimation (would use QEM in production)
     fn decimate_mesh(&self, vertices: &[Vertex], indices: &[u32], target_tris: usize) -> MeshData {
         // Simplified: just skip triangles (production would use edge collapse)
@@ -771,32 +793,33 @@ impl MeshificationPipeline {
             current_tris / target_tris
         } else {
             current_tris
-        }.max(1);
-        
+        }
+        .max(1);
+
         let mut new_indices = Vec::new();
         for (i, tri) in indices.chunks(3).enumerate() {
             if i % skip_ratio == 0 && tri.len() == 3 {
                 new_indices.extend_from_slice(tri);
             }
         }
-        
+
         MeshData {
             vertices: vertices.to_vec(),
             indices: new_indices,
             name: format!("decimated"),
         }
     }
-    
+
     /// Get completed results
     pub fn get_completed(&mut self) -> Vec<MeshificationResult> {
         self.completed.drain(..).collect()
     }
-    
+
     /// Check if any jobs are pending
     pub fn has_pending(&self) -> bool {
         !self.pending_jobs.is_empty()
     }
-    
+
     /// Get pending job count
     pub fn pending_count(&self) -> usize {
         self.pending_jobs.len()
@@ -848,41 +871,59 @@ fn sh_basis_2(dir: &na::Vector3<f32>) -> [f32; 9] {
 
 /// Compute barycentric coordinates for point in 2D triangle
 fn barycentric_2d(
-    px: f32, py: f32,
-    v0: [f32; 2], v1: [f32; 2], v2: [f32; 2],
+    px: f32,
+    py: f32,
+    v0: [f32; 2],
+    v1: [f32; 2],
+    v2: [f32; 2],
 ) -> Option<(f32, f32, f32)> {
     let v0v1 = [v1[0] - v0[0], v1[1] - v0[1]];
     let v0v2 = [v2[0] - v0[0], v2[1] - v0[1]];
     let v0p = [px - v0[0], py - v0[1]];
-    
+
     let dot00 = v0v2[0] * v0v2[0] + v0v2[1] * v0v2[1];
     let dot01 = v0v2[0] * v0v1[0] + v0v2[1] * v0v1[1];
     let dot02 = v0v2[0] * v0p[0] + v0v2[1] * v0p[1];
     let dot11 = v0v1[0] * v0v1[0] + v0v1[1] * v0v1[1];
     let dot12 = v0v1[0] * v0p[0] + v0v1[1] * v0p[1];
-    
+
     let inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01);
     if !inv_denom.is_finite() {
         return None;
     }
-    
+
     let u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
     let v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
     let w = 1.0 - u - v;
-    
+
     Some((w, v, u))
 }
 
 // Marching cubes lookup tables
 const CUBE_CORNERS: [[usize; 3]; 8] = [
-    [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-    [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+    [0, 0, 0],
+    [1, 0, 0],
+    [1, 1, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+    [1, 0, 1],
+    [1, 1, 1],
+    [0, 1, 1],
 ];
 
 const EDGE_VERTICES: [(usize, usize); 12] = [
-    (0, 1), (1, 2), (2, 3), (3, 0),
-    (4, 5), (5, 6), (6, 7), (7, 4),
-    (0, 4), (1, 5), (2, 6), (3, 7),
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
 ];
 
 // Simplified marching cubes table (complete table would have 256 entries)
@@ -906,7 +947,7 @@ impl Default for MeshificationPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_voxel_grid() {
         let bounds = BoundingBox3D::new(
@@ -914,16 +955,13 @@ mod tests {
             na::Point3::new(1.0, 1.0, 1.0),
         );
         let grid = VoxelGrid::new(&bounds, 0.1);
-        
+
         assert_eq!(grid.dims, [10, 10, 10]);
     }
-    
+
     #[test]
     fn test_barycentric() {
-        let result = barycentric_2d(
-            0.33, 0.33,
-            [0.0, 0.0], [1.0, 0.0], [0.0, 1.0],
-        );
+        let result = barycentric_2d(0.33, 0.33, [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]);
         assert!(result.is_some());
     }
 }
