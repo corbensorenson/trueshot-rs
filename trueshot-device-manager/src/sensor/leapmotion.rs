@@ -124,10 +124,6 @@ pub struct LeapMotionController {
     connected: Arc<AtomicBool>,
 }
 
-// Thread safety
-unsafe impl Send for LeapMotionController {}
-unsafe impl Sync for LeapMotionController {}
-
 impl LeapMotionController {
     /// USB identifiers
     pub const VENDOR_ID: u16 = 0xf182;

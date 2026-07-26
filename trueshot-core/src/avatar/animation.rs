@@ -725,9 +725,11 @@ mod tests {
 
     #[test]
     fn test_blendshape_array_conversion() {
-        let mut bs = ARKitBlendshapes::default();
-        bs.eye_blink_left = 0.5;
-        bs.mouth_smile_left = 0.8;
+        let bs = ARKitBlendshapes {
+            eye_blink_left: 0.5,
+            mouth_smile_left: 0.8,
+            ..ARKitBlendshapes::default()
+        };
 
         let arr = bs.to_array();
         let bs2 = ARKitBlendshapes::from_array(&arr);

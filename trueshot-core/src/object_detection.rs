@@ -1,9 +1,9 @@
+//! Object detection for ROI-based selective loading.
+//!
+//! Extracts a NEF preview, applies Otsu thresholding, finds connected components,
+//! and calculates a bounding box for selective loading.
 use crate::nef::parser::Z9NefParser;
 use crate::types::Rect;
-///! Object detection for ROI-based selective loading
-///!
-///! Extracts preview from NEF, applies Otsu thresholding, finds connected components,
-///! and calculates bounding box for selective loading.
 use anyhow::{Context, Result};
 use std::io::Cursor;
 

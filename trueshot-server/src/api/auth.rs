@@ -143,8 +143,9 @@ pub async fn create_session(req: HttpRequest, state: web::Data<AppState>) -> imp
             });
     }
 
-    if let Some(ctx) = req.extensions().get::<AuthContext>() {
-        if ctx.role != Role::Admin {
+    let api_key_role = req.extensions().get::<AuthContext>().map(|ctx| ctx.role);
+    if let Some(role) = api_key_role {
+        if role != Role::Admin {
             return HttpResponse::Forbidden().body("Admin access required");
         }
         let session = match state

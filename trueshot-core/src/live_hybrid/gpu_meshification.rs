@@ -444,7 +444,7 @@ impl GpuMeshifier {
             });
             pass.set_pipeline(&self.voxel_accumulate_pipeline);
             pass.set_bind_group(0, &voxel_bind_group, &[]);
-            pass.dispatch_workgroups((gaussians.len() as u32 + 255) / 256, 1, 1);
+            pass.dispatch_workgroups((gaussians.len() as u32).div_ceil(256), 1, 1);
         }
 
         // Pass 2: Marching cubes
@@ -455,7 +455,11 @@ impl GpuMeshifier {
             });
             pass.set_pipeline(&self.marching_cubes_pipeline);
             pass.set_bind_group(0, &mc_bind_group, &[]);
-            pass.dispatch_workgroups((dims[0] + 7) / 8, (dims[1] + 7) / 8, (dims[2] + 7) / 8);
+            pass.dispatch_workgroups(
+                dims[0].div_ceil(8),
+                dims[1].div_ceil(8),
+                dims[2].div_ceil(8),
+            );
         }
 
         // Read back results

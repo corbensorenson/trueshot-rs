@@ -332,7 +332,7 @@ fn tone_map(rgb: &Array3<f64>) -> Result<Array3<f64>> {
             // In dark areas (luma < 0.15), blend towards grayscale
             if luma < 0.15 {
                 let strength = (0.15 - luma) / 0.15; // 0 at luma=0.15, 1 at luma=0
-                let strength = strength.min(1.0).max(0.0);
+                let strength = strength.clamp(0.0, 1.0);
 
                 // Blend towards grayscale (preserves luma, removes chroma)
                 toned[[y, x, 0]] = r * (1.0 - strength) + luma * strength;
@@ -409,7 +409,7 @@ fn sharpen(rgb: &Array3<f64>) -> Result<Array3<f64>> {
                     / 4.0;
 
                 let detail = center - blurred;
-                sharpened[[y, x, c]] = (center + amount * detail).max(0.0).min(1.0);
+                sharpened[[y, x, c]] = (center + amount * detail).clamp(0.0, 1.0);
             }
         }
     }
@@ -425,7 +425,7 @@ fn to_u8(rgb: &Array3<f64>) -> Result<Array3<u8>> {
     for y in 0..height {
         for x in 0..width {
             for c in 0..channels {
-                let value = (rgb[[y, x, c]] * 255.0).round().max(0.0).min(255.0) as u8;
+                let value = (rgb[[y, x, c]] * 255.0).round().clamp(0.0, 255.0) as u8;
                 output[[y, x, c]] = value;
             }
         }

@@ -300,7 +300,7 @@ fn load_obj_cloud(path: &Path) -> Result<PointCloud> {
     let reader = BufReader::new(file);
     let mut points = Vec::new();
 
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(std::result::Result::ok) {
         let line = line.trim();
         if line.starts_with("v ") {
             let parts: Vec<&str> = line.split_whitespace().collect();

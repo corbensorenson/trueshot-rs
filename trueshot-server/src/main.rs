@@ -91,12 +91,8 @@ async fn main() -> std::io::Result<()> {
         None
     };
     let telemetry_settings = telemetry::TelemetrySettings::from_config(&config, is_production);
-    let telemetry_tracer = telemetry::init_tracer(&telemetry_settings).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Telemetry init failed: {}", e),
-        )
-    })?;
+    let telemetry_tracer = telemetry::init_tracer(&telemetry_settings)
+        .map_err(|e| std::io::Error::other(format!("Telemetry init failed: {}", e)))?;
     let telemetry_layer =
         telemetry_tracer.map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer));
     tracing_subscriber::registry()
@@ -151,12 +147,7 @@ async fn main() -> std::io::Result<()> {
     let auth_store = Arc::new(
         auth_store::AuthStore::new(&config.paths.auth_db)
             .await
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Auth store init failed: {}", e),
-                )
-            })?,
+            .map_err(|e| std::io::Error::other(format!("Auth store init failed: {}", e)))?,
     );
     let auth = Arc::new(
         AuthManager::new(
@@ -166,20 +157,11 @@ async fn main() -> std::io::Result<()> {
             refresh_ttl,
             auth_store,
         )
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Auth init failed: {}", e),
-            )
-        })?,
+        .map_err(|e| std::io::Error::other(format!("Auth init failed: {}", e)))?,
     );
     if at_rest::encryption_required(&config.privacy, &config.paths.projects_dir) {
-        at_rest::require_master_key(&config.privacy, &config.paths.projects_dir).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Encryption master key required: {}", e),
-            )
-        })?;
+        at_rest::require_master_key(&config.privacy, &config.paths.projects_dir)
+            .map_err(|e| std::io::Error::other(format!("Encryption master key required: {}", e)))?;
     }
     let rate_limiter = rate_limit::RateLimiter::from_config(&config, is_production).map(Arc::new);
 
@@ -188,12 +170,11 @@ async fn main() -> std::io::Result<()> {
     let worker_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let job_queue = Arc::new(JobQueue::new(&config.paths.jobs_db).await.map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Job queue init failed: {}", e),
-        )
-    })?);
+    let job_queue = Arc::new(
+        JobQueue::new(&config.paths.jobs_db)
+            .await
+            .map_err(|e| std::io::Error::other(format!("Job queue init failed: {}", e)))?,
+    );
     let observer: Arc<dyn SchedulerObserver> = Arc::new(QueueObserver::new(job_queue.clone()));
     let scheduler = Arc::new(Scheduler::with_observer(worker_count, Some(observer)));
 
@@ -223,12 +204,10 @@ async fn main() -> std::io::Result<()> {
         Err(e) => warn!("Camera auto-detection failed: {}", e),
     }
     let camera_manager = Arc::new(AsyncMutex::new(camera_manager));
-    let inventory = Arc::new(Inventory::new(&config.paths.inventory_db).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Inventory init failed: {}", e),
-        )
-    })?);
+    let inventory = Arc::new(
+        Inventory::new(&config.paths.inventory_db)
+            .map_err(|e| std::io::Error::other(format!("Inventory init failed: {}", e)))?,
+    );
     {
         let cm = camera_manager.lock().await;
         for profile in cm.registry.profiles.values() {
@@ -315,7 +294,7 @@ async fn main() -> std::io::Result<()> {
                 if let Some(feedback) = tt_feedback_config.clone() {
                     foldio.set_feedback_config(feedback);
                 }
-                if let Ok(_) = foldio.connect().await {
+                if foldio.connect().await.is_ok() {
                     info!("Foldio360 Connected!");
                     *tt_clone.lock().await = Some(Box::new(foldio) as Box<dyn Turntable>);
                     *status_clone.lock().unwrap() = "Foldio360".to_string();
@@ -340,7 +319,7 @@ async fn main() -> std::io::Result<()> {
                 if let Some(feedback) = tt_feedback_config.clone() {
                     serial.set_feedback_config(feedback);
                 }
-                if let Ok(_) = serial.connect().await {
+                if serial.connect().await.is_ok() {
                     info!("Serial Turntable Connected on {}", port);
                     *tt_clone.lock().await = Some(Box::new(serial) as Box<dyn Turntable>);
                     *status_clone.lock().unwrap() = "Serial".to_string();
@@ -494,7 +473,7 @@ async fn main() -> std::io::Result<()> {
                 required: audit_anchor_required,
             }),
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
+        .map_err(|e| std::io::Error::other(e.to_string()))?,
     );
     let license_gate = Arc::new(Mutex::new(licensing::LicenseGate::initialize()));
 
@@ -623,12 +602,7 @@ async fn main() -> std::io::Result<()> {
     let prometheus = PrometheusMetricsBuilder::new("trueshot")
         .endpoint(metrics_path.as_str())
         .build()
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Metrics init failed: {}", e),
-            )
-        })?;
+        .map_err(|e| std::io::Error::other(format!("Metrics init failed: {}", e)))?;
 
     // 3. Server
     let server = HttpServer::new(move || {

@@ -638,6 +638,6 @@ mod tests {
         }
 
         let prune_indices = manager.get_prune_indices();
-        assert!(prune_indices.len() > 0); // Should prune low-opacity Gaussians
+        assert!(!prune_indices.is_empty()); // Should prune low-opacity Gaussians
     }
 }

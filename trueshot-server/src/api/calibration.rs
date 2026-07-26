@@ -823,9 +823,7 @@ async fn fetch_cached_calibration(
     state: &AppState,
     camera_id: &str,
 ) -> Option<InventoryCalibration> {
-    let Some(client) = state.redis_client.as_ref() else {
-        return None;
-    };
+    let client = state.redis_client.as_ref()?;
     let key = format!("calib:{camera_id}");
     let mut conn = client.get_async_connection().await.ok()?;
     let payload: Option<String> = conn.get(key).await.ok()?;
@@ -837,9 +835,7 @@ async fn fetch_cached_color_calibration(
     state: &AppState,
     camera_id: &str,
 ) -> Option<InventoryColorCalibration> {
-    let Some(client) = state.redis_client.as_ref() else {
-        return None;
-    };
+    let client = state.redis_client.as_ref()?;
     let key = format!("calib_color:{camera_id}");
     let mut conn = client.get_async_connection().await.ok()?;
     let payload: Option<String> = conn.get(key).await.ok()?;

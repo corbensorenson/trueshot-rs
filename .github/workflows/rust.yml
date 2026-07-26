@@ -73,10 +73,10 @@ jobs:
         cd ..
 
     - name: Check Formatting
-      run: cargo fmt -- --check
+      run: cargo fmt --all -- --check
 
     - name: Clippy (Linting)
-      run: cargo clippy --workspace -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
 
     - name: Check All Rust Targets
       run: cargo check --workspace --all-targets

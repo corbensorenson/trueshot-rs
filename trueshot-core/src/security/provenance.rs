@@ -641,7 +641,7 @@ fn read_last_audit_hash(path: &Path) -> Option<String> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
     let mut last_line = None;
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(std::result::Result::ok) {
         if !line.trim().is_empty() {
             last_line = Some(line);
         }

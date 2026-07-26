@@ -339,10 +339,8 @@ pub fn collapse_c_grade(
                     // Use wide Gaussian to accept 0.1-3.0 range (centered at 1.0)
                     let sigma = 1.0; // Wide sigma to accept broad range
                     let target = 1.0;
-                    let w = if pixel_value < 0.01 {
-                        0.01 // Very low weight for near-black pixels
-                    } else if pixel_value > 5.0 {
-                        0.01 // Very low weight for extremely bright pixels (likely clipped)
+                    let w = if !(0.01..=5.0).contains(&pixel_value) {
+                        0.01 // Very low weight for near-black or clipped pixels
                     } else {
                         (-(pixel_value - target).powi(2) / (2.0 * sigma * sigma)).exp()
                     };
@@ -452,9 +450,7 @@ pub fn collapse_b_grade(
                     let pixel_value = frames[n][[y, x, 0]];
                     let sigma = 1.0;
                     let target = 1.0;
-                    let w = if pixel_value < 0.01 {
-                        0.01
-                    } else if pixel_value > 5.0 {
+                    let w = if !(0.01..=5.0).contains(&pixel_value) {
                         0.01
                     } else {
                         (-(pixel_value - target).powi(2) / (2.0 * sigma * sigma)).exp()
@@ -1758,7 +1754,7 @@ fn select_best_exposure_per_plane(weights: &[f64], num_exposures: usize) -> Vec<
         return weights.to_vec();
     }
 
-    let num_planes = (weights.len() + num_exposures - 1) / num_exposures;
+    let num_planes = weights.len().div_ceil(num_exposures);
     let mut selected = vec![0.0; weights.len()];
 
     for plane_idx in 0..num_planes {

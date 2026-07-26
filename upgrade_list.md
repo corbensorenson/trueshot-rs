@@ -2068,7 +2068,11 @@ Scope: local-first product architecture + monetization operations reconciliation
   - No non-`Send` camera handle crosses a thread boundary.
   - Strict workspace Clippy passes without suppressing `arc_with_non_send_sync`.
   - Camera disconnect, timeout, panic, and shutdown tests prove bounded recovery without deadlock.
-- Status: Open
+- Status: Done (2026-07-26)
+  - Replaced shared Nokhwa handles with a dedicated bounded actor that creates, opens, configures, captures, and drops each backend on one OS thread.
+  - Capture, preview, configuration, and shutdown use typed bounded channels with initialization/command deadlines and nonblocking queue backpressure.
+  - Removed unsafe `Send`/`Sync` assertions; capture publication is atomic and resolution changes attempt rollback on failure.
+  - Verified owner-thread affinity, acknowledged shutdown/drop, bounded timeout, backend panic containment, full workspace tests, and strict all-target Clippy.
 
 ## P1: Launch Readiness
 
@@ -2087,8 +2091,10 @@ Scope: local-first product architecture + monetization operations reconciliation
 - Status: In Progress (2026-07-26)
   - Verified: every workspace crate now inherits one lint policy, ignored nightly-only rustfmt options were removed, the declared Clippy MSRV matches APIs already used by the codebase, and the full repository passes `cargo fmt --all -- --check`.
   - Verified: workspace tests, doctests, all-target compilation, and public benchmark smoke binaries execute successfully.
-  - Verified: avoidable device-manager lint findings are resolved; strict Clippy now stops only at the two unsafe Nokhwa ownership sites tracked by P0 #149.
-  - Remaining: P0 #149 and any subsequent strict Clippy findings exposed after the camera actor removes the current blocker.
+  - Verified: P0 #149 is closed; strict `cargo clippy --workspace --all-targets -- -D warnings`, formatting, workspace tests, and doctests pass.
+  - Verified: CI now enforces repository-wide formatting and strict all-target Clippy rather than library-only linting.
+  - Verified: the Linux-only `tokio-uring` dependency is target-gated, so enabling its feature no longer compiles Linux syscalls on macOS.
+  - Remaining: unify and validate optional OpenCV/real-camera feature combinations on provisioned Linux, macOS, and Windows runners.
 
 151. 3DGS performance claims lack adapter-specific GPU benchmarks
 - Evidence:
@@ -2130,4 +2136,21 @@ Scope: local-first product architecture + monetization operations reconciliation
 - Acceptance criteria:
   - Workspace validation emits no future-incompatibility warning.
   - Redis bridge behavior and local-first operation without Redis both pass integration tests.
+- Status: Open
+
+154. Optional OpenCV features resolve three incompatible binding stacks and are not CI-validated
+- Evidence:
+  - `trueshot-calibration`, `trueshot-device-manager`, and `trueshot-vision` resolve `opencv` 0.88, 0.94, and 0.96 respectively.
+  - All-feature validation compiles three binding generators and currently fails during native `libclang` binding generation despite a local OpenCV 4.13 installation.
+  - The cross-platform CI matrix does not install OpenCV/libclang or exercise explicit OpenCV feature combinations.
+- Risk: optional calibration, legacy vision, and camera paths can silently rot, produce oversized builds, or fail for customers even while default CI is green.
+- Upgrade actions:
+  - Standardize on one supported `opencv` crate and a minimal shared module feature set.
+  - Pin and document compatible OpenCV/libclang versions for Linux, macOS, and Windows.
+  - Add dedicated feature-matrix jobs for OpenCV and real-camera builds instead of blindly enabling platform-exclusive features everywhere.
+  - Add smoke tests for calibration, frame conversion, camera discovery, and graceful operation when native SDKs are absent.
+- Acceptance criteria:
+  - `cargo tree -d` contains one `opencv` generation.
+  - Provisioned feature-matrix runners build and test every advertised native integration.
+  - Default local-first binaries remain functional without OpenCV or camera vendor SDKs.
 - Status: Open

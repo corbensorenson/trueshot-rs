@@ -114,7 +114,7 @@ impl AutoCalibrator {
         let steps = (total_depth / step_size_mm).ceil() as usize;
 
         // Clamp steps reasonably
-        let steps = steps.max(1).min(1000);
+        let steps = steps.clamp(1, 1000);
 
         CalibrationResult {
             turntable_step_deg,

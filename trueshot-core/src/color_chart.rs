@@ -88,8 +88,8 @@ fn downsample(rgb: &Array3<f64>, max_dim: usize) -> (Vec<[f32; 3]>, usize, usize
         1.0
     };
     let step = scale.ceil() as usize;
-    let ds_width = (width + step - 1) / step;
-    let ds_height = (height + step - 1) / step;
+    let ds_width = width.div_ceil(step);
+    let ds_height = height.div_ceil(step);
 
     let mut out = vec![[0.0f32; 3]; ds_width * ds_height];
     for y in 0..ds_height {

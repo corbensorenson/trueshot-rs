@@ -174,9 +174,6 @@ impl SerialTurntable {
     }
 }
 
-unsafe impl Send for SerialTurntable {}
-unsafe impl Sync for SerialTurntable {}
-
 #[async_trait]
 impl Turntable for SerialTurntable {
     async fn connect(&mut self) -> Result<()> {

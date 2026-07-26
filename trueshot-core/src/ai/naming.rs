@@ -2,7 +2,6 @@ use image::DynamicImage;
 /// Auto-Naming Classifier
 /// Uses basic color/shape heuristics if no AI model is loaded,
 /// or wraps an ONNX classifier if available.
-
 pub struct AutoNamer;
 
 impl AutoNamer {

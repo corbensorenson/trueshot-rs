@@ -328,8 +328,8 @@ impl FocusStacker {
 
         // Build Gaussian pyramid
         for _ in 0..levels {
-            let new_width = (width + 1) / 2;
-            let new_height = (height + 1) / 2;
+            let new_width = width.div_ceil(2);
+            let new_height = height.div_ceil(2);
             let mut downsampled = vec![[0.0f32; 3]; new_width * new_height];
 
             for y in 0..new_height {

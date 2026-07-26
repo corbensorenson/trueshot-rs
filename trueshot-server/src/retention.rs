@@ -118,7 +118,7 @@ fn prune_audit_log(path: &PathBuf, retention_days: i64) -> Result<()> {
     let reader = std::io::BufReader::new(file);
     let cutoff = Utc::now() - Duration::days(retention_days);
     let mut kept: Vec<AuditRecord> = Vec::new();
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if line.trim().is_empty() {
             continue;
         }

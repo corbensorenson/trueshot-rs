@@ -2,6 +2,16 @@
 
 This checklist is the minimum bar for a production deployment. It assumes `TRUESHOT_ENV=production`.
 
+### Rust Toolchain Contract
+
+- Minimum supported Rust version (MSRV): 1.80.
+- Release validation uses the current stable Rust toolchain; the 2026-07-26 baseline was verified with Rust 1.90.0.
+- Required gates:
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
+- Optional OpenCV and platform-specific feature combinations require their native SDKs and dedicated feature-matrix runners; they are not implied by the default workspace gate.
+
 ### Required Security Configuration
 
 - Set `server.cookie_secure=true`.
@@ -60,11 +70,12 @@ This checklist is the minimum bar for a production deployment. It assumes `TRUES
 - TLS termination with automated cert rotation.
 - Offsite backups with tested restore drills.
 
-### Known Release Gates
+### Current Validation Baseline
 
-- The focused NEF ingestion/fusion/export/reconstruction tests pass, but the
-  full `trueshot-core` suite currently has nine failures outside this pipeline
-  (hierarchical grading/pipeline, spatial audio attenuation, deformation MLP,
-  motion classification and floorplan geometry). Treat the workspace as
-  release-blocked until those failures are triaged and fixed or explicitly
-  quarantined with owners and rationale.
+- On 2026-07-26, `cargo test --workspace` passed every executed unit,
+  integration, and documentation test. Hardware/keychain-dependent tests remain
+  explicitly ignored and require dedicated runners.
+- Strict default-feature Clippy passes across every workspace target.
+- Optional OpenCV feature validation remains release work: the workspace
+  currently resolves three incompatible `opencv` crate generations and does
+  not provision a complete native binding toolchain in CI.

@@ -224,7 +224,7 @@ pub fn gpu_collapse_pixels(
         });
 
     let workgroup_size = WORKGROUP_SIZE as u32;
-    let dispatch_x = ((num_pixels as u32) + workgroup_size - 1) / workgroup_size;
+    let dispatch_x = (num_pixels as u32).div_ceil(workgroup_size);
 
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

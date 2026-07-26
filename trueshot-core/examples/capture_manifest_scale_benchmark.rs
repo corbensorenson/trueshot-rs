@@ -88,10 +88,10 @@ fn run(count: u64, root: &Path, keep: bool) -> Result<()> {
         .context("Current process is absent from system telemetry")?
         .memory();
     let read_started = Instant::now();
-    let mut reader = CaptureManifestReader::open(&path)?;
+    let reader = CaptureManifestReader::open(&path)?;
     let mut read = 0u64;
     let mut peak_rss = baseline_rss;
-    while let Some(group) = reader.next() {
+    for group in reader {
         let group = group?;
         if group.sequence.paths.len() != 2 {
             anyhow::bail!("Scale manifest group has wrong frame count");

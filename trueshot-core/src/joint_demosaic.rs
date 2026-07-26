@@ -52,7 +52,7 @@ pub enum PixelSelection<'a> {
 ///      a. For each exposure in that plane:
 ///         - Get full RGB triplet (interpolate missing channels)
 ///         - Apply HDR weight and focus plane blend weight
-///      b. Accumulate weighted RGB triplets
+///           b. Accumulate weighted RGB triplets
 ///    - Normalize by total weight
 /// 2. Apply white balance to final RGB image
 ///
@@ -81,7 +81,7 @@ pub fn joint_demosaic_with_focus_selection(
 
     // Calculate number of focus planes
     let num_planes = if num_exposures > 0 {
-        (frames.len() + num_exposures - 1) / num_exposures
+        frames.len().div_ceil(num_exposures)
     } else {
         1
     };

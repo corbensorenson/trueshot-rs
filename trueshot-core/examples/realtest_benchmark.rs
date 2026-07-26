@@ -424,8 +424,10 @@ fn main() -> Result<()> {
         None => None,
     };
 
-    let mut options = ProcessingOptions::default();
-    options.verbose_timing = false;
+    let options = ProcessingOptions {
+        verbose_timing: false,
+        ..ProcessingOptions::default()
+    };
     let geometry_options = geometry_options_from_env();
 
     let loader = SmartLoader::new(options);

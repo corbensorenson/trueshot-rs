@@ -36,12 +36,12 @@ impl ClusterNode {
 
         let now = std::time::Instant::now();
         while now.elapsed() < Duration::from_secs(1) {
-            if let Ok(event) = receiver.recv_timeout(Duration::from_millis(100)) {
-                if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
-                    let addrs = info.get_addresses();
-                    for addr in addrs {
-                        peers.push(format!("{}:{}", addr, info.get_port()));
-                    }
+            if let Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) =
+                receiver.recv_timeout(Duration::from_millis(100))
+            {
+                let addrs = info.get_addresses();
+                for addr in addrs {
+                    peers.push(format!("{}:{}", addr, info.get_port()));
                 }
             }
         }

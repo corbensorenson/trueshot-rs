@@ -28,9 +28,11 @@ fn main() -> Result<()> {
         .unwrap_or("unspecified")
         .to_string();
 
-    let mut options = ProcessingOptions::default();
-    options.full_decode = false;
-    options.max_parallel_sequences = workers;
+    let options = ProcessingOptions {
+        full_decode: false,
+        max_parallel_sequences: workers,
+        ..ProcessingOptions::default()
+    };
     let loader = SmartLoader::new(options);
     let sequences = loader.scan_and_group(&input)?;
     let mut arena = NativeGroupArena::default();

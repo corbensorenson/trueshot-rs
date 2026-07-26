@@ -52,8 +52,8 @@ pub fn gpu_compute_sharpness_masks(
     let tile_size = 1024; // Increased from 512 to reduce number of tiles
     let overlap = 2; // For 5×5 variance window
 
-    let tiles_x = (width + tile_size - 1) / tile_size;
-    let tiles_y = (height + tile_size - 1) / tile_size;
+    let tiles_x = width.div_ceil(tile_size);
+    let tiles_y = height.div_ceil(tile_size);
     let total_tiles = tiles_x * tiles_y * num_frames;
 
     tracing::info!(
@@ -104,8 +104,8 @@ fn compute_variance_map_tiled(
     let mut variance_map = Array2::<f64>::zeros((height, width));
 
     // Calculate tile grid
-    let tiles_x = (width + tile_size - 1) / tile_size;
-    let tiles_y = (height + tile_size - 1) / tile_size;
+    let tiles_x = width.div_ceil(tile_size);
+    let tiles_y = height.div_ceil(tile_size);
 
     // Process tiles in batches to maximize GPU utilization
     // Each tile is small, so we can process many at once
@@ -397,8 +397,8 @@ fn process_single_tile_with_shader(
         });
 
     let workgroup_size = 16;
-    let dispatch_x = (width as u32 + workgroup_size - 1) / workgroup_size;
-    let dispatch_y = (height as u32 + workgroup_size - 1) / workgroup_size;
+    let dispatch_x = (width as u32).div_ceil(workgroup_size);
+    let dispatch_y = (height as u32).div_ceil(workgroup_size);
 
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

@@ -61,11 +61,11 @@ impl GpuContext {
 
         // Request higher limits for large image processing
         // Start with defaults and increase storage buffer binding size
-        let mut limits = wgpu::Limits::default();
-
-        // Request the maximum storage buffer binding size the adapter supports
-        // This allows us to process larger images on GPU
-        limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
+        let limits = wgpu::Limits {
+            // Request the maximum supported size for large image buffers.
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            ..wgpu::Limits::default()
+        };
 
         tracing::info!(
             "Requesting max_storage_buffer_binding_size: {} MB",

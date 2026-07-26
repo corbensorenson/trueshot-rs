@@ -395,7 +395,7 @@ impl GpuRasterizer4D {
         let samples = self.config.motion_blur_samples.max(1);
         let dt = 1.0 / (scene.capture_fps * samples as f32);
 
-        projected.iter().cloned().collect()
+        projected.to_vec()
     }
 
     /// Tile-based rendering (main 3DGS optimization)
@@ -406,8 +406,8 @@ impl GpuRasterizer4D {
         height: usize,
     ) -> (Vec<[f32; 4]>, Vec<f32>) {
         let tile_size = self.config.base_config.tile_size as usize;
-        let tiles_x = (width + tile_size - 1) / tile_size;
-        let tiles_y = (height + tile_size - 1) / tile_size;
+        let tiles_x = width.div_ceil(tile_size);
+        let tiles_y = height.div_ceil(tile_size);
 
         // 1. Sort by depth (GPU radix sort would be used here)
         let mut sorted = projected.to_vec();

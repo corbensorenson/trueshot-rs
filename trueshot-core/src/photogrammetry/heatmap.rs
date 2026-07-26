@@ -317,4 +317,4 @@ pub fn get_heatmap_legend() -> Vec<(String, [u8; 3])> {
 
 #[cfg(test)]
 #[path = "./heatmap_tests.rs"]
-mod tests;
+mod coverage_tests;

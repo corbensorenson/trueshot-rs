@@ -4,6 +4,7 @@ use std::path::PathBuf;
 pub mod insta360;
 pub mod kinect;
 pub mod registry;
+mod thread_actor;
 pub mod webcam;
 
 #[cfg(feature = "gphoto2")]
@@ -180,9 +181,6 @@ impl LazyNokhwaCamera {
 }
 
 // Camera is Sync + Send
-unsafe impl Send for LazyNokhwaCamera {}
-unsafe impl Sync for LazyNokhwaCamera {}
-
 impl Camera for LazyNokhwaCamera {
     fn id(&self) -> String {
         if let nokhwa::utils::CameraIndex::Index(idx) = self.index {

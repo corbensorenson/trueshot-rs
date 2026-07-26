@@ -3,7 +3,6 @@ use wasmtime::*;
 
 /// Plugin System (WASM)
 /// Allows loading external .wasm modules to extend functionality via a safe sandbox.
-
 pub struct PluginEngine {
     engine: Engine,
     linker: Linker<()>,

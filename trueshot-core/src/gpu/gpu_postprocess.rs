@@ -180,8 +180,8 @@ pub fn gpu_postprocess(
         compute_pass.set_bind_group(0, &bind_group, &[]);
 
         // Dispatch with 16x16 workgroups
-        let workgroups_x = (width as u32 + 15) / 16;
-        let workgroups_y = (height as u32 + 15) / 16;
+        let workgroups_x = (width as u32).div_ceil(16);
+        let workgroups_y = (height as u32).div_ceil(16);
         compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
 

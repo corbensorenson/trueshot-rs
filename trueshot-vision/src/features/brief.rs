@@ -179,10 +179,10 @@ mod tests {
 
         // All values should be in [-15, 15]
         for &(x1, y1, x2, y2) in &brief.pattern {
-            assert!(x1 >= -15 && x1 <= 15);
-            assert!(y1 >= -15 && y1 <= 15);
-            assert!(x2 >= -15 && x2 <= 15);
-            assert!(y2 >= -15 && y2 <= 15);
+            assert!((-15..=15).contains(&x1));
+            assert!((-15..=15).contains(&y1));
+            assert!((-15..=15).contains(&x2));
+            assert!((-15..=15).contains(&y2));
         }
     }
 }

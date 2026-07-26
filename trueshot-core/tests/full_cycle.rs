@@ -65,7 +65,7 @@ async fn test_full_scan_cycle_mock() -> Result<()> {
     let director = Arc::new(Director::new(bus.clone(), cameras, turntable, None));
 
     use trueshot_core::project::ScanProject;
-    let project = ScanProject::new("Test Project", &temp_dir.path())?;
+    let project = ScanProject::new("Test Project", temp_dir.path())?;
     let mut rx = bus.subscribe();
     director.load_project(project).await?;
 
@@ -125,7 +125,7 @@ async fn empty_camera_capture_fails_without_deadlock() -> Result<()> {
         Box::new(MockTurntable::new()),
         None,
     );
-    let project = trueshot_core::project::ScanProject::new("No Camera", &temp_dir.path())?;
+    let project = trueshot_core::project::ScanProject::new("No Camera", temp_dir.path())?;
     director.load_project(project).await?;
 
     let mut rx = bus.subscribe();

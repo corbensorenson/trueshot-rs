@@ -195,9 +195,9 @@ fn load_obj(path: &Path) -> Result<Mesh> {
                     let b: f32 = b.parse().unwrap_or(1.0);
                     any_color = true;
                     Some([
-                        (r.max(0.0).min(1.0) * 255.0) as u8,
-                        (g.max(0.0).min(1.0) * 255.0) as u8,
-                        (b.max(0.0).min(1.0) * 255.0) as u8,
+                        (r.clamp(0.0, 1.0) * 255.0) as u8,
+                        (g.clamp(0.0, 1.0) * 255.0) as u8,
+                        (b.clamp(0.0, 1.0) * 255.0) as u8,
                     ])
                 } else {
                     None

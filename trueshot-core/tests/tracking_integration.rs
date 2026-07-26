@@ -26,7 +26,7 @@ fn make_segment(id: Uuid, bounds: BoundingBox3D) -> SegmentedObject {
 fn create_clustered_points(num_clusters: usize, points_per_cluster: usize) -> Vec<na::Point3<f32>> {
     let mut points = Vec::with_capacity(num_clusters * points_per_cluster);
 
-    let cluster_centers = vec![
+    let cluster_centers = [
         na::Point3::new(0.0, 0.0, 0.0),
         na::Point3::new(5.0, 0.0, 0.0),
         na::Point3::new(0.0, 5.0, 0.0),

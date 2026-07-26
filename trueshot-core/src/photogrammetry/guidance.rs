@@ -50,22 +50,23 @@ pub enum GuidanceMessage {
     Custom(String), // Custom message
 }
 
-impl GuidanceMessage {
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for GuidanceMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StartScanning => "Click 'Start New Scan' to begin".to_string(),
-            Self::RotateObject => "Slowly rotate the object".to_string(),
-            Self::RotateInDirection(dir) => format!(
+            Self::StartScanning => formatter.write_str("Click 'Start New Scan' to begin"),
+            Self::RotateObject => formatter.write_str("Slowly rotate the object"),
+            Self::RotateInDirection(direction) => write!(
+                formatter,
                 "{} {} to scan missing areas",
-                dir.to_arrow(),
-                dir.to_description()
+                direction.to_arrow(),
+                direction.to_description()
             ),
-            Self::RotateToShowCavity => "Rotate to show hidden areas".to_string(),
-            Self::MoveCloser => "Move cameras closer for more detail".to_string(),
-            Self::MoveFurther => "Move cameras back to see full object".to_string(),
-            Self::GoodCoverage => "✅ Good coverage - continue scanning".to_string(),
-            Self::ReadyToExport => "🎉 Scan complete - ready to export!".to_string(),
-            Self::Custom(msg) => msg.clone(),
+            Self::RotateToShowCavity => formatter.write_str("Rotate to show hidden areas"),
+            Self::MoveCloser => formatter.write_str("Move cameras closer for more detail"),
+            Self::MoveFurther => formatter.write_str("Move cameras back to see full object"),
+            Self::GoodCoverage => formatter.write_str("✅ Good coverage - continue scanning"),
+            Self::ReadyToExport => formatter.write_str("🎉 Scan complete - ready to export!"),
+            Self::Custom(message) => formatter.write_str(message),
         }
     }
 }

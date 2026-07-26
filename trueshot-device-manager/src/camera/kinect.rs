@@ -89,10 +89,6 @@ pub struct KinectCamera {
     current_stream: Arc<Mutex<KinectStreamType>>,
 }
 
-// Kinect is thread-safe with interior mutability
-unsafe impl Send for KinectCamera {}
-unsafe impl Sync for KinectCamera {}
-
 impl KinectCamera {
     /// Kinect USB Vendor/Product IDs
     pub const VENDOR_ID: u16 = 0x045e; // Microsoft

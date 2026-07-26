@@ -299,55 +299,7 @@ enum Commands {
 #[derive(Subcommand)]
 enum JobsCommand {
     /// Submit a pipeline job to the server
-    Submit {
-        /// Job kind (e.g. unified_photogrammetry, unified_gaussian_splatting)
-        #[arg(long)]
-        kind: String,
-
-        /// Job display name
-        #[arg(long)]
-        name: String,
-
-        /// Request id (optional, enables idempotency)
-        #[arg(long)]
-        request_id: Option<String>,
-
-        /// JSON payload string
-        #[arg(long)]
-        payload: Option<String>,
-
-        /// JSON payload file path
-        #[arg(long)]
-        payload_file: Option<PathBuf>,
-
-        /// Workspace path for unified jobs
-        #[arg(long)]
-        workspace: Option<PathBuf>,
-
-        /// Livescan path for unified jobs
-        #[arg(long)]
-        livescan: Option<PathBuf>,
-
-        /// DSLR path for unified jobs
-        #[arg(long)]
-        dslr: Option<PathBuf>,
-
-        /// Job type override (gaussian_splatting or photogrammetry)
-        #[arg(long)]
-        job_type: Option<String>,
-
-        /// Webhook URL for status callbacks
-        #[arg(long)]
-        webhook_url: Option<String>,
-
-        /// Server base URL (defaults to config server.host/server.port)
-        #[arg(long)]
-        server: Option<String>,
-
-        /// API token (defaults to TRUESHOT_API_TOKEN)
-        #[arg(long)]
-        api_token: Option<String>,
-    },
+    Submit(Box<JobsSubmitArgs>),
 
     /// List pipeline jobs
     List {
@@ -374,6 +326,57 @@ enum JobsCommand {
         #[arg(long)]
         api_token: Option<String>,
     },
+}
+
+#[derive(clap::Args)]
+struct JobsSubmitArgs {
+    /// Job kind (e.g. unified_photogrammetry, unified_gaussian_splatting)
+    #[arg(long)]
+    kind: String,
+
+    /// Job display name
+    #[arg(long)]
+    name: String,
+
+    /// Request id (optional, enables idempotency)
+    #[arg(long)]
+    request_id: Option<String>,
+
+    /// JSON payload string
+    #[arg(long)]
+    payload: Option<String>,
+
+    /// JSON payload file path
+    #[arg(long)]
+    payload_file: Option<PathBuf>,
+
+    /// Workspace path for unified jobs
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    /// Livescan path for unified jobs
+    #[arg(long)]
+    livescan: Option<PathBuf>,
+
+    /// DSLR path for unified jobs
+    #[arg(long)]
+    dslr: Option<PathBuf>,
+
+    /// Job type override (gaussian_splatting or photogrammetry)
+    #[arg(long)]
+    job_type: Option<String>,
+
+    /// Webhook URL for status callbacks
+    #[arg(long)]
+    webhook_url: Option<String>,
+
+    /// Server base URL (defaults to config server.host/server.port)
+    #[arg(long)]
+    server: Option<String>,
+
+    /// API token (defaults to TRUESHOT_API_TOKEN)
+    #[arg(long)]
+    api_token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1717,14 +1720,15 @@ fn burst_group_output_path(
 }
 
 fn native_fusion_config(quality: Quality) -> NativeFusionConfig {
-    let mut config = NativeFusionConfig::default();
-    config.analysis_max_dimension = match quality {
-        Quality::Low => 384,
-        Quality::Medium => 512,
-        Quality::High => 768,
-        Quality::Ultra => 1024,
-    };
-    config
+    NativeFusionConfig {
+        analysis_max_dimension: match quality {
+            Quality::Low => 384,
+            Quality::Medium => 512,
+            Quality::High => 768,
+            Quality::Ultra => 1024,
+        },
+        ..NativeFusionConfig::default()
+    }
 }
 
 fn run_reconstruction_pipeline(
@@ -1922,11 +1926,13 @@ fn build_processing_options(
     _no_gpu: bool,
     full_frame: bool,
 ) -> ProcessingOptions {
-    let mut options = ProcessingOptions::default();
-    options.max_parallel_sequences = jobs;
-    options.export_format = "tiff16".to_string();
-    options.verbose_timing = matches!(quality, Quality::High | Quality::Ultra);
-    options.full_decode = full_frame;
+    let mut options = ProcessingOptions {
+        max_parallel_sequences: jobs,
+        export_format: "tiff16".to_string(),
+        verbose_timing: matches!(quality, Quality::High | Quality::Ultra),
+        full_decode: full_frame,
+        ..ProcessingOptions::default()
+    };
 
     match quality {
         Quality::Low => {
@@ -2668,14 +2674,15 @@ fn run_gaussian_splatting(
 }
 
 fn training_config_from_quality(quality: Quality) -> TrainingConfig {
-    let mut config = TrainingConfig::default();
-    config.iterations = match quality {
-        Quality::Low => 1000,
-        Quality::Medium => 3000,
-        Quality::High => 8000,
-        Quality::Ultra => 20000,
-    };
-    config
+    TrainingConfig {
+        iterations: match quality {
+            Quality::Low => 1000,
+            Quality::Medium => 3000,
+            Quality::High => 8000,
+            Quality::Ultra => 20000,
+        },
+        ..TrainingConfig::default()
+    }
 }
 
 fn config_file_path() -> PathBuf {
@@ -2716,12 +2723,14 @@ fn save_config_doc(doc: &TomlValue) -> Result<()> {
 
 fn parse_toml_value(raw: &str) -> TomlValue {
     let wrapped = format!("value = {}", raw);
-    if let Ok(parsed) = toml::from_str::<TomlValue>(&wrapped) {
-        if let TomlValue::Table(map) = parsed {
-            if let Some(value) = map.get("value") {
-                return value.clone();
-            }
-        }
+    let parsed_value = toml::from_str::<TomlValue>(&wrapped)
+        .ok()
+        .and_then(|parsed| match parsed {
+            TomlValue::Table(map) => map.get("value").cloned(),
+            _ => None,
+        });
+    if let Some(value) = parsed_value {
+        return value;
     }
     TomlValue::String(raw.to_string())
 }
@@ -3486,33 +3495,36 @@ fn cmd_config(action: ConfigAction) -> Result<()> {
 
 fn cmd_jobs(action: JobsCommand) -> Result<()> {
     match action {
-        JobsCommand::Submit {
-            kind,
-            name,
-            request_id,
-            payload,
-            payload_file,
-            workspace,
-            livescan,
-            dslr,
-            job_type,
-            webhook_url,
-            server,
-            api_token,
-        } => cmd_jobs_submit(
-            kind,
-            name,
-            request_id,
-            payload,
-            payload_file,
-            workspace,
-            livescan,
-            dslr,
-            job_type,
-            webhook_url,
-            server,
-            api_token,
-        ),
+        JobsCommand::Submit(args) => {
+            let JobsSubmitArgs {
+                kind,
+                name,
+                request_id,
+                payload,
+                payload_file,
+                workspace,
+                livescan,
+                dslr,
+                job_type,
+                webhook_url,
+                server,
+                api_token,
+            } = *args;
+            cmd_jobs_submit(
+                kind,
+                name,
+                request_id,
+                payload,
+                payload_file,
+                workspace,
+                livescan,
+                dslr,
+                job_type,
+                webhook_url,
+                server,
+                api_token,
+            )
+        }
         JobsCommand::List { server, api_token } => cmd_jobs_list(server, api_token),
         JobsCommand::Get {
             id,

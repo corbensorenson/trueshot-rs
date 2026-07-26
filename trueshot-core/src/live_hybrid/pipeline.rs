@@ -301,8 +301,10 @@ impl LiveHybridPipeline {
             }
 
             if let Some(bound) = self.avatar_tracker.get_bound(tracked.id) {
-                let mut transform = super::scene_graph::Transform3D::default();
-                transform.position = tracked.current.centroid.coords;
+                let transform = super::scene_graph::Transform3D {
+                    position: tracked.current.centroid.coords,
+                    ..super::scene_graph::Transform3D::default()
+                };
 
                 let bone_transforms = bound.current_skeleton.skinning_matrices.clone();
                 let blendshape_weights = collect_blendshape_weights(&bound.avatar);

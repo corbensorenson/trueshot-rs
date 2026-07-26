@@ -82,7 +82,7 @@ pub fn analyze_focus_exposure_pattern(metadata: &[FrameMetadata]) -> Result<Focu
         total_images / exposures_per_plane
     } else {
         // Best fit
-        (total_images + exposures_per_plane - 1) / exposures_per_plane
+        total_images.div_ceil(exposures_per_plane)
     };
 
     tracing::info!(

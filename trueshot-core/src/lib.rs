@@ -50,7 +50,6 @@ pub mod validation;
 // Re-export specialized crates
 pub use trueshot_calibration as calibration;
 #[cfg(feature = "vision")]
-#[cfg(feature = "vision")]
 pub use trueshot_vision as vision;
 
 #[cfg(not(feature = "vision"))]

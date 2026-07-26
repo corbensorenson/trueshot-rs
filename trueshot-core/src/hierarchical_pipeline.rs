@@ -360,6 +360,35 @@ fn standard_collapse_frames(frames: &[Array3<f64>]) -> Result<Array2<f64>> {
     Ok(result)
 }
 
+/// Apply median filter to focus plane map to smooth transitions
+///
+/// This reduces speckle artifacts from hard focus plane boundaries.
+fn median_filter_focus_plane(plane_map: &Array2<usize>, kernel_size: usize) -> Array2<usize> {
+    let (height, width) = plane_map.dim();
+    let mut filtered = plane_map.clone();
+    let radius = kernel_size / 2;
+
+    for y in 0..height {
+        for x in 0..width {
+            // Collect neighboring values
+            let mut neighbors = Vec::new();
+            for dy in -(radius as isize)..=(radius as isize) {
+                for dx in -(radius as isize)..=(radius as isize) {
+                    let ny = (y as isize + dy).max(0).min(height as isize - 1) as usize;
+                    let nx = (x as isize + dx).max(0).min(width as isize - 1) as usize;
+                    neighbors.push(plane_map[[ny, nx]]);
+                }
+            }
+
+            // Compute median
+            neighbors.sort_unstable();
+            filtered[[y, x]] = neighbors[neighbors.len() / 2];
+        }
+    }
+
+    filtered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,7 +420,7 @@ mod tests {
             for y in 0..100 {
                 for x in 0..100 {
                     let val = stack[[y, x, n]];
-                    assert!(val >= 0.0 && val <= 1.0, "Value {} out of range", val);
+                    assert!((0.0..=1.0).contains(&val), "Value {} out of range", val);
                 }
             }
         }
@@ -444,7 +473,7 @@ mod tests {
                     for x in 0..100 {
                         let val = bayer[[y, x]];
                         assert!(
-                            val >= 0.0 && val <= 1.0,
+                            (0.0..=1.0).contains(&val),
                             "Value {} out of range at ({}, {})",
                             val,
                             y,
@@ -491,8 +520,10 @@ mod tests {
             .collect();
 
         let grading_params = GradingParams::default();
-        let mut collapse_params = HierarchicalParams::default();
-        collapse_params.sr_factor = SRFactor::SR2x;
+        let collapse_params = HierarchicalParams {
+            sr_factor: SRFactor::SR2x,
+            ..HierarchicalParams::default()
+        };
 
         // Test: 5 frames = 1 focus plane × 5 exposures
         let result = hierarchical_process(
@@ -569,7 +600,7 @@ mod tests {
         for y in 0..20 {
             for x in 0..20 {
                 let val = upsampled[[y, x]];
-                assert!(val >= 0.0 && val <= 1.0);
+                assert!((0.0..=1.0).contains(&val));
             }
         }
     }
@@ -607,33 +638,4 @@ mod tests {
 
         Ok(output)
     }
-}
-
-/// Apply median filter to focus plane map to smooth transitions
-///
-/// This reduces speckle artifacts from hard focus plane boundaries.
-fn median_filter_focus_plane(plane_map: &Array2<usize>, kernel_size: usize) -> Array2<usize> {
-    let (height, width) = plane_map.dim();
-    let mut filtered = plane_map.clone();
-    let radius = kernel_size / 2;
-
-    for y in 0..height {
-        for x in 0..width {
-            // Collect neighboring values
-            let mut neighbors = Vec::new();
-            for dy in -(radius as isize)..=(radius as isize) {
-                for dx in -(radius as isize)..=(radius as isize) {
-                    let ny = (y as isize + dy).max(0).min(height as isize - 1) as usize;
-                    let nx = (x as isize + dx).max(0).min(width as isize - 1) as usize;
-                    neighbors.push(plane_map[[ny, nx]]);
-                }
-            }
-
-            // Compute median
-            neighbors.sort_unstable();
-            filtered[[y, x]] = neighbors[neighbors.len() / 2];
-        }
-    }
-
-    filtered
 }

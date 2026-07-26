@@ -5,7 +5,6 @@ use std::io::{Seek, Write};
 /// Point Cloud Octree (.pco) Format
 /// Header: Magic (4) | Version (4) | Bounds (24) | Root Offset (8)
 /// Node: ChildMask (1) | PointCount (4) | PointsOffset (8) | ChildrenOffsets (8*8)
-
 pub struct PointOctreeWriter {
     file: File,
 }

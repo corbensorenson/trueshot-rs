@@ -567,8 +567,11 @@ pub async fn create_license_trial_self(
 
     let duration_days = payload.duration_days.unwrap_or(14).clamp(1, 30);
     let bundles = payload.bundles.clone().unwrap_or_default();
-    let mut gate = state.license_gate.lock().unwrap();
-    match gate.create_trial(duration_days, &bundles) {
+    let trial_result = {
+        let mut gate = state.license_gate.lock().unwrap();
+        gate.create_trial(duration_days, &bundles)
+    };
+    match trial_result {
         Ok(snapshot) => {
             let issued_at = chrono::Utc::now().to_rfc3339();
             let payload = serde_json::json!({

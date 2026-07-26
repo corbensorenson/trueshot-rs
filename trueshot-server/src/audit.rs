@@ -137,7 +137,7 @@ impl AuditLog {
         };
         let reader = BufReader::new(file);
         let mut records = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.trim().is_empty() {
                 continue;
             }
@@ -159,7 +159,7 @@ impl AuditLog {
         };
         let reader = BufReader::new(file);
         let mut prev_hash = "genesis".to_string();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.trim().is_empty() {
                 continue;
             }
@@ -565,7 +565,7 @@ fn read_audit_records(path: &Path) -> Result<Vec<AuditRecord>> {
     };
     let reader = BufReader::new(file);
     let mut records = Vec::new();
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if line.trim().is_empty() {
             continue;
         }
@@ -583,7 +583,7 @@ fn read_anchor_records(path: &Path) -> Result<Vec<AuditAnchorRecord>> {
     };
     let reader = BufReader::new(file);
     let mut records = Vec::new();
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if line.trim().is_empty() {
             continue;
         }
@@ -609,7 +609,7 @@ fn read_last_hash(path: &Path) -> Option<String> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
     let mut last_line = None;
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if !line.trim().is_empty() {
             last_line = Some(line);
         }

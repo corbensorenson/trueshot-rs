@@ -42,5 +42,10 @@ calibration = ["opencv"]
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
+
+[[example]]
+name = "gphoto_test"
+required-features = ["real_cam"]
+
 [lints]
 workspace = true

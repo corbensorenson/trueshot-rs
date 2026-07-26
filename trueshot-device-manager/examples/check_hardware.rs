@@ -1,4 +1,3 @@
-use serialport;
 use trueshot_device_manager::{CameraManager, CameraRole};
 
 #[tokio::main]

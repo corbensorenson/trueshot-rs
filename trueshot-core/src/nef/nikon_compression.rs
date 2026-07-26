@@ -1170,10 +1170,6 @@ impl NikonDecompressor {
             roi_pixels
         );
 
-        // Smart strategy: Try optimized version first for performance, fall back if needed
-        let roi_coverage = (roi_height as f32 / height as f32) * (roi_width as f32 / width as f32);
-        let skip_ratio = roi_start_row as f32 / height as f32;
-
         let roi = SelectiveRoi {
             start_row: roi_start_row,
             end_row: roi_end_row,
@@ -1181,30 +1177,8 @@ impl NikonDecompressor {
             end_col: roi_end_col,
         };
 
-        // DISABLED: Optimized version is broken - it only returns data in first row
-        // Always use standard decompression which maintains proper decoder state
-        if false && skip_ratio > 0.3 && roi_coverage < 0.5 {
-            tracing::info!(
-                "ROI coverage {:.1}%, skip ratio {:.1}% - trying optimized decompression first",
-                roi_coverage * 100.0,
-                skip_ratio * 100.0
-            );
-
-            match self.decompress_selective_optimized(compressed_data, width, height, roi) {
-                Ok(result) => {
-                    tracing::info!("✅ Optimized decompression succeeded");
-                    return Ok(result);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "⚠️  Optimized decompression failed: {} - falling back to standard",
-                        e
-                    );
-                }
-            }
-        }
-
-        tracing::info!("Using standard decompression (maintains proper decoder state)");
+        // Predictive Nikon entropy streams require exact state evolution from
+        // restart boundaries; approximate byte seeking can silently corrupt pixels.
         self.decompress_selective_standard(compressed_data, width, height, roi)
     }
 
@@ -1323,172 +1297,6 @@ impl NikonDecompressor {
                 }
                 tracing::info!("Bayer row {}: {}", y, row_str);
             }
-        }
-
-        Ok(image)
-    }
-
-    /// Optimized selective decompression with row-skipping for small ROIs
-    fn decompress_selective_optimized(
-        &self,
-        compressed_data: &[u8],
-        width: u32,
-        height: u32,
-        roi: SelectiveRoi,
-    ) -> Result<Vec<u16>> {
-        let mut image = vec![0u16; roi.pixels()];
-
-        tracing::info!(
-            "Optimized decompression: skipping to row {}, processing {} rows",
-            roi.start_row,
-            roi.height()
-        );
-
-        // Build LibRaw-compatible Huffman table
-        let tree = self.build_huffman_tree_from_meta()?;
-        let huff_table = self.create_libraw_huffman_decoder(&tree)?;
-
-        // Strategy: Estimate bit position for target row and jump there
-        // This is an approximation but much faster than processing all rows
-
-        // Calculate approximate bits per pixel based on compression ratio
-        let total_bits = compressed_data.len() * 8;
-        let total_pixels = (width * height) as usize;
-        let approx_bits_per_pixel = total_bits as f32 / total_pixels as f32;
-
-        // Estimate bit position for ROI start with better accuracy
-        let pixels_before_roi = (roi.start_row * width) as usize;
-        let estimated_bit_offset = (pixels_before_roi as f32 * approx_bits_per_pixel) as usize / 8;
-
-        // Use more conservative skipping - start well before estimated position
-        // This accounts for variable bit rates and prediction dependencies
-        let safety_factor = if roi.start_row < height / 4 { 0.6 } else { 0.7 };
-        let safe_offset = (estimated_bit_offset as f32 * safety_factor) as usize;
-        let skip_bytes = safe_offset.min(compressed_data.len() / 3);
-
-        tracing::info!(
-            "Estimated {:.2} bits/pixel, skipping {} bytes ({:.1}% of data)",
-            approx_bits_per_pixel,
-            skip_bytes,
-            skip_bytes as f32 / compressed_data.len() as f32 * 100.0
-        );
-
-        // Initialize bit reader with offset
-        let mut bit_reader = LibRawBitReader::new(&compressed_data[skip_bytes..]);
-
-        // Estimate vertical predictors for the target row
-        // Use a simple linear interpolation between initial predictors and typical values
-        let progress = roi.start_row as f32 / height as f32;
-        let mut vpred = self.meta.vpred;
-
-        // Gradually evolve predictors based on typical image characteristics
-        for (i, row) in vpred.iter_mut().enumerate() {
-            for j in 0..2 {
-                let initial = self.meta.vpred[i][j] as f32;
-                let typical = 2048.0; // Typical mid-range value for 14-bit
-                row[j] = (initial * (1.0 - progress) + typical * progress) as u16;
-            }
-        }
-
-        tracing::info!("Estimated vpred for row {}: {:?}", roi.start_row, vpred);
-
-        // Process ROI rows with estimated predictors
-        let mut successful_rows = 0;
-        for row_offset in 0..roi.height() {
-            let row = roi.start_row + row_offset;
-            let mut hpred = [0i32; 2];
-            let bits = self.meta.bits_per_sample;
-
-            // Try to decode this row
-            let mut row_pixels = Vec::with_capacity(roi.width() as usize);
-            let mut decode_success = true;
-
-            for col in roi.start_col..roi.end_col {
-                // Try to decode Huffman symbol
-                match bit_reader.gethuff(&huff_table) {
-                    Ok(i) => {
-                        let len = i & 15;
-                        let shl = i >> 4;
-
-                        let mut diff: i32 = 0;
-                        if len > 0 {
-                            match bit_reader.getbits((len - shl) as i32) {
-                                Ok(bits_read) => {
-                                    let val = (((bits_read << 1) + 1) << shl) >> 1;
-                                    diff = val as i32;
-                                    if (diff & (1 << (len - 1))) == 0 {
-                                        diff -= (1 << len) - if shl == 0 { 1 } else { 0 };
-                                    }
-                                }
-                                Err(_) => {
-                                    decode_success = false;
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Apply prediction
-                        let predicted = if col < 2 {
-                            hpred[col as usize] =
-                                vpred[row as usize & 1][col as usize] as i32 + diff;
-                            vpred[row as usize & 1][col as usize] = hpred[col as usize] as u16;
-                            hpred[col as usize]
-                        } else {
-                            hpred[col as usize & 1] += diff;
-                            hpred[col as usize & 1]
-                        };
-
-                        let clamped_value = predicted.max(0).min((1 << bits) - 1) as u16;
-                        row_pixels.push(clamped_value);
-                    }
-                    Err(_) => {
-                        decode_success = false;
-                        break;
-                    }
-                }
-            }
-
-            if decode_success && row_pixels.len() == roi.width() as usize {
-                // Successfully decoded this row
-                for (col_idx, &pixel_value) in row_pixels.iter().enumerate() {
-                    let roi_pixel_idx = (row_offset * roi.width() + col_idx as u32) as usize;
-                    if roi_pixel_idx < image.len() {
-                        image[roi_pixel_idx] = pixel_value;
-                    }
-                }
-                successful_rows += 1;
-            } else {
-                // Decoding failed - fall back to interpolation or standard method
-                tracing::warn!("Optimized decoding failed at row {} - using fallback", row);
-
-                // For failed rows, use simple interpolation from surrounding successful rows
-                if successful_rows > 0 {
-                    // Copy from previous successful row
-                    let prev_row_start = ((row_offset.saturating_sub(1)) * roi.width()) as usize;
-                    for col_idx in 0..roi.width() as usize {
-                        let roi_pixel_idx = (row_offset * roi.width() + col_idx as u32) as usize;
-                        if roi_pixel_idx < image.len() && prev_row_start + col_idx < image.len() {
-                            image[roi_pixel_idx] = image[prev_row_start + col_idx];
-                        }
-                    }
-                }
-            }
-        }
-
-        let success_rate = successful_rows as f32 / roi.height() as f32 * 100.0;
-        tracing::info!(
-            "Optimized decompression completed: {}/{} rows decoded successfully ({:.1}%)",
-            successful_rows,
-            roi.height(),
-            success_rate
-        );
-
-        // If success rate is too low, return error to trigger fallback
-        if success_rate < 80.0 {
-            return Err(anyhow::anyhow!(
-                "Low success rate ({:.1}%) in optimized decompression",
-                success_rate
-            ));
         }
 
         Ok(image)

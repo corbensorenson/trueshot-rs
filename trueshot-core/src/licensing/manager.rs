@@ -717,11 +717,7 @@ fn decode_public_key_bytes(bytes: &[u8]) -> Result<VerifyingKey, LicenseError> {
 fn decode_hex_key(hex: &str) -> Result<Vec<u8>, LicenseError> {
     let mut out = Vec::with_capacity(hex.len() / 2);
     let mut chars = hex.chars().filter(|c| !c.is_whitespace());
-    loop {
-        let hi = match chars.next() {
-            Some(c) => c,
-            None => break,
-        };
+    while let Some(hi) = chars.next() {
         let lo = chars
             .next()
             .ok_or_else(|| LicenseError::InvalidSignature("Odd-length hex key".to_string()))?;

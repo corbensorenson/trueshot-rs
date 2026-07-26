@@ -340,7 +340,7 @@ fn build_input_nchw(rgb: &image::RgbImage) -> (Vec<usize>, Vec<f32>) {
             let g = pixel[1] as f32 / 255.0;
             let b = pixel[2] as f32 / 255.0;
             let base = y * w + x;
-            data[0 * h * w + base] = r;
+            data[base] = r;
             data[h * w + base] = g;
             data[2 * h * w + base] = b;
         }

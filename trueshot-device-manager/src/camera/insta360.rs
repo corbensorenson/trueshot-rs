@@ -1,14 +1,8 @@
+use super::thread_actor::ThreadOwnedCamera;
 use super::{Camera as TetherCamera, CameraConfig};
 use anyhow::{anyhow, Result};
-use nokhwa::{
-    pixel_format::RgbFormat,
-    utils::{
-        CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
-    },
-    Camera,
-};
+use nokhwa::utils::{CameraFormat, FrameFormat, RequestedFormatType, Resolution};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 pub trait Gimbal: Send + Sync {
     fn set_pan_tilt(&self, pan_deg: f32, tilt_deg: f32) -> Result<()>;
@@ -17,18 +11,13 @@ pub trait Gimbal: Send + Sync {
 }
 
 pub struct Insta360Link {
-    camera: Option<Arc<Mutex<Camera>>>,
+    camera: ThreadOwnedCamera,
     id: String,
 }
 
-unsafe impl Send for Insta360Link {}
-unsafe impl Sync for Insta360Link {}
-
 impl Insta360Link {
     pub fn new(index: u32) -> Result<Self> {
-        let index_val = CameraIndex::Index(index);
-
-        let formats_to_try = [
+        let formats_to_try = vec![
             RequestedFormatType::AbsoluteHighestFrameRate,
             RequestedFormatType::AbsoluteHighestResolution,
             RequestedFormatType::Closest(CameraFormat::new(
@@ -48,35 +37,15 @@ impl Insta360Link {
             )),
         ];
 
-        let mut camera = None;
-
-        for format_type in formats_to_try {
-            let format = RequestedFormat::new::<RgbFormat>(format_type);
-            match Camera::new(index_val.clone(), format) {
-                Ok(mut cam) => {
-                    if let Err(e) = cam.open_stream() {
-                        tracing::warn!("Failed to open stream with {:?}: {}", format_type, e);
-                        continue;
-                    }
-                    camera = Some(Arc::new(Mutex::new(cam)));
-                    break;
-                }
-                Err(e) => {
-                    tracing::debug!("Format {:?} failed: {}", format_type, e);
-                }
-            }
-        }
-
-        if camera.is_none() {
+        let id = format!("Insta360_{index}");
+        let camera = ThreadOwnedCamera::open(index, id.clone(), formats_to_try, true)?;
+        if !camera.is_available() {
             tracing::error!(
                 "Failed to initialize Insta360 camera stream. Proceeding in Gimbal-Only mode."
             );
         }
 
-        Ok(Self {
-            camera,
-            id: format!("Insta360_{}", index),
-        })
+        Ok(Self { camera, id })
     }
 }
 
@@ -86,66 +55,15 @@ impl TetherCamera for Insta360Link {
     }
 
     fn capture(&self, _config: &CameraConfig) -> Result<PathBuf> {
-        if let Some(cam_mutex) = &self.camera {
-            let mut cam = cam_mutex.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-            let frame = cam.frame()?;
-
-            let filename = format!("capture_{}_{}.jpg", self.id, chrono::Utc::now().timestamp());
-            let path = std::env::temp_dir().join(filename);
-
-            match frame.source_frame_format() {
-                FrameFormat::MJPEG => {
-                    std::fs::write(&path, frame.buffer())?;
-                }
-                _ => {
-                    let image_buffer = frame.decode_image::<nokhwa::pixel_format::RgbFormat>()?;
-                    image_buffer.save(&path)?;
-                }
-            }
-            Ok(path)
-        } else {
-            Err(anyhow!("Camera stream not available (Gimbal-only mode)"))
-        }
+        self.camera.capture()
     }
 
     fn capture_preview(&self) -> Result<Vec<u8>> {
-        if let Some(cam_mutex) = &self.camera {
-            let mut cam = cam_mutex.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-            let frame = cam.frame()?;
-
-            if frame.source_frame_format() == FrameFormat::MJPEG {
-                return Ok(frame.buffer().to_vec());
-            }
-
-            let image_buffer = frame.decode_image::<nokhwa::pixel_format::RgbFormat>()?;
-            let mut bytes: Vec<u8> = Vec::new();
-            image_buffer.write_to(
-                &mut std::io::Cursor::new(&mut bytes),
-                image::ImageFormat::Jpeg,
-            )?;
-            Ok(bytes)
-        } else {
-            Err(anyhow!("Camera stream not available"))
-        }
+        self.camera.preview()
     }
 
     fn set_config(&self, config: &CameraConfig) -> Result<()> {
-        if let Some(cam_mutex) = &self.camera {
-            if let Some((w, h)) = config.resolution {
-                let mut cam = cam_mutex.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-                let current = cam.camera_format();
-                if current.resolution() != Resolution::new(w, h) {
-                    tracing::info!("Changing resolution to {}x{}", w, h);
-                    cam.stop_stream()?;
-                    let new_fmt = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
-                        CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 30),
-                    ));
-                    cam.set_camera_requset(new_fmt)?;
-                    cam.open_stream()?;
-                }
-            }
-        }
-        Ok(())
+        self.camera.configure(config.clone())
     }
 
     fn ptz(&self, pan: f32, tilt: f32, zoom: f32) -> Result<()> {

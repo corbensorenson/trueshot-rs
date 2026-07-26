@@ -581,9 +581,7 @@ impl GaussianCloud {
                 let grad_r = grad_sym * r * l;
                 rotation_grad[idx] = rotation_grad_from_matrix(&grad_r, g.rotation);
             }
-            for coeff in 0..SH_COEFFS_TOTAL {
-                sh_grad[idx][coeff] = grad_sh[coeff];
-            }
+            sh_grad[idx][..SH_COEFFS_TOTAL].copy_from_slice(&grad_sh[..SH_COEFFS_TOTAL]);
         }
 
         (

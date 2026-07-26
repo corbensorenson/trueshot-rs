@@ -152,8 +152,8 @@ impl GpuRasterizer {
             mapped_at_creation: false,
         });
 
-        let num_tiles_x = (config.width + config.tile_size - 1) / config.tile_size;
-        let num_tiles_y = (config.height + config.tile_size - 1) / config.tile_size;
+        let num_tiles_x = config.width.div_ceil(config.tile_size);
+        let num_tiles_y = config.height.div_ceil(config.tile_size);
         let tile_buffer_size =
             (num_tiles_x * num_tiles_y * (1 + config.max_gaussians_per_tile) * 4) as u64;
 
@@ -565,7 +565,7 @@ impl GpuRasterizer {
                 label: Some("Render Encoder"),
             });
 
-        let workgroups = (self.num_gaussians + 255) / 256;
+        let workgroups = self.num_gaussians.div_ceil(256);
 
         // 1. Project Gaussians to 2D
         {
@@ -633,7 +633,7 @@ impl GpuRasterizer {
     pub fn upload_ground_truth(&self, data: &[u8]) {
         let bytes_per_row = self.config.width * 4;
         let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = ((bytes_per_row + alignment - 1) / alignment) * alignment;
+        let padded_bytes_per_row = bytes_per_row.div_ceil(alignment) * alignment;
         let (upload_data, bytes_per_row) = if padded_bytes_per_row != bytes_per_row {
             let mut padded = vec![0u8; (padded_bytes_per_row * self.config.height) as usize];
             let row_bytes = bytes_per_row as usize;
@@ -676,7 +676,7 @@ impl GpuRasterizer {
                 label: Some("Gradient Encoder"),
             });
 
-        let workgroups = (self.num_gaussians + 255) / 256;
+        let workgroups = self.num_gaussians.div_ceil(256);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Gradient Pass"),

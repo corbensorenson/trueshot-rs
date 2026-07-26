@@ -14,6 +14,7 @@ Legend: **Shipping**, **In Progress**, **Planned**
 | Capture | HDR bracketing + focus stacking | In Progress | End-to-end hardware validation pending |
 | Capture | Burst capture + best-frame selection | In Progress | Capture path wired; full selection policy tuning pending |
 | Capture | Explicit, deadlock-safe scan workflows | Shipping | Project load is side-effect free; file-backed and no-camera integration tests enforce bounded startup/capture behavior |
+| Capture | Thread-affine webcam and 360-camera lifecycle | Shipping | Nokhwa handles stay on bounded dedicated actors with deadline, panic, shutdown, and atomic-capture tests; no unsafe thread assertions |
 | Capture | Group-amortized Nikon NEF ROI decode | Shipping | One scaled preview/bbox per HDR-focus group; bounded parallel decoders fill ordered slots in one reusable contiguous `u16` arena with no per-frame crop allocation or sidecar |
 | Capture | Streaming capture manifests | Shipping | Incremental atomic JSONL writer records explicit HDR/focus/burst order, one reference frame, stable content IDs and one reusable crop plan per group |
 | Processing | Native HDR + focus fusion | Shipping | Tiled `f32` fusion consumes the `u16` arena directly with lazy exposure/WB calibration, subpixel alignment, confidence and depth |
@@ -48,4 +49,5 @@ Legend: **Shipping**, **In Progress**, **Planned**
 | Platform | Role-based access + SSO | Planned | User/role management still missing |
 | Release | Signed installers + auto-update | Planned | Launcher signing not implemented |
 | Release | SBOM/SLSA attestations | Planned | Supply chain hardening in progress |
+| Release | Strict Rust quality gate | Shipping | Formatting, workspace tests, doctests, and strict default-feature Clippy pass for all targets |
 | Release | Executed benchmark smoke gates | In Progress | Public-API benchmarks execute in CI; deterministic full E2E quality fixture remains open |
