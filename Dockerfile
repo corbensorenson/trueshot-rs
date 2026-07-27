@@ -12,6 +12,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     libudev-dev \
     libdbus-1-dev \
+    libgphoto2-dev \
     libasound2-dev \
     libssl-dev \
     pkg-config \
@@ -70,6 +71,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libasound2 \
     libdbus-1-3 \
+    libgphoto2-6 \
     libssl3 \
     curl \
     && rm -rf /var/lib/apt/lists/*
