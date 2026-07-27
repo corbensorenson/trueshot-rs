@@ -245,10 +245,11 @@ impl NativeSequenceMemoryEstimate {
             .and_then(|value| value.checked_mul(2))
             .context("Native input arena estimate overflow")?;
         // Bayer, normalized/metric depth, confidence, radiance uncertainty,
-        // source map, provenance flags, spatial-correction map, glare map,
-        // physical boundary trimap, and foreground mask.
+        // low/detail source maps, provenance/frequency flags,
+        // spatial-correction map, glare map, physical boundary trimap, and
+        // foreground mask.
         let fusion_output_bytes = pixels
-            .checked_mul(27)
+            .checked_mul(30)
             .context("Native fusion output estimate overflow")?;
         let focus_halo = focus_coarse_stride
             .max(1)
@@ -258,17 +259,17 @@ impl NativeSequenceMemoryEstimate {
         let tile_edge = tile_size.saturating_add(focus_halo.saturating_mul(2)) as u64;
         // Extended plane state, native/trimmed focus evidence, glare
         // likelihood/distance/integrals, and the worst-case regional grid are
-        // 48 B/pixel.
+        // 51 B/pixel.
         // Tile state retains top-two regional/detail radiance evidence plus
-        // previous/adjacent responses and glare provenance: 66 B.
+        // previous/adjacent responses and full split-source provenance: 72 B.
         let scratch_per_worker = tile_edge
             .checked_mul(tile_edge)
-            .and_then(|value| value.checked_mul(48))
+            .and_then(|value| value.checked_mul(51))
             .and_then(|value| {
                 value.checked_add(
                     (tile_size as u64)
                         .checked_mul(tile_size as u64)?
-                        .checked_mul(66)?,
+                        .checked_mul(72)?,
                 )
             })
             .context("Native fusion scratch estimate overflow")?;
@@ -307,7 +308,7 @@ impl NativeSequenceMemoryEstimate {
         // Linear/display RGB, u8 preview, all retained fusion diagnostics, and
         // PNG's temporary conversions for the exact source/diagnostic maps.
         let postprocess_peak = pixels
-            .checked_mul(12 + 12 + 3 + 21 + 2 + 3)
+            .checked_mul(12 + 12 + 3 + 24 + 2 + 3)
             .and_then(|value| value.checked_add(12 * 1024 * 1024))
             .and_then(|value| value.checked_add(demosaic_scratch_bytes))
             .context("Native postprocess peak estimate overflow")?;
@@ -820,10 +821,11 @@ mod tests {
                 .unwrap();
         let peak_mib = estimate.peak_memory_bytes as f64 / (1024.0 * 1024.0);
         assert!(
-            (245.1..246.1).contains(&peak_mib),
+            (256.4..257.4).contains(&peak_mib),
             "peak was {peak_mib:.1} MiB"
         );
         assert_eq!(estimate.input_arena_bytes, 21 * 1310 * 1304 * 2);
+        assert_eq!(estimate.fusion_output_bytes, 30 * 1310 * 1304);
     }
 
     #[test]

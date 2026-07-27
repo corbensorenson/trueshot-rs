@@ -263,6 +263,27 @@ TrueShot should avoid a full-frame generative reconstruction and instead:
 
 Sources: [NTIRE 2025 Efficient Burst HDR and Restoration](https://arxiv.org/abs/2505.12089), [Recursive Multi-Exposure Alignment](https://openaccess.thecvf.com/content/CVPR2025W/NTIRE/html/Qiu_Recursive_Multi-Exposure_Alignment_with_Spatiotemporal_Decoupling_for_Efficient_Burst_HDR_CVPRW_2025_paper.html), and [NTIRE 2026 Dynamic Multi-Exposure Fusion](https://arxiv.org/abs/2604.09030).
 
+Implementation state (2026-07-27): dynamic pixels now enter a sparse,
+measurement-only low/detail estimator after calibrated disagreement,
+rejection, or disocclusion triggers. A same-CFA 3x3 binomial kernel avoids
+Bayer color mixing; low-frequency radiance and native detail residuals are
+robustly estimated from aligned bracket observations, independently
+attributed, and recombined inside the measured center-sample radiance
+envelope. Static regions retain the ordinary path bit-for-bit. Production
+exports independent low/detail source and frequency-state maps, a visible
+overlay, portable schema-v2 JSON, signed sidecars, and a
+`--no-frequency-deghost` ablation.
+
+The adversarial synthetic gate reduces error from 0.03030242 to 0.00000406,
+preserves the measured envelope at every CFA site, and is exactly tile
+invariant. A paired release ablation on the private 21-frame, 1310x1304 Z9
+stack changed 5.161% of CFA values with MAE 4e-8, RMSE 1e-6, maximum change
+0.00029515, and 120.006 dB path parity; 52,157 pixels entered the sparse
+frequency path. Two production runs produced ten byte-identical TIFF/PNG
+artifacts, including the new maps. These figures prove sparse deterministic
+integration, not real-scene quality: the stack has no dynamic ground truth and
+used no exact sensor calibration profile.
+
 ### 6. Optimize capture, not only post-processing
 
 Adaptive exposure research shows that shutter and ISO should be selected
@@ -370,7 +391,10 @@ Sources: [UltraFusion](https://arxiv.org/abs/2501.11515), [LF-Diff](https://arxi
 8. Evaluate an optional compact LUT accelerator only after deterministic
    ground truth and Apple Metal parity exist.
 
-This order improves the correctness model before adding acceleration. It also
-creates useful intermediate products - calibrated uncertainty, metric depth,
-visibility, and source maps - that can become differentiating user controls
-and reconstruction inputs.
+Items 1-7 now exist in the bounded native architecture. They remain **In
+Progress** as a product claim until retained sensor/lens calibration,
+redistributable dynamic/occlusion ground truth, live camera actuation, and
+direct Helicon/Lightroom qualification pass. This order improved the
+correctness model before acceleration and created useful intermediate products
+- calibrated uncertainty, metric depth, visibility, and source maps - that can
+become differentiating user controls and reconstruction inputs.

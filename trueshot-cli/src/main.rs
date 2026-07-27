@@ -42,7 +42,9 @@ use trueshot_core::intrinsics::{
 use trueshot_core::inventory::{Device, Inventory, Machine, Model, Sequence, SequenceStatus};
 use trueshot_core::licensing::{Feature, LicenseError, LicenseManager};
 use trueshot_core::native_fusion::{
-    fuse_native_group, fusion_provenance_preview, NativeFusionConfig, NativeFusionResult,
+    fuse_native_group, fusion_provenance_preview_with_frequency, NativeFusionConfig,
+    NativeFusionResult, FREQUENCY_FLAG_DETAIL_REFERENCE, FREQUENCY_FLAG_DETAIL_SINGLE_SOURCE,
+    FREQUENCY_FLAG_MEASUREMENT_CLAMPED, FREQUENCY_FLAG_SEPARATED, FREQUENCY_FLAG_SPLIT_SOURCES,
     FUSION_FLAG_BRACKET_ALIGNED, FUSION_FLAG_CENSORED, FUSION_FLAG_CENSOR_CONFLICT,
     FUSION_FLAG_DISOCCLUDED, FUSION_FLAG_OUTLIER_REJECTED, FUSION_FLAG_SOURCE_FALLBACK,
     FUSION_FLAG_UNCALIBRATED_NOISE, FUSION_FLAG_VISIBILITY_CORRECTED,
@@ -222,6 +224,10 @@ enum Commands {
         /// Robust HDR motion rejection (0 disables, 1 standard, 2 strongest)
         #[arg(long, default_value_t = 1.0)]
         deghost_strength: f32,
+
+        /// Disable sparse same-CFA low/detail frequency deghosting
+        #[arg(long)]
+        no_frequency_deghost: bool,
 
         /// Calibrated green-channel glare spread at the sensor, in micrometers
         #[arg(long, default_value_t = 80.0)]
@@ -595,6 +601,7 @@ fn main() -> Result<()> {
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            no_frequency_deghost,
             glare_spread_um,
             no_glare_focus,
             sensor_noise_profile,
@@ -614,6 +621,7 @@ fn main() -> Result<()> {
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            no_frequency_deghost,
             glare_spread_um,
             no_glare_focus,
             sensor_noise_profile,
@@ -714,6 +722,7 @@ fn cmd_process(
     full_resolution_preview: bool,
     preview_max_dimension: usize,
     deghost_strength: f32,
+    no_frequency_deghost: bool,
     glare_spread_um: f32,
     no_glare_focus: bool,
     sensor_noise_profile: Option<PathBuf>,
@@ -779,6 +788,7 @@ fn cmd_process(
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            !no_frequency_deghost,
             glare_spread_um,
             !no_glare_focus,
             sensor_noise_profile.as_deref(),
@@ -1920,6 +1930,7 @@ fn run_burst_pipeline(
     full_resolution_preview: bool,
     preview_max_dimension: usize,
     deghost_strength: f32,
+    frequency_separated_deghosting: bool,
     glare_spread_um: f32,
     glare_aware_focus: bool,
     sensor_noise_profile_path: Option<&Path>,
@@ -1988,6 +1999,7 @@ fn run_burst_pipeline(
     }
     let fusion_config = NativeFusionConfig {
         deghost_strength,
+        frequency_separated_deghosting,
         glare_spread_um,
         glare_aware_focus,
         depth_consistent_refusion,
@@ -2169,7 +2181,9 @@ fn run_burst_pipeline(
                 confidence: _,
                 radiance_uncertainty: _,
                 source_map,
+                detail_source_map,
                 fusion_flags,
+                frequency_flags,
                 sensor_correction_map,
                 glare_map,
                 boundary_trimap,
@@ -2190,13 +2204,19 @@ fn run_burst_pipeline(
                 glare_radius_pixels,
                 glare_physical_scale,
                 glare_affected_pixels,
+                frequency_separated_pixels,
+                detail_single_source_pixels,
+                detail_reference_pixels,
                 focus_kernel,
             } = fused;
-            let (fusion_overlay_rgb, fusion_overlay_alpha) = fusion_provenance_preview(
-                &source_map,
-                &fusion_flags,
-                preview_max_dimension.min(2048),
-            )?;
+            let (fusion_overlay_rgb, fusion_overlay_alpha) =
+                fusion_provenance_preview_with_frequency(
+                    &source_map,
+                    &detail_source_map,
+                    &fusion_flags,
+                    &frequency_flags,
+                    preview_max_dimension.min(2048),
+                )?;
             let rgb_cam: [[f32; 4]; 3] = [
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 1.0, 0.0, 0.0],
@@ -2261,8 +2281,12 @@ fn run_burst_pipeline(
                 output_path.with_file_name(format!("{output_stem}_depth_m.pfm"));
             let source_map_path =
                 output_path.with_file_name(format!("{output_stem}_source_map.png"));
+            let detail_source_map_path =
+                output_path.with_file_name(format!("{output_stem}_detail_source_map.png"));
             let fusion_flags_path =
                 output_path.with_file_name(format!("{output_stem}_fusion_flags.png"));
+            let frequency_flags_path =
+                output_path.with_file_name(format!("{output_stem}_frequency_flags.png"));
             let glare_map_path = output_path.with_file_name(format!("{output_stem}_glare_map.png"));
             let sensor_correction_map_path =
                 output_path.with_file_name(format!("{output_stem}_sensor_correction.png"));
@@ -2272,6 +2296,14 @@ fn run_burst_pipeline(
                 output_path.with_file_name(format!("{output_stem}_fusion_overlay.png"));
             let fusion_report_path =
                 output_path.with_file_name(format!("{output_stem}_fusion_report.json"));
+            let source_map_name = portable_asset_filename(&source_map_path)?;
+            let detail_source_map_name = portable_asset_filename(&detail_source_map_path)?;
+            let fusion_flags_name = portable_asset_filename(&fusion_flags_path)?;
+            let frequency_flags_name = portable_asset_filename(&frequency_flags_path)?;
+            let glare_map_name = portable_asset_filename(&glare_map_path)?;
+            let sensor_correction_map_name = portable_asset_filename(&sensor_correction_map_path)?;
+            let boundary_trimap_name = portable_asset_filename(&boundary_trimap_path)?;
+            let fusion_overlay_name = portable_asset_filename(&fusion_overlay_path)?;
             let accepted_transforms = transforms
                 .iter()
                 .filter(|transform| transform.accepted)
@@ -2295,26 +2327,39 @@ fn run_burst_pipeline(
                     .filter(|value| **value & flag != 0)
                     .count()
             };
-            let fusion_report = serde_json::to_vec_pretty(&serde_json::json!({
-                "schema": "trueshot.fusion.provenance.v1",
+            let frequency_flag_count = |flag: u8| {
+                frequency_flags
+                    .iter()
+                    .filter(|value| **value & flag != 0)
+                    .count()
+            };
+            let frequency_flag_legend = serde_json::json!({
+                "separated": {"bit": FREQUENCY_FLAG_SEPARATED, "pixels": frequency_flag_count(FREQUENCY_FLAG_SEPARATED)},
+                "split_sources": {"bit": FREQUENCY_FLAG_SPLIT_SOURCES, "pixels": frequency_flag_count(FREQUENCY_FLAG_SPLIT_SOURCES)},
+                "detail_reference": {"bit": FREQUENCY_FLAG_DETAIL_REFERENCE, "pixels": frequency_flag_count(FREQUENCY_FLAG_DETAIL_REFERENCE)},
+                "detail_single_source": {"bit": FREQUENCY_FLAG_DETAIL_SINGLE_SOURCE, "pixels": frequency_flag_count(FREQUENCY_FLAG_DETAIL_SINGLE_SOURCE)},
+                "measurement_clamped": {"bit": FREQUENCY_FLAG_MEASUREMENT_CLAMPED, "pixels": frequency_flag_count(FREQUENCY_FLAG_MEASUREMENT_CLAMPED)}
+            });
+            let mut fusion_report_value = serde_json::json!({
+                "schema": "trueshot.fusion.provenance.v2",
                 "width": source_map.dim().1,
                 "height": source_map.dim().0,
                 "source_sentinel": u16::MAX,
-                "source_map": source_map_path.file_name(),
-                "fusion_flags": fusion_flags_path.file_name(),
-                "sensor_correction_map": sensor_correction_map_path.file_name(),
+                "source_map": source_map_name,
+                "fusion_flags": fusion_flags_name,
+                "sensor_correction_map": sensor_correction_map_name,
                 "sensor_correction_legend": {
                     "flat_field_applied": SENSOR_CORRECTION_FLAT_FIELD,
                     "defect_repaired": SENSOR_CORRECTION_DEFECT_REPAIRED
                 },
-                "glare_map": glare_map_path.file_name(),
-                "boundary_trimap": boundary_trimap_path.file_name(),
+                "glare_map": glare_map_name,
+                "boundary_trimap": boundary_trimap_name,
                 "boundary_trimap_legend": {
                     "interior": trueshot_core::native_fusion::BOUNDARY_TRIMAP_INTERIOR,
                     "psf_support": trueshot_core::native_fusion::BOUNDARY_TRIMAP_PSF_SUPPORT,
                     "crossing_core": trueshot_core::native_fusion::BOUNDARY_TRIMAP_CROSSING_CORE
                 },
-                "overlay": fusion_overlay_path.file_name(),
+                "overlay": fusion_overlay_name,
                 "flag_legend": {
                     "censored": {"bit": FUSION_FLAG_CENSORED, "pixels": flag_count(FUSION_FLAG_CENSORED)},
                     "outlier_rejected": {"bit": FUSION_FLAG_OUTLIER_REJECTED, "pixels": flag_count(FUSION_FLAG_OUTLIER_REJECTED)},
@@ -2353,8 +2398,40 @@ fn run_burst_pipeline(
                 "local_aligned_cells": local_aligned_cells,
                 "disoccluded_cells": disoccluded_cells,
                 "frame_alignments": frame_alignments,
+                "frequency_separated_deghosting": frequency_separated_deghosting,
                 "archival_policy": "measured_sources_only_no_generative_reconstruction"
-            }))?;
+            });
+            let report = fusion_report_value
+                .as_object_mut()
+                .expect("fusion report literal is an object");
+            report.insert(
+                "detail_source_map".to_string(),
+                serde_json::json!(detail_source_map_name),
+            );
+            report.insert(
+                "frequency_flags".to_string(),
+                serde_json::json!(frequency_flags_name),
+            );
+            report.insert("frequency_flag_legend".to_string(), frequency_flag_legend);
+            report.insert(
+                "frequency_separated_pixels".to_string(),
+                serde_json::json!(frequency_separated_pixels),
+            );
+            report.insert(
+                "detail_single_source_pixels".to_string(),
+                serde_json::json!(detail_single_source_pixels),
+            );
+            report.insert(
+                "detail_reference_pixels".to_string(),
+                serde_json::json!(detail_reference_pixels),
+            );
+            report.insert(
+                "frequency_policy".to_string(),
+                serde_json::json!(
+                    "same_cfa_sparse_low_detail_measured_sources_only_envelope_clamped"
+                ),
+            );
+            let fusion_report = serde_json::to_vec_pretty(&fusion_report_value)?;
             let output_root = output.to_path_buf();
             let group_id = capture_group.group_id.clone();
             let label = sequence.meta.bone_id.clone();
@@ -2412,6 +2489,14 @@ fn run_burst_pipeline(
                         source_digest.size_bytes,
                         source_digest.sha256,
                     )?);
+                    let detail_source_digest =
+                        save_u16_map_png_with_digest(&detail_source_map, &detail_source_map_path)?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &detail_source_map_path,
+                        &output_root,
+                        detail_source_digest.size_bytes,
+                        detail_source_digest.sha256,
+                    )?);
                     let flags_digest =
                         save_u8_map_png_with_digest(&fusion_flags, &fusion_flags_path)?;
                     artifacts.push(artifact_digest_from_parts(
@@ -2419,6 +2504,14 @@ fn run_burst_pipeline(
                         &output_root,
                         flags_digest.size_bytes,
                         flags_digest.sha256,
+                    )?);
+                    let frequency_digest =
+                        save_u8_map_png_with_digest(&frequency_flags, &frequency_flags_path)?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &frequency_flags_path,
+                        &output_root,
+                        frequency_digest.size_bytes,
+                        frequency_digest.sha256,
                     )?);
                     let correction_digest = save_u8_map_png_with_digest(
                         &sensor_correction_map,
@@ -3871,6 +3964,19 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
+fn portable_asset_filename(path: &Path) -> Result<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Export asset path has no portable UTF-8 filename: {}",
+                path.display()
+            )
+        })
+}
+
 fn confirm_delete(model_id: &str) -> Result<bool> {
     print!("Type DELETE to confirm deletion of {}: ", model_id);
     io::stdout().flush().ok();
@@ -4825,6 +4931,18 @@ mod burst_pipeline_tests {
     use super::*;
 
     #[test]
+    fn provenance_asset_filename_serializes_as_a_portable_string() {
+        let name =
+            portable_asset_filename(Path::new("/tmp/capture_detail_source_map.png")).unwrap();
+        assert_eq!(
+            serde_json::json!({ "detail_source_map": name }),
+            serde_json::json!({
+                "detail_source_map": "capture_detail_source_map.png"
+            })
+        );
+    }
+
+    #[test]
     fn process_cli_accepts_a_sensor_noise_profile() {
         let cli = Cli::try_parse_from([
             "trueshot",
@@ -4870,11 +4988,13 @@ mod burst_pipeline_tests {
             "--glare-spread-um",
             "63.5",
             "--no-glare-focus",
+            "--no-frequency-deghost",
         ])
         .unwrap();
         let Commands::Process {
             glare_spread_um,
             no_glare_focus,
+            no_frequency_deghost,
             ..
         } = cli.command
         else {
@@ -4882,6 +5002,7 @@ mod burst_pipeline_tests {
         };
         assert_eq!(glare_spread_um, 63.5);
         assert!(no_glare_focus);
+        assert!(no_frequency_deghost);
     }
 
     #[test]

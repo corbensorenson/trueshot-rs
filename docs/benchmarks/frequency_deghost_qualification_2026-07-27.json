@@ -1,0 +1,77 @@
+{
+  "schema": "trueshot.frequency-deghost-qualification.v1",
+  "date": "2026-07-27",
+  "status": "pass_with_dynamic_ground_truth_pending",
+  "source": {
+    "parent_commit": "48a38eab307ade84ec5fd10551f6f07c0bc928f1",
+    "native_fusion_sha256": "8a94bf187bf8ae07a1be0e19bdf1b5068baf94beabafff309edaa2fa21a8a6fa",
+    "resource_manager_sha256": "420a29eb840add0e69864ab14cb0011ab31999e657561fbb29dc8c7ed812bb27",
+    "benchmark_sha256": "ebd84f2f2aa9180c2f97b58ac28cfb319b73059f5e1f6914b7ef272c27acc2d5",
+    "cli_sha256": "2b1030ddbe8efc91341d7aeec87443c4705bb11e473a2d0fab064ac6b072b742"
+  },
+  "algorithm": {
+    "activation": "calibrated_disagreement_or_rejection_or_disocclusion",
+    "spatial_kernel": "same_cfa_3x3_binomial_on_two_pixel_bayer_lattice",
+    "components": [
+      "low_frequency_radiance",
+      "native_detail_residual"
+    ],
+    "source_policy": "independent_measured_bracket_attribution",
+    "recombination_policy": "measured_center_sample_radiance_envelope",
+    "generative_reconstruction": false,
+    "static_fast_path": "bit_exact"
+  },
+  "synthetic_adversarial": {
+    "ordinary_error": 0.03030242,
+    "frequency_separated_error": 0.00000406,
+    "error_reduction_ratio": 7463.6502,
+    "measured_envelope_violations": 0,
+    "tile_pixel_mismatches": 0,
+    "tile_detail_source_mismatches": 0,
+    "tile_frequency_flag_mismatches": 0
+  },
+  "private_nef_paired_release_ablation": {
+    "redistributable": false,
+    "frames": 21,
+    "width": 1310,
+    "height": 1304,
+    "total_cfa_pixels": 1708240,
+    "frequency_separated_pixels": 52157,
+    "changed_cfa_pixels": 88170,
+    "changed_fraction": 0.05161,
+    "mae": 0.00000004,
+    "rmse": 0.00000100,
+    "maximum_absolute_change": 0.00029515,
+    "path_psnr_db": 120.006,
+    "enabled_fusion_seconds": 1.49,
+    "disabled_fusion_seconds": 1.37,
+    "noise_model_calibrated": false,
+    "dynamic_ground_truth": false
+  },
+  "production_apple_m1": {
+    "independent_runs": 2,
+    "configured_memory_budget_mib": 512,
+    "required_peak_mib": 256.9,
+    "demosaic_backend": "metal_ahd",
+    "demosaic_bands": 3,
+    "demosaic_fallback": null,
+    "byte_identical_tiff_png_artifacts": 10,
+    "frequency_separated_pixels": 52157,
+    "measurement_clamped_pixels": 315,
+    "detail_single_source_pixels": 0,
+    "detail_reference_pixels": 0,
+    "fused_tiff_sha256": "626ddbe959ccf1a4e05baefc443875449c301a0ac72c8e96a9118af450cc63e1",
+    "detail_source_map_sha256": "51f5948508127b8b573f022e4e9a930c2529038dd87cfe0454b103fd9b107ff4",
+    "frequency_flags_sha256": "56d4af0fa8a5a409efe341dd68ee0a3ae3e95045bf0d6391163d3e79f8112829",
+    "report_schema": "trueshot.fusion.provenance.v2",
+    "portable_filename_fields": true,
+    "signed_provenance_sidecars": true
+  },
+  "caveats": [
+    "The private NEF stack has no dynamic-scene ground truth and no exact sensor profile.",
+    "The paired enabled/disabled durations are single release observations, not p50/p95 performance claims.",
+    "Path PSNR measures sparse deviation from the ordinary estimator, not reconstruction quality.",
+    "Real qualification still requires retained calibrated dynamic, disocclusion, glossy, hair, fur, and transparency fixtures.",
+    "No competitor-superiority claim is made by this record."
+  ]
+}

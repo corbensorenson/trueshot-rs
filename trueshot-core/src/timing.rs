@@ -151,11 +151,7 @@ impl HierarchicalTimer {
             };
             let std = variance.sqrt();
 
-            let pct_total = if total_ms > 0.0 {
-                (mean / total_ms) * 100.0
-            } else {
-                0.0
-            };
+            let pct_total = percentage_of_total(mean, total_ms);
 
             timings_map.insert(
                 label.clone(),
@@ -321,6 +317,14 @@ impl HierarchicalTimer {
     }
 }
 
+fn percentage_of_total(duration_ms: f64, total_ms: f64) -> f64 {
+    if total_ms > 0.0 {
+        (duration_ms / total_ms) * 100.0
+    } else {
+        0.0
+    }
+}
+
 /// RAII guard for automatic scope timing
 ///
 /// Automatically stops the timing scope when dropped.
@@ -477,18 +481,8 @@ mod tests {
 
     #[test]
     fn test_percentage_calculation() {
-        let mut timer = HierarchicalTimer::new("test");
-
-        {
-            let _guard = timer.start("half_time");
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        thread::sleep(Duration::from_millis(50));
-
-        let report = timer.aggregate();
-        // Should be roughly 50% of total time
-        assert!(report.timings["half_time"].pct_total > 40.0);
-        assert!(report.timings["half_time"].pct_total < 60.0);
+        assert_eq!(percentage_of_total(50.0, 100.0), 50.0);
+        assert_eq!(percentage_of_total(0.0, 100.0), 0.0);
+        assert_eq!(percentage_of_total(50.0, 0.0), 0.0);
     }
 }

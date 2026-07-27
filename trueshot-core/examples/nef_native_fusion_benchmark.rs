@@ -18,11 +18,14 @@ fn main() -> Result<()> {
     let mut arguments = std::env::args_os().skip(1);
     let input = arguments.next().map(PathBuf::from).context(
         "usage: nef_native_fusion_benchmark <nef_dir> [output_dir] \
-             [--workers N] [--no-depth-refusion] [--deghost-strength 0..2]",
+             [--workers N] [--no-depth-refusion] [--no-frequency-deghost] \
+             [--frequency-ablation] [--deghost-strength 0..2]",
     )?;
     let mut output = None;
     let mut workers = None;
     let mut depth_refusion = true;
+    let mut frequency_deghost = true;
+    let mut frequency_ablation = false;
     let mut deghost_strength = 1.0;
     while let Some(argument) = arguments.next() {
         if argument == "--workers" {
@@ -39,6 +42,10 @@ fn main() -> Result<()> {
             }
         } else if argument == "--no-depth-refusion" {
             depth_refusion = false;
+        } else if argument == "--no-frequency-deghost" {
+            frequency_deghost = false;
+        } else if argument == "--frequency-ablation" {
+            frequency_ablation = true;
         } else if argument == "--deghost-strength" {
             deghost_strength = arguments
                 .next()
@@ -57,12 +64,17 @@ fn main() -> Result<()> {
             anyhow::bail!("Only one output directory may be supplied");
         }
     }
+    if frequency_ablation && !frequency_deghost {
+        anyhow::bail!("--frequency-ablation conflicts with --no-frequency-deghost");
+    }
 
     run(
         &input,
         output.as_deref(),
         workers,
         depth_refusion,
+        frequency_deghost,
+        frequency_ablation,
         deghost_strength,
     )
 }
@@ -72,6 +84,8 @@ fn run(
     output: Option<&Path>,
     workers: Option<usize>,
     depth_refusion: bool,
+    frequency_deghost: bool,
+    frequency_ablation: bool,
     deghost_strength: f32,
 ) -> Result<()> {
     if let Some(output) = output {
@@ -100,23 +114,60 @@ fn run(
         let decode_elapsed = decode_started.elapsed();
         let input_bytes = group.size_bytes();
 
+        let fusion_config = NativeFusionConfig {
+            depth_consistent_refusion: depth_refusion,
+            frequency_separated_deghosting: frequency_deghost,
+            deghost_strength,
+            ..NativeFusionConfig::default()
+        };
         let fusion_started = Instant::now();
-        let fused = fuse_native_group(
-            &group,
-            &sequence.meta,
-            &NativeFusionConfig {
-                depth_consistent_refusion: depth_refusion,
-                deghost_strength,
-                ..NativeFusionConfig::default()
-            },
-        )?;
+        let fused = fuse_native_group(&group, &sequence.meta, &fusion_config)?;
         let fusion_elapsed = fusion_started.elapsed();
+        let frequency_comparison = if frequency_ablation {
+            let baseline_started = Instant::now();
+            let baseline = fuse_native_group(
+                &group,
+                &sequence.meta,
+                &NativeFusionConfig {
+                    frequency_separated_deghosting: false,
+                    ..fusion_config.clone()
+                },
+            )?;
+            let baseline_elapsed = baseline_started.elapsed();
+            let mut changed = 0usize;
+            let mut absolute_sum = 0.0f64;
+            let mut square_sum = 0.0f64;
+            let mut maximum = 0.0f32;
+            let mut peak = 1.0f32;
+            for (protected, ordinary) in fused.bayer.iter().zip(&baseline.bayer) {
+                let difference = (*protected - *ordinary).abs();
+                changed += usize::from(protected.to_bits() != ordinary.to_bits());
+                absolute_sum += f64::from(difference);
+                square_sum += f64::from(difference * difference);
+                maximum = maximum.max(difference);
+                peak = peak.max(protected.abs()).max(ordinary.abs());
+            }
+            let samples = fused.bayer.len() as f64;
+            let mae = absolute_sum / samples;
+            let rmse = (square_sum / samples).sqrt();
+            let psnr = if rmse > 0.0 {
+                20.0 * (f64::from(peak) / rmse).log10()
+            } else {
+                f64::INFINITY
+            };
+            Some((baseline_elapsed, changed, mae, rmse, maximum, psnr))
+        } else {
+            None
+        };
         drop(group);
 
         let fused_bytes = fused.size_bytes();
         let transforms = fused.transforms.clone();
         let frame_alignments = fused.frame_alignments.clone();
         let depth_refusion_pixels = fused.depth_refusion_pixels;
+        let frequency_separated_pixels = fused.frequency_separated_pixels;
+        let detail_single_source_pixels = fused.detail_single_source_pixels;
+        let detail_reference_pixels = fused.detail_reference_pixels;
         let noise_model_calibrated = fused.noise_model_calibrated;
         let count_flag = |flag| {
             fused
@@ -243,6 +294,20 @@ fn run(
              rejected={rejected_pixels}, fallback={fallback_pixels}, \
              uncalibrated={uncalibrated_pixels}"
         );
+        println!(
+            "  frequency evidence: separated={frequency_separated_pixels}, \
+             single-detail-source={detail_single_source_pixels}, \
+             reference-detail={detail_reference_pixels}"
+        );
+        if let Some((elapsed, changed, mae, rmse, maximum, psnr)) = frequency_comparison {
+            println!(
+                "  paired frequency ablation: ordinary-fuse={:.2}s changed={changed}/{} \
+                 ({:.3}%) MAE={mae:.8} RMSE={rmse:.8} max={maximum:.8} PSNR={psnr:.3}dB",
+                elapsed.as_secs_f64(),
+                linear_rgb.dim().0 * linear_rgb.dim().1,
+                changed as f64 * 100.0 / (linear_rgb.dim().0 * linear_rgb.dim().1) as f64,
+            );
+        }
         println!(
             "  depth-consistent refusion: {} / {} pixels ({:.2}%)",
             depth_refusion_pixels,
