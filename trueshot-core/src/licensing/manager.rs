@@ -667,7 +667,7 @@ fn load_public_key_override() -> Result<Option<VerifyingKey>, LicenseError> {
 }
 
 fn dev_mode_enabled() -> bool {
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(debug_assertions, feature = "dev_license")) {
         return false;
     }
     match env::var("TRUESHOT_LICENSE_DEV_MODE") {

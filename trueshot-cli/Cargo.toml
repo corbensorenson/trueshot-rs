@@ -50,6 +50,7 @@ libc = "0.2"
 
 [features]
 opencv = ["trueshot-core/opencv"]
+dev_license = ["trueshot-core/dev_license"]
 
 [dev-dependencies]
 tempfile = "3.10"

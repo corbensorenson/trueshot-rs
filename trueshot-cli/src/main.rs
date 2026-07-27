@@ -54,6 +54,7 @@ use trueshot_core::native_fusion::{
     FUSION_FLAG_UNCALIBRATED_NOISE, FUSION_FLAG_VISIBILITY_CORRECTED,
     SENSOR_CORRECTION_DEFECT_REPAIRED, SENSOR_CORRECTION_FLAT_FIELD,
 };
+use trueshot_core::performance_telemetry::{ProcessTelemetrySnapshot, ProcessTelemetryWindow};
 use trueshot_core::postprocess::postprocess_f32;
 use trueshot_core::processing_journal::{
     artifact_digest_from_parts, ArtifactDigest, ArtifactVerification, ClaimDecision,
@@ -822,6 +823,7 @@ fn cmd_process(
     let started_at = std::time::SystemTime::now();
     let started_iso = now_rfc3339(started_at);
     let start_instant = std::time::Instant::now();
+    let telemetry_started = ProcessTelemetrySnapshot::capture();
     if no_gpu {
         env::set_var("TRUESHOT_DISABLE_GPU", "1");
     }
@@ -888,8 +890,8 @@ fn cmd_process(
         eprintln!("{} Processing failed: {}", WARNING, err);
         update_inventory_sequence(&inventory_ctx, &output, SequenceStatus::Failed);
         run_state.mark_failed();
-        let _ = write_run_report(
-            &output,
+        if let Err(report_error) = write_run_report(
+            &output.join("run_report.json"),
             RunReportKind::Process {
                 mode,
                 quality,
@@ -903,15 +905,18 @@ fn cmd_process(
             start_instant.elapsed().as_secs_f64(),
             "failed",
             Some(&inventory_ctx),
-        );
+            &telemetry_started,
+        ) {
+            eprintln!("{} Failed to retain run report: {report_error:#}", WARNING);
+        }
         return Err(err);
     }
 
     write_inventory_manifest(&output, &inventory_ctx, &input)?;
     update_inventory_sequence(&inventory_ctx, &output, SequenceStatus::Completed);
     run_state.mark_completed();
-    let _ = write_run_report(
-        &output,
+    write_run_report(
+        &output.join("run_report.json"),
         RunReportKind::Process {
             mode,
             quality,
@@ -925,7 +930,8 @@ fn cmd_process(
         start_instant.elapsed().as_secs_f64(),
         "success",
         Some(&inventory_ctx),
-    );
+        &telemetry_started,
+    )?;
 
     println!();
     println!("{} Processing complete!", CHECK);
@@ -1041,6 +1047,7 @@ fn cmd_export(
     let started_at = std::time::SystemTime::now();
     let started_iso = now_rfc3339(started_at);
     let start_instant = std::time::Instant::now();
+    let telemetry_started = ProcessTelemetrySnapshot::capture();
     println!("{} Exporting model...", CUBE);
     println!("  Input:  {}", style(input.display()).cyan());
     println!("  Output: {}", style(output.display()).green());
@@ -1107,7 +1114,7 @@ fn cmd_export(
 
     pb.finish_with_message(format!("{} Export complete!", CHECK));
     let report_path = output.with_extension("report.json");
-    let _ = write_run_report(
+    write_run_report(
         &report_path,
         RunReportKind::Export {
             input,
@@ -1121,7 +1128,8 @@ fn cmd_export(
         start_instant.elapsed().as_secs_f64(),
         "success",
         None,
-    );
+        &telemetry_started,
+    )?;
 
     Ok(())
 }
@@ -1268,6 +1276,7 @@ fn cmd_calibrate(
     let started_at = std::time::SystemTime::now();
     let started_iso = now_rfc3339(started_at);
     let start_instant = std::time::Instant::now();
+    let telemetry_started = ProcessTelemetrySnapshot::capture();
     println!("{} Camera Calibration", CAMERA);
     println!("  Checkerboard: {}x{}", cols, rows);
     println!("  Images: {}", images.len());
@@ -1315,7 +1324,7 @@ fn cmd_calibrate(
     );
 
     let report_path = output_path.with_extension("report.json");
-    let _ = write_run_report(
+    write_run_report(
         &report_path,
         RunReportKind::Calibrate {
             images,
@@ -1332,7 +1341,8 @@ fn cmd_calibrate(
         start_instant.elapsed().as_secs_f64(),
         "success",
         None,
-    );
+        &telemetry_started,
+    )?;
 
     Ok(())
 }
@@ -2415,13 +2425,16 @@ fn run_burst_pipeline(
             step_pb.inc(1);
 
             step_pb.set_message("Fusing HDR and focus planes");
+            let fusion_started = std::time::Instant::now();
             let fused = fuse_native_group(&group, &sequence.meta, &fusion_config)?;
+            let fusion_seconds = fusion_started.elapsed().as_secs_f64();
             drop(group);
             ensure_not_cancelled(&cancellation)?;
             let fused_bytes = fused.size_bytes();
             step_pb.inc(1);
 
             step_pb.set_message("Demosaicing and tone mapping");
+            let demosaic_started = std::time::Instant::now();
             let NativeFusionResult {
                 bayer,
                 depth,
@@ -2518,6 +2531,7 @@ fn run_burst_pipeline(
                     )
                 };
             let display_rgb = postprocess_f32(&linear_rgb)?;
+            let demosaic_and_postprocess_seconds = demosaic_started.elapsed().as_secs_f64();
             ensure_not_cancelled(&cancellation)?;
             step_pb.inc(1);
 
@@ -2688,6 +2702,20 @@ fn run_burst_pipeline(
                 serde_json::json!(
                     "same_cfa_sparse_low_detail_measured_sources_only_envelope_clamped"
                 ),
+            );
+            report.insert(
+                "performance".to_string(),
+                serde_json::json!({
+                    "decode_seconds": decode_seconds,
+                    "fusion_seconds": fusion_seconds,
+                    "demosaic_and_postprocess_seconds": demosaic_and_postprocess_seconds,
+                    "processing_before_export_seconds": group_started.elapsed().as_secs_f64(),
+                    "decoded_megapixels": decoded_megapixels,
+                    "native_input_bytes": native_input_bytes,
+                    "fused_bytes": fused_bytes,
+                    "admitted_peak_memory_bytes": estimate.peak_memory_bytes,
+                    "major_page_faults": major_page_faults
+                }),
             );
             let fusion_report = serde_json::to_vec_pretty(&fusion_report_value)?;
             let output_root = output.to_path_buf();
@@ -4599,8 +4627,11 @@ fn write_run_report(
     duration_seconds: f64,
     status: &str,
     inventory_ctx: Option<&InventoryContext>,
+    telemetry_started: &ProcessTelemetrySnapshot,
 ) -> Result<()> {
     let finished_at = std::time::SystemTime::now();
+    let telemetry_finished = ProcessTelemetrySnapshot::capture();
+    let telemetry = ProcessTelemetryWindow::between(telemetry_started, &telemetry_finished);
     let finished_iso = now_rfc3339(finished_at);
     let started_unix = started_at
         .duration_since(std::time::UNIX_EPOCH)
@@ -4629,6 +4660,7 @@ fn write_run_report(
             "arch": std::env::consts::ARCH,
             "cores": cores,
         },
+        "performance": telemetry,
         "inventory": inventory_ctx.map(|ctx| serde_json::json!({
             "model_id": ctx.model_id.to_string(),
             "sequence_id": ctx.sequence_id.to_string(),
@@ -4712,7 +4744,9 @@ fn write_run_report(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(&json)?)?;
+    let partial = path.with_extension("json.partial");
+    std::fs::write(&partial, serde_json::to_string_pretty(&json)?)?;
+    std::fs::rename(&partial, path)?;
     Ok(())
 }
 
@@ -5460,6 +5494,41 @@ mod burst_pipeline_tests {
             spatial_correction_profile_path(Path::new("/tmp/z9.production-noise.json")),
             PathBuf::from("/tmp/z9.production-noise_spatial_correction.json")
         );
+    }
+
+    #[test]
+    fn run_report_is_atomically_published_with_native_telemetry() {
+        let directory = tempfile::tempdir().unwrap();
+        let report_path = directory.path().join("run_report.json");
+        let started_at = std::time::SystemTime::now();
+        let telemetry = ProcessTelemetrySnapshot::capture();
+        write_run_report(
+            &report_path,
+            RunReportKind::Process {
+                mode: Mode::Burst,
+                quality: Quality::Ultra,
+                input: PathBuf::from("input"),
+                output: directory.path().to_path_buf(),
+                jobs: Some(2),
+                gpu_disabled: false,
+            },
+            &now_rfc3339(started_at),
+            started_at,
+            0.25,
+            "success",
+            None,
+            &telemetry,
+        )
+        .unwrap();
+
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert_eq!(
+            report["performance"]["schema"],
+            "trueshot.process-telemetry.v1"
+        );
+        assert_eq!(report["kind"], "process");
+        assert!(!report_path.with_extension("json.partial").exists());
     }
 
     #[test]

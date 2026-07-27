@@ -35,6 +35,7 @@ pub mod metrics;
 pub mod native_fusion;
 pub mod object_detection;
 pub mod optimized_ops;
+pub mod performance_telemetry;
 pub mod plugins;
 pub mod postprocess;
 pub mod preprocessing;
