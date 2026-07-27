@@ -103,6 +103,21 @@ TrueShot should implement a visibility-aware selection stage:
 
 Source: [Focal Stack Compositing for Depth of Field Control](https://graphics.stanford.edu/papers/focalstack/).
 
+Implementation state (2026-07-27): native fusion now detects measured depth
+crossings, evaluates their support on both measured and aperture-projected
+surfaces, converts the bidirectional thin-lens defocus diameter through
+verified sensor pitch, and expands variable-radius seeds with a bounded
+linear-time max-plus transform. The exact
+tri-state map distinguishes interior, physical PSF support, and crossing core.
+Inside that support, depth-consistent refusion selects one aperture-valid focus
+plane and re-estimates it only from traceable measured brackets; it never
+interpolates radiance across incompatible depth rays. Every such pixel carries
+source-fallback provenance, the map is atomically exported, radius truncation
+is explicit, and diagnostics remain available when refusion is disabled.
+Synthetic crossing-halo energy falls from 23.759999 to 0.002434, exceeding the
+50% gate, while the 44.161 dB/100% focus baseline and exact tile parity remain.
+Real hair, fur, transparency, and compound-lens calibration remain required.
+
 ### 4. Scale-decoupled UHD focus decisions
 
 Single-scale focus maps are not sufficient: small support gives accurate edges

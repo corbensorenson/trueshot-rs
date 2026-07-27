@@ -176,9 +176,10 @@ impl NativeSequenceMemoryEstimate {
             .and_then(|value| value.checked_mul(2))
             .context("Native input arena estimate overflow")?;
         // Bayer, normalized/metric depth, confidence, radiance uncertainty,
-        // source map, provenance flags, glare map, and foreground mask.
+        // source map, provenance flags, glare map, physical boundary trimap,
+        // and foreground mask.
         let fusion_output_bytes = pixels
-            .checked_mul(25)
+            .checked_mul(26)
             .context("Native fusion output estimate overflow")?;
         let focus_halo = focus_coarse_stride
             .max(1)
@@ -221,9 +222,10 @@ impl NativeSequenceMemoryEstimate {
             .and_then(|value| value.checked_mul(24))
             .context("Native local-motion estimate overflow")?;
         // Sensor-surface projection retains original depth, log distance, and
-        // a one-byte provenance mask.
+        // a one-byte provenance mask while the refusion source depth remains
+        // live. The later trimap transform is smaller than this peak.
         let visibility_working_bytes = pixels
-            .checked_mul(9)
+            .checked_mul(13)
             .context("Native visibility estimate overflow")?;
         let fusion_peak = input_arena_bytes
             .checked_add(fusion_output_bytes)
@@ -233,9 +235,9 @@ impl NativeSequenceMemoryEstimate {
             .and_then(|value| value.checked_add(visibility_working_bytes))
             .context("Native fusion peak estimate overflow")?;
         // Linear/display RGB, u8 preview, all retained fusion diagnostics, and
-        // PNG's temporary endian conversion for the exact u16 source map.
+        // PNG's temporary conversions for the exact source/diagnostic maps.
         let postprocess_peak = pixels
-            .checked_mul(12 + 12 + 3 + 20 + 2 + 2)
+            .checked_mul(12 + 12 + 3 + 21 + 2 + 3)
             .and_then(|value| value.checked_add(12 * 1024 * 1024))
             .context("Native postprocess peak estimate overflow")?;
         let peak_memory_bytes = fusion_peak.max(postprocess_peak);
@@ -745,7 +747,7 @@ mod tests {
             NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512).unwrap();
         let peak_mib = estimate.peak_memory_bytes as f64 / (1024.0 * 1024.0);
         assert!(
-            (220.0..245.0).contains(&peak_mib),
+            (240.0..241.5).contains(&peak_mib),
             "peak was {peak_mib:.1} MiB"
         );
         assert_eq!(estimate.input_arena_bytes, 21 * 1310 * 1304 * 2);

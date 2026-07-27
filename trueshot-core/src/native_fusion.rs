@@ -24,6 +24,10 @@ pub const FUSION_FLAG_VISIBILITY_CORRECTED: u8 = 1 << 5;
 pub const FUSION_FLAG_BRACKET_ALIGNED: u8 = 1 << 6;
 pub const FUSION_FLAG_DISOCCLUDED: u8 = 1 << 7;
 
+pub const BOUNDARY_TRIMAP_INTERIOR: u8 = 0;
+pub const BOUNDARY_TRIMAP_PSF_SUPPORT: u8 = 128;
+pub const BOUNDARY_TRIMAP_CROSSING_CORE: u8 = 255;
+
 #[derive(Debug, Clone)]
 pub struct NativeFusionConfig {
     /// Width and height of independently processed output bands/tiles.
@@ -85,6 +89,11 @@ pub struct NativeFusionConfig {
     /// Project the focus-selection surface onto the aperture-valid set when
     /// verified physical sensor geometry is available.
     pub aperture_visibility_correction: bool,
+    /// Detect physically mixed foreground/background support and anchor it to
+    /// one measured focus plane instead of interpolating incompatible rays.
+    pub mixed_pixel_trimap: bool,
+    /// Hard bound for physical mixed-pixel support and refusion work.
+    pub trimap_max_radius_pixels: usize,
     /// Robust bracket-motion rejection strength. Zero disables rejection.
     pub deghost_strength: f32,
 }
@@ -118,6 +127,8 @@ impl Default for NativeFusionConfig {
             regularize_depth: true,
             depth_consistent_refusion: true,
             aperture_visibility_correction: true,
+            mixed_pixel_trimap: true,
+            trimap_max_radius_pixels: 64,
             deghost_strength: 1.0,
         }
     }
@@ -375,6 +386,9 @@ pub struct NativeFusionResult {
     /// Zero is no detected influence and 255 is a censored glare core. This
     /// diagnostic never represents generated or reconstructed image content.
     pub glare_map: Array2<u8>,
+    /// Physical mixed-pixel boundary state: 0 interior, 128 PSF support, and
+    /// 255 at a measured depth crossing.
+    pub boundary_trimap: Array2<u8>,
     /// Conservative object mask inferred from the shared crop border.
     pub foreground_mask: Array2<u8>,
     /// One transform per focus plane, shared by all bracketed exposures.
@@ -385,14 +399,22 @@ pub struct NativeFusionResult {
     pub radiance_anchor: f32,
     /// True only when every frame used an exact retained per-ISO profile.
     pub noise_model_calibrated: bool,
-    /// Pixels whose dominant focus hypothesis changed after confidence- and
-    /// edge-aware depth regularization.
+    /// Pixels re-sampled after physical/regularized focus correction, including
+    /// single-plane mixed-boundary anchoring.
     pub depth_refusion_pixels: usize,
     /// Pixels whose focus coordinate was changed by the aperture visibility
     /// projection, including sub-plane changes.
     pub visibility_adjusted_pixels: usize,
     /// True when verified sensor geometry permitted the visibility projection.
     pub visibility_constrained: bool,
+    /// Pixels inside physical boundary support.
+    pub mixed_boundary_pixels: usize,
+    /// Mixed pixels anchored to one traceable measured focus plane.
+    pub boundary_source_fallback_pixels: usize,
+    /// Maximum physical boundary support used in native pixels.
+    pub trimap_radius_pixels: usize,
+    /// True when the physical trimap did not require radius truncation.
+    pub trimap_physical_scale: bool,
     /// Glare support used by focus inference in native pixels.
     pub glare_radius_pixels: usize,
     /// True when verified sensor pitch converted physical glare support.
@@ -415,6 +437,7 @@ impl NativeFusionResult {
             + self.source_map.len() * std::mem::size_of::<u16>()
             + self.fusion_flags.len()
             + self.glare_map.len()
+            + self.boundary_trimap.len()
             + self.foreground_mask.len()
             + self.transforms.len() * std::mem::size_of::<PlaneTransform>()
             + self.frame_alignments.len() * std::mem::size_of::<FrameAlignmentSummary>()
@@ -748,13 +771,24 @@ pub fn fuse_native_group(
         && focus_model
             .as_ref()
             .is_some_and(|model| model.pixel_pitch_mm.is_some());
-    let needs_depth_correction =
-        focus_steps > 1 && (config.regularize_depth || visibility_constrained);
+    let physical_trimap_enabled = focus_steps > 1
+        && config.mixed_pixel_trimap
+        && focus_model
+            .as_ref()
+            .is_some_and(|model| model.pixel_pitch_mm.is_some());
+    let needs_depth_correction = focus_steps > 1
+        && (config.regularize_depth || visibility_constrained || physical_trimap_enabled);
     let mut depth_refusion_pixels = 0;
     let mut visibility_adjusted_pixels = 0;
     let mut visibility_mask = None;
+    let mut boundary_trimap = vec![BOUNDARY_TRIMAP_INTERIOR; pixel_count];
+    let mut mixed_boundary_pixels = 0;
+    let mut boundary_source_fallback_pixels = 0;
+    let mut trimap_radius_pixels = 0;
+    let mut trimap_physical_scale = false;
     if needs_depth_correction {
-        let unregularized_depth = config.depth_consistent_refusion.then(|| depth.clone());
+        let source_depth =
+            (config.depth_consistent_refusion || physical_trimap_enabled).then(|| depth.clone());
         if config.regularize_depth {
             regularize_depth_map(&bayer, &mut depth, &confidence, width, height);
         }
@@ -770,8 +804,27 @@ pub fn fuse_native_group(
             visibility_adjusted_pixels = adjusted_pixels;
             visibility_mask = Some(correction_mask);
         }
-        if let Some(unregularized_depth) = unregularized_depth {
-            depth_refusion_pixels = refuse_regularized_depth(
+        if physical_trimap_enabled {
+            let summary = build_physical_boundary_trimap(
+                source_depth.as_deref().unwrap_or(&depth),
+                &depth,
+                focus_model
+                    .as_ref()
+                    .expect("physical trimap model was checked above"),
+                width,
+                height,
+                config.trimap_max_radius_pixels,
+            );
+            boundary_trimap = summary.map;
+            mixed_boundary_pixels = summary.mixed_pixels;
+            trimap_radius_pixels = summary.maximum_radius_pixels;
+            trimap_physical_scale = summary.fully_physical;
+        }
+        if config.depth_consistent_refusion {
+            let source_depth = source_depth
+                .as_deref()
+                .expect("depth refusion retains the uncorrected depth surface");
+            let (refused, boundary_fallbacks) = refuse_regularized_depth(
                 group,
                 &calibrations,
                 &frame_warps,
@@ -779,13 +832,16 @@ pub fn fuse_native_group(
                 exposures_per_focus,
                 radiance_anchor,
                 config,
-                &unregularized_depth,
+                source_depth,
                 &depth,
+                &boundary_trimap,
                 &mut bayer,
                 &mut radiance_uncertainty,
                 &mut source_map,
                 &mut fusion_flags,
             )?;
+            depth_refusion_pixels = refused;
+            boundary_source_fallback_pixels = boundary_fallbacks;
         }
     }
     if let Some(visibility_mask) = &visibility_mask {
@@ -835,6 +891,8 @@ pub fn fuse_native_group(
             .context("Unable to shape fusion flags output")?,
         glare_map: Array2::from_shape_vec((height, width), glare_map)
             .context("Unable to shape glare diagnostic output")?,
+        boundary_trimap: Array2::from_shape_vec((height, width), boundary_trimap)
+            .context("Unable to shape physical boundary trimap output")?,
         foreground_mask: Array2::from_shape_vec((height, width), foreground_mask)
             .context("Unable to shape fused foreground mask")?,
         transforms,
@@ -846,6 +904,10 @@ pub fn fuse_native_group(
         depth_refusion_pixels,
         visibility_adjusted_pixels,
         visibility_constrained,
+        mixed_boundary_pixels,
+        boundary_source_fallback_pixels,
+        trimap_radius_pixels,
+        trimap_physical_scale,
         glare_radius_pixels,
         glare_physical_scale,
         glare_affected_pixels,
@@ -903,6 +965,9 @@ fn validate_group(
         || !(0.0..=1.0).contains(&config.glare_focus_suppression)
     {
         anyhow::bail!("Native fusion glare configuration is invalid");
+    }
+    if !(1..=256).contains(&config.trimap_max_radius_pixels) {
+        anyhow::bail!("Native fusion physical boundary trimap configuration is invalid");
     }
     if !(8..=128).contains(&config.local_alignment_cell_size)
         || config.local_alignment_search_radius > 12
@@ -2474,32 +2539,41 @@ fn refuse_regularized_depth(
     config: &NativeFusionConfig,
     source_depth: &[f32],
     regularized_depth: &[f32],
+    boundary_trimap: &[u8],
     bayer: &mut [f32],
     uncertainty: &mut [f32],
     source_map: &mut [u16],
     fusion_flags: &mut [u8],
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     let width = group.width;
     let focus_denominator = (focus_steps - 1) as f32;
-    let refusion_pixels = bayer
+    let (refusion_pixels, boundary_source_fallback_pixels) = bayer
         .par_chunks_mut(width)
         .zip(uncertainty.par_chunks_mut(width))
         .zip(source_map.par_chunks_mut(width))
         .zip(fusion_flags.par_chunks_mut(width))
         .enumerate()
         .map(
-            |(y, (((output_row, uncertainty_row), source_row), flags_row))| -> Result<usize> {
+            |(y, (((output_row, uncertainty_row), source_row), flags_row))|
+             -> Result<(usize, usize)> {
                 let mut changed = 0usize;
+                let mut boundary_fallbacks = 0usize;
                 for (x, output) in output_row.iter_mut().enumerate() {
                     let index = y * width + x;
                     let source_focus = source_depth[index].clamp(0.0, 1.0) * focus_denominator;
                     let regularized_focus =
                         regularized_depth[index].clamp(0.0, 1.0) * focus_denominator;
-                    if source_focus.round() == regularized_focus.round() {
+                    let mixed_boundary = boundary_trimap
+                        .get(index)
+                        .is_some_and(|state| *state != BOUNDARY_TRIMAP_INTERIOR);
+                    if !mixed_boundary && source_focus.round() == regularized_focus.round() {
                         continue;
                     }
-                    changed += 1;
-                    let focus_position = regularized_focus;
+                    let focus_position = if mixed_boundary {
+                        regularized_focus.round()
+                    } else {
+                        regularized_focus
+                    };
                     let lower_focus = focus_position.floor() as usize;
                     let upper_focus = focus_position.ceil() as usize;
                     let fraction = focus_position - lower_focus as f32;
@@ -2542,20 +2616,31 @@ fn refuse_regularized_depth(
                         *output = estimate.radiance;
                         uncertainty_row[x] = estimate.uncertainty;
                         source_row[x] = estimate.source_index;
-                        flags_row[x] = estimate.flags;
+                        flags_row[x] = estimate.flags
+                            | if mixed_boundary {
+                                FUSION_FLAG_SOURCE_FALLBACK
+                            } else {
+                                0
+                            };
+                        changed += 1;
+                        boundary_fallbacks += usize::from(mixed_boundary);
                     }
                 }
-                Ok(changed)
+                Ok((changed, boundary_fallbacks))
             },
         )
-        .try_reduce(|| 0usize, |left, right| Ok(left + right))?;
+        .try_reduce(
+            || (0usize, 0usize),
+            |left, right| Ok((left.0 + right.0, left.1 + right.1)),
+        )?;
     tracing::info!(
-        "Depth-consistent refusion corrected {} / {} pixels ({:.2}%)",
+        "Depth-consistent refusion corrected {} / {} pixels ({:.2}%); {} physical boundary pixels anchored to one measured plane",
         refusion_pixels,
         bayer.len(),
-        refusion_pixels as f64 * 100.0 / bayer.len() as f64
+        refusion_pixels as f64 * 100.0 / bayer.len() as f64,
+        boundary_source_fallback_pixels,
     );
-    Ok(refusion_pixels)
+    Ok((refusion_pixels, boundary_source_fallback_pixels))
 }
 
 fn sample_same_cfa(
@@ -2933,6 +3018,174 @@ fn smoothed_metric(metric: &[f32], width: usize, height: usize, x: usize, y: usi
     let trim = usize::from(count >= 7);
     let kept = &values[trim..count - trim];
     kept.iter().sum::<f32>() / kept.len().max(1) as f32
+}
+
+struct BoundaryTrimapSummary {
+    map: Vec<u8>,
+    mixed_pixels: usize,
+    maximum_radius_pixels: usize,
+    fully_physical: bool,
+}
+
+/// Construct a bounded physical mixed-pixel support around depth crossings.
+///
+/// A crossing receives the larger of the two directional thin-lens defocus
+/// diameters. Using that diameter as support radius is the conservative
+/// two-times theoretical blur-radius rule recommended for compound lenses.
+/// A max-plus distance transform expands all variable-radius seeds in linear
+/// time without allocating a full focus-label volume.
+fn build_physical_boundary_trimap(
+    source_depth: &[f32],
+    corrected_depth: &[f32],
+    model: &PhysicalFocusModel,
+    width: usize,
+    height: usize,
+    radius_cap: usize,
+) -> BoundaryTrimapSummary {
+    let mut map = vec![BOUNDARY_TRIMAP_INTERIOR; width.saturating_mul(height)];
+    let Some(pixel_pitch_mm) = model.pixel_pitch_mm else {
+        return BoundaryTrimapSummary {
+            map,
+            mixed_pixels: 0,
+            maximum_radius_pixels: 0,
+            fully_physical: false,
+        };
+    };
+    if width == 0
+        || height == 0
+        || source_depth.len() != width * height
+        || corrected_depth.len() != width * height
+        || model.distances_m.len() < 2
+        || radius_cap == 0
+    {
+        return BoundaryTrimapSummary {
+            map,
+            mixed_pixels: 0,
+            maximum_radius_pixels: 0,
+            fully_physical: false,
+        };
+    }
+
+    let focus_denominator = (model.distances_m.len() - 1) as f32;
+    let mut support = vec![f32::NEG_INFINITY; map.len()];
+    let mut maximum_radius_pixels = 0usize;
+    let mut fully_physical = true;
+    let physical_radius = |left: usize, right: usize, surface: &[f32]| {
+        let left_focus = surface[left].clamp(0.0, 1.0) * focus_denominator;
+        let right_focus = surface[right].clamp(0.0, 1.0) * focus_denominator;
+        let left_distance = model.distance_at_index(left_focus);
+        let right_distance = model.distance_at_index(right_focus);
+        defocus_circle_mm(
+            model.focal_length_mm,
+            model.aperture,
+            left_distance,
+            right_distance,
+        )
+        .max(defocus_circle_mm(
+            model.focal_length_mm,
+            model.aperture,
+            right_distance,
+            left_distance,
+        )) / pixel_pitch_mm
+    };
+    let mut seed_pair = |left: usize, right: usize| {
+        let measured_radius = physical_radius(left, right, source_depth);
+        if !measured_radius.is_finite() || measured_radius < 0.5 {
+            return;
+        }
+        // Projection can conservatively enlarge support at an existing
+        // measured crossing, but cannot create a new crossing core.
+        let projected_radius = physical_radius(left, right, corrected_depth);
+        let physical_radius = measured_radius.max(projected_radius);
+        let unbounded_radius = physical_radius.ceil().max(1.0) as usize;
+        let radius = unbounded_radius.min(radius_cap);
+        fully_physical &= unbounded_radius <= radius_cap;
+        maximum_radius_pixels = maximum_radius_pixels.max(radius);
+        map[left] = BOUNDARY_TRIMAP_CROSSING_CORE;
+        map[right] = BOUNDARY_TRIMAP_CROSSING_CORE;
+        support[left] = support[left].max(radius as f32);
+        support[right] = support[right].max(radius as f32);
+    };
+
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            if x + 1 < width {
+                seed_pair(index, index + 1);
+            }
+            if y + 1 < height {
+                seed_pair(index, index + width);
+                if x > 0 {
+                    seed_pair(index, index + width - 1);
+                }
+                if x + 1 < width {
+                    seed_pair(index, index + width + 1);
+                }
+            }
+        }
+    }
+
+    let diagonal = std::f32::consts::SQRT_2;
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let mut value = support[index];
+            if x > 0 {
+                value = value.max(support[index - 1] - 1.0);
+            }
+            if y > 0 {
+                value = value.max(support[index - width] - 1.0);
+                if x > 0 {
+                    value = value.max(support[index - width - 1] - diagonal);
+                }
+                if x + 1 < width {
+                    value = value.max(support[index - width + 1] - diagonal);
+                }
+            }
+            support[index] = value;
+        }
+    }
+    for y in (0..height).rev() {
+        for x in (0..width).rev() {
+            let index = y * width + x;
+            let mut value = support[index];
+            if x + 1 < width {
+                value = value.max(support[index + 1] - 1.0);
+            }
+            if y + 1 < height {
+                value = value.max(support[index + width] - 1.0);
+                if x > 0 {
+                    value = value.max(support[index + width - 1] - diagonal);
+                }
+                if x + 1 < width {
+                    value = value.max(support[index + width + 1] - diagonal);
+                }
+            }
+            support[index] = value;
+        }
+    }
+
+    for (state, support) in map.iter_mut().zip(support) {
+        if *state == BOUNDARY_TRIMAP_INTERIOR && support >= 0.0 {
+            *state = BOUNDARY_TRIMAP_PSF_SUPPORT;
+        }
+    }
+    let mixed_pixels = map
+        .iter()
+        .filter(|state| **state != BOUNDARY_TRIMAP_INTERIOR)
+        .count();
+    tracing::info!(
+        mixed_pixels,
+        maximum_radius_pixels,
+        fully_physical,
+        "Physical mixed-pixel boundary trimap built"
+    );
+    BoundaryTrimapSummary {
+        map,
+        mixed_pixels,
+        maximum_radius_pixels,
+        fully_physical,
+    }
 }
 
 /// Foreground-favored projection of the continuous sensor-distance surface
@@ -3389,6 +3642,43 @@ mod tests {
         let wide = defocus_circle_mm(105.0, 2.8, 0.5, 0.6);
         let stopped_down = defocus_circle_mm(105.0, 11.0, 0.5, 0.6);
         assert!(wide > stopped_down * 3.9);
+    }
+
+    #[test]
+    fn physical_boundary_trimap_scales_with_aperture_and_reports_truncation() {
+        let width = 64;
+        let height = 16;
+        let mut depth = vec![0.0f32; width * height];
+        for row in depth.chunks_mut(width) {
+            row[width / 2..].fill(1.0);
+        }
+        let mut wide = physical_model(&[2.0, 2.1]);
+        wide.aperture = 2.0;
+        let mut stopped_down = wide.clone();
+        stopped_down.aperture = 16.0;
+        let wide_trimap = build_physical_boundary_trimap(&depth, &depth, &wide, width, height, 64);
+        let stopped_trimap =
+            build_physical_boundary_trimap(&depth, &depth, &stopped_down, width, height, 64);
+
+        assert!(wide_trimap.fully_physical);
+        assert!(stopped_trimap.fully_physical);
+        assert!(wide_trimap.maximum_radius_pixels > stopped_trimap.maximum_radius_pixels);
+        assert!(wide_trimap.mixed_pixels > stopped_trimap.mixed_pixels);
+        assert_eq!(
+            wide_trimap.map[height / 2 * width + width / 2 - 1],
+            BOUNDARY_TRIMAP_CROSSING_CORE
+        );
+        assert_eq!(
+            wide_trimap.map[height / 2 * width + width / 2],
+            BOUNDARY_TRIMAP_CROSSING_CORE
+        );
+        assert!(wide_trimap.map.contains(&BOUNDARY_TRIMAP_PSF_SUPPORT));
+
+        let near_model = physical_model(&[0.5, 0.8]);
+        let truncated =
+            build_physical_boundary_trimap(&depth, &depth, &near_model, width, height, 8);
+        assert_eq!(truncated.maximum_radius_pixels, 8);
+        assert!(!truncated.fully_physical);
     }
 
     #[test]
@@ -3907,6 +4197,7 @@ mod tests {
             &config,
             &source_depth,
             &regularized_depth,
+            &vec![BOUNDARY_TRIMAP_INTERIOR; width * height],
             &mut bayer,
             &mut uncertainty,
             &mut source_map,
@@ -3915,6 +4206,135 @@ mod tests {
         .unwrap();
         assert!((bayer[8 * width + 8] - scenes[0]).abs() < 1e-6);
         assert!((bayer[8 * width + 9] - scenes[1]).abs() < 2e-3);
+    }
+
+    #[test]
+    fn mixed_boundary_anchors_one_source_and_reduces_halo_energy() {
+        let width = 64;
+        let height = 16;
+        let white = 16_383.0;
+        let scenes = [0.12f32, 0.48f32];
+        let mut pixels = Vec::with_capacity(2 * width * height);
+        for scene in scenes {
+            let raw = (scene * white).round() as u16;
+            pixels.extend(std::iter::repeat(raw).take(width * height));
+        }
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            scenes.len(),
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            vec![metadata(1.0), metadata(1.0)],
+        )
+        .unwrap();
+        let config = NativeFusionConfig {
+            black_level: Some(0.0),
+            white_level: Some(white),
+            regularize_depth: false,
+            ..Default::default()
+        };
+        let calibrations = build_calibrations(&group, &config).unwrap();
+        let frame_warps = vec![
+            FrameWarp::identity(PlaneTransform::identity(), true),
+            FrameWarp::identity(PlaneTransform::identity(), true),
+        ];
+        let mut depth = vec![0.0f32; width * height];
+        for row in depth.chunks_mut(width) {
+            row[width / 2..].fill(1.0);
+        }
+        let model = physical_model(&[2.0, 2.1]);
+        let trimap = build_physical_boundary_trimap(&depth, &depth, &model, width, height, 64);
+        assert!(trimap.mixed_pixels > 0);
+
+        let truth = (0..height)
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    let scene = scenes[usize::from(x >= width / 2)];
+                    scene_site_value(scene, ((y & 1) << 1) | (x & 1))
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut halo = truth.clone();
+        for y in 0..height {
+            for x in width / 2 - 3..width / 2 + 3 {
+                let site = ((y & 1) << 1) | (x & 1);
+                halo[y * width + x] =
+                    0.5 * (scene_site_value(scenes[0], site) + scene_site_value(scenes[1], site));
+            }
+        }
+        let mut unprotected = halo.clone();
+        let mut protected = halo;
+        let mut unprotected_uncertainty = vec![0.0; width * height];
+        let mut protected_uncertainty = vec![0.0; width * height];
+        let mut unprotected_source = vec![u16::MAX; width * height];
+        let mut protected_source = vec![u16::MAX; width * height];
+        let mut unprotected_flags = vec![0; width * height];
+        let mut protected_flags = vec![0; width * height];
+        let empty_trimap = vec![BOUNDARY_TRIMAP_INTERIOR; width * height];
+        let (_, unprotected_fallbacks) = refuse_regularized_depth(
+            &group,
+            &calibrations,
+            &frame_warps,
+            2,
+            1,
+            1.0,
+            &config,
+            &depth,
+            &depth,
+            &empty_trimap,
+            &mut unprotected,
+            &mut unprotected_uncertainty,
+            &mut unprotected_source,
+            &mut unprotected_flags,
+        )
+        .unwrap();
+        let (_, protected_fallbacks) = refuse_regularized_depth(
+            &group,
+            &calibrations,
+            &frame_warps,
+            2,
+            1,
+            1.0,
+            &config,
+            &depth,
+            &depth,
+            &trimap.map,
+            &mut protected,
+            &mut protected_uncertainty,
+            &mut protected_source,
+            &mut protected_flags,
+        )
+        .unwrap();
+
+        let halo_energy = |values: &[f32]| {
+            values
+                .iter()
+                .zip(&truth)
+                .zip(&trimap.map)
+                .filter(|(_, state)| **state != BOUNDARY_TRIMAP_INTERIOR)
+                .map(|((value, truth), _)| f64::from((value - truth).abs()))
+                .sum::<f64>()
+        };
+        let unprotected_energy = halo_energy(&unprotected);
+        let protected_energy = halo_energy(&protected);
+        eprintln!("mixed-boundary halo energy: {unprotected_energy:.6} -> {protected_energy:.6}");
+        assert_eq!(unprotected_fallbacks, 0);
+        assert_eq!(protected_fallbacks, trimap.mixed_pixels);
+        assert!(
+            protected_energy <= unprotected_energy * 0.5,
+            "physical boundary fallback missed the 50% halo gate"
+        );
+        assert!(protected_flags
+            .iter()
+            .zip(&trimap.map)
+            .filter(|(_, state)| **state != BOUNDARY_TRIMAP_INTERIOR)
+            .all(|(flags, _)| *flags & FUSION_FLAG_SOURCE_FALLBACK != 0));
+        assert!(protected_source
+            .iter()
+            .zip(&trimap.map)
+            .filter(|(_, state)| **state != BOUNDARY_TRIMAP_INTERIOR)
+            .all(|(source, _)| *source != u16::MAX));
     }
 
     fn scene_site_value(scene: f32, site: usize) -> f32 {
@@ -4039,8 +4459,45 @@ mod tests {
             },
         )
         .unwrap();
+        let physical_result_wide_tile = fuse_native_group(
+            &physical_group,
+            &meta(2, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                tile_size: 64,
+                minimum_alignment_score: 2.0,
+                regularize_depth: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let physical_diagnostics_only = fuse_native_group(
+            &physical_group,
+            &meta(2, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                tile_size: 32,
+                minimum_alignment_score: 2.0,
+                regularize_depth: false,
+                depth_consistent_refusion: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(physical_result.visibility_constrained);
         assert!(physical_result.visibility_adjusted_pixels > 0);
+        assert!(physical_result.mixed_boundary_pixels > 0);
+        assert!(physical_result.boundary_source_fallback_pixels > 0);
+        assert!(physical_diagnostics_only.mixed_boundary_pixels > 0);
+        assert_eq!(physical_diagnostics_only.boundary_source_fallback_pixels, 0);
+        assert_eq!(physical_diagnostics_only.depth_refusion_pixels, 0);
+        assert_eq!(
+            physical_result.boundary_trimap,
+            physical_result_wide_tile.boundary_trimap
+        );
+        assert_eq!(physical_result.bayer, physical_result_wide_tile.bayer);
         let flagged = physical_result
             .fusion_flags
             .iter()

@@ -1928,6 +1928,7 @@ fn run_burst_pipeline(
                 source_map,
                 fusion_flags,
                 glare_map,
+                boundary_trimap,
                 foreground_mask,
                 transforms,
                 frame_alignments,
@@ -1936,6 +1937,10 @@ fn run_burst_pipeline(
                 depth_refusion_pixels,
                 visibility_adjusted_pixels,
                 visibility_constrained,
+                mixed_boundary_pixels,
+                boundary_source_fallback_pixels,
+                trimap_radius_pixels,
+                trimap_physical_scale,
                 glare_radius_pixels,
                 glare_physical_scale,
                 glare_affected_pixels,
@@ -1969,6 +1974,8 @@ fn run_burst_pipeline(
             let fusion_flags_path =
                 output_path.with_file_name(format!("{output_stem}_fusion_flags.png"));
             let glare_map_path = output_path.with_file_name(format!("{output_stem}_glare_map.png"));
+            let boundary_trimap_path =
+                output_path.with_file_name(format!("{output_stem}_boundary_trimap.png"));
             let fusion_overlay_path =
                 output_path.with_file_name(format!("{output_stem}_fusion_overlay.png"));
             let fusion_report_path =
@@ -2004,6 +2011,12 @@ fn run_burst_pipeline(
                 "source_map": source_map_path.file_name(),
                 "fusion_flags": fusion_flags_path.file_name(),
                 "glare_map": glare_map_path.file_name(),
+                "boundary_trimap": boundary_trimap_path.file_name(),
+                "boundary_trimap_legend": {
+                    "interior": trueshot_core::native_fusion::BOUNDARY_TRIMAP_INTERIOR,
+                    "psf_support": trueshot_core::native_fusion::BOUNDARY_TRIMAP_PSF_SUPPORT,
+                    "crossing_core": trueshot_core::native_fusion::BOUNDARY_TRIMAP_CROSSING_CORE
+                },
                 "overlay": fusion_overlay_path.file_name(),
                 "flag_legend": {
                     "censored": {"bit": FUSION_FLAG_CENSORED, "pixels": flag_count(FUSION_FLAG_CENSORED)},
@@ -2019,6 +2032,11 @@ fn run_burst_pipeline(
                 "depth_refusion_pixels": depth_refusion_pixels,
                 "visibility_adjusted_pixels": visibility_adjusted_pixels,
                 "visibility_constrained": visibility_constrained,
+                "mixed_boundary_pixels": mixed_boundary_pixels,
+                "boundary_source_fallback_pixels": boundary_source_fallback_pixels,
+                "trimap_radius_pixels": trimap_radius_pixels,
+                "trimap_physical_scale": trimap_physical_scale,
+                "boundary_policy": "single_traceable_measured_focus_plane_no_cross_depth_interpolation",
                 "glare_radius_pixels": glare_radius_pixels,
                 "glare_physical_scale": glare_physical_scale,
                 "glare_affected_pixels": glare_affected_pixels,
@@ -2099,6 +2117,14 @@ fn run_burst_pipeline(
                         &output_root,
                         glare_digest.size_bytes,
                         glare_digest.sha256,
+                    )?);
+                    let trimap_digest =
+                        save_u8_map_png_with_digest(&boundary_trimap, &boundary_trimap_path)?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &boundary_trimap_path,
+                        &output_root,
+                        trimap_digest.size_bytes,
+                        trimap_digest.sha256,
                     )?);
                     let overlay_digest = save_png_preview_with_digest(
                         &fusion_overlay_rgb,
