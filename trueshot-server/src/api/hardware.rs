@@ -412,9 +412,6 @@ pub async fn capture_hdr_bracket(
             resolution: None,
             fps: None,
         };
-        if let Err(err) = cam.set_config(&config) {
-            return HttpResponse::InternalServerError().body(err.to_string());
-        }
         match cam.capture(&config) {
             Ok(path) => shots.push(path.display().to_string()),
             Err(err) => return HttpResponse::InternalServerError().body(err.to_string()),
@@ -599,9 +596,6 @@ pub async fn capture_hdr_focus_stack(
                 resolution: None,
                 fps: None,
             };
-            if let Err(err) = cam.set_config(&config) {
-                return HttpResponse::InternalServerError().body(err.to_string());
-            }
             match cam.capture(&config) {
                 Ok(path) => shots.push(path.display().to_string()),
                 Err(err) => return HttpResponse::InternalServerError().body(err.to_string()),
@@ -842,11 +836,6 @@ async fn run_intervalometer(
                 let now = Utc::now();
                 let mut last_error = None;
                 if let Some(cam) = cam {
-                    if config.iso.is_some() || config.shutter_speed.is_some() || config.aperture.is_some() || config.capture_target.is_some() {
-                        if let Err(err) = cam.set_config(&config) {
-                            last_error = Some(format!("Config update failed: {}", err));
-                        }
-                    }
                     match cam.capture(&config) {
                         Ok(_) => {
                             captured = captured.saturating_add(1);

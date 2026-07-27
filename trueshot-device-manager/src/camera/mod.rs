@@ -31,6 +31,18 @@ pub struct CameraConfig {
     pub fps: Option<u32>,
 }
 
+impl CameraConfig {
+    pub fn has_requested_settings(&self) -> bool {
+        self.iso.is_some()
+            || self.shutter_speed.is_some()
+            || self.aperture.is_some()
+            || self.wb.is_some()
+            || self.capture_target.is_some()
+            || self.resolution.is_some()
+            || self.fps.is_some()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReconciliationReport {
     pub added: Vec<String>,
@@ -39,6 +51,9 @@ pub struct ReconciliationReport {
 
 pub trait Camera: Send + Sync {
     fn id(&self) -> String;
+    /// Apply every non-empty setting in `config`, then return the path of the
+    /// actual locally available capture. Adapters must fail on unsupported or
+    /// unapplied settings rather than fabricate success or a path.
     fn capture(&self, config: &CameraConfig) -> Result<PathBuf>;
     fn capture_preview(&self) -> Result<Vec<u8>>;
     fn set_config(&self, config: &CameraConfig) -> Result<()>;
@@ -46,25 +61,21 @@ pub trait Camera: Send + Sync {
 
     // PTZ Control
     fn ptz(&self, _pan: f32, _tilt: f32, _zoom: f32) -> Result<()> {
-        // Default no-op
-        Ok(())
+        Err(anyhow::anyhow!("PTZ control not supported"))
     }
 
     // Focus Control
     fn set_focus_point(&self, _x: f32, _y: f32) -> Result<()> {
-        // Default no-op
-        Ok(())
+        Err(anyhow::anyhow!("Focus-point control not supported"))
     }
 
     fn trigger_autofocus(&self) -> Result<()> {
-        // Default no-op
-        Ok(())
+        Err(anyhow::anyhow!("Autofocus control not supported"))
     }
 
     // Manual Lens Drive (Focus stepping)
     fn drive_focus(&self, _step: i32) -> Result<()> {
-        // Default no-op
-        Ok(())
+        Err(anyhow::anyhow!("Manual focus drive not supported"))
     }
 
     // Depth Camera Methods
@@ -260,7 +271,7 @@ impl Camera for LazyNokhwaCamera {
         if let Some(inner) = &mut *inner_guard {
             inner.set_focus_point(x, y)
         } else {
-            Ok(())
+            Err(anyhow::anyhow!("Camera not active"))
         }
     }
 
@@ -273,7 +284,7 @@ impl Camera for LazyNokhwaCamera {
         if let Some(inner) = &mut *inner_guard {
             inner.drive_focus(step)
         } else {
-            Ok(())
+            Err(anyhow::anyhow!("Camera not active"))
         }
     }
 }
@@ -655,3 +666,51 @@ impl CameraManager {
 }
 
 // MockCamera Removed
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MinimalCamera;
+
+    impl Camera for MinimalCamera {
+        fn id(&self) -> String {
+            "minimal".to_string()
+        }
+
+        fn capture(&self, _config: &CameraConfig) -> Result<PathBuf> {
+            Err(anyhow::anyhow!("capture unsupported"))
+        }
+
+        fn capture_preview(&self) -> Result<Vec<u8>> {
+            Err(anyhow::anyhow!("preview unsupported"))
+        }
+
+        fn set_config(&self, _config: &CameraConfig) -> Result<()> {
+            Ok(())
+        }
+
+        fn battery_level(&self) -> Result<u8> {
+            Ok(100)
+        }
+    }
+
+    #[test]
+    fn unsupported_camera_controls_fail_instead_of_reporting_success() {
+        let camera = MinimalCamera;
+        assert!(camera.ptz(0.0, 0.0, 0.0).is_err());
+        assert!(camera.set_focus_point(0.5, 0.5).is_err());
+        assert!(camera.trigger_autofocus().is_err());
+        assert!(camera.drive_focus(1).is_err());
+    }
+
+    #[test]
+    fn empty_camera_config_has_no_transaction_to_apply() {
+        assert!(!CameraConfig::default().has_requested_settings());
+        assert!(CameraConfig {
+            shutter_speed: Some("1/125".to_string()),
+            ..Default::default()
+        }
+        .has_requested_settings());
+    }
+}

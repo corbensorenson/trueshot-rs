@@ -1,10 +1,26 @@
 use super::{Camera, CameraCapabilities, CameraConfig};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use futures::executor::block_on;
-use gphoto2::{widget::Widget, Camera as GpCamera, Context as GpContext};
-use std::path::PathBuf;
+use gphoto2::{
+    widget::{GroupWidget, Widget},
+    Camera as GpCamera, Context as GpContext,
+};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+const ISO_WIDGETS: &[&str] = &["ISO Speed", "ISO", "iso"];
+const SHUTTER_WIDGETS: &[&str] = &["Shutter Speed", "shutterspeed", "Shutter Speed 2"];
+const APERTURE_WIDGETS: &[&str] = &["F-Number", "Aperture", "f-number"];
+const WHITE_BALANCE_WIDGETS: &[&str] = &[
+    "White Balance",
+    "White balance",
+    "whitebalance",
+    "WhiteBalance",
+    "WB",
+];
+const CAPTURE_TARGET_WIDGETS: &[&str] = &["Capture Target", "capturetarget"];
 
 pub struct GPhotoCamera {
     pub id: String,
@@ -131,62 +147,27 @@ impl GPhotoCamera {
     }
 
     pub fn detect_all() -> Result<Vec<Self>> {
-        tracing::error!("DEBUG: Starting GPhoto detect_all (Enhanced Logging)");
-        // Fix for macOS: PTPCamera steals the device. Kill it.
+        tracing::debug!("Starting gPhoto camera discovery");
         #[cfg(target_os = "macos")]
-        {
-            // Aggressively kill PTPCamera with SIGKILL (-9)
-            for i in 0..3 {
-                let output = std::process::Command::new("killall")
-                    .arg("-9")
-                    .arg("PTPCamera")
-                    .output();
-                match output {
-                    Ok(out) => {
-                        if out.status.success() {
-                            tracing::error!("Successfully killed PTPCamera (Attempt {})", i + 1);
-                        } else {
-                            tracing::error!(
-                                "PTPCamera kill attempted but process not found or failed: {:?}",
-                                out
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to execute killall command: {}", e);
-                    }
-                }
-                let _ = std::process::Command::new("killall")
-                    .arg("-9")
-                    .arg("gphoto2")
-                    .output();
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-
-            // Wait for release
-            std::thread::sleep(std::time::Duration::from_millis(2000));
-        }
+        release_macos_ptp_helper();
 
         let context = GpContext::new()?;
-        tracing::error!("DEBUG: GPhoto Context created.");
         let mut cameras = Vec::new();
 
-        // Try autodetect first
-        tracing::error!("DEBUG: Starting autodetect_camera...");
         let detection_result = block_on(context.autodetect_camera());
         match detection_result {
             Ok(cam) => {
-                tracing::error!("DEBUG: Autodetect SUCCESS!");
+                tracing::info!("gPhoto camera detected");
                 if let Ok(c) = Self::new(cam, GpContext::new()?) {
                     cameras.push(c);
                 }
             }
             Err(e) => {
-                tracing::error!("DEBUG: GPhoto autodetect failed: {}", e);
+                tracing::debug!("gPhoto autodetect found no available camera: {}", e);
             }
         }
 
-        tracing::error!("DEBUG: detect_all returning {} cameras.", cameras.len());
+        tracing::debug!("gPhoto discovery returned {} cameras", cameras.len());
         Ok(cameras)
     }
 }
@@ -196,15 +177,61 @@ impl Camera for GPhotoCamera {
         self.id.clone()
     }
 
-    fn capture(&self, _config: &CameraConfig) -> Result<PathBuf> {
+    fn capture(&self, config: &CameraConfig) -> Result<PathBuf> {
+        if config.has_requested_settings() {
+            self.set_config(config)?;
+        }
         let cam = self.camera.lock().unwrap();
-        // Just trigger capture to look like it works
-        let _path_info =
+        let path_info =
             block_on(cam.capture_image()).map_err(|e| anyhow!("Capture failed: {}", e))?;
-
-        // Return dummy path to satisfy trait
-        let tmp_path = std::env::temp_dir().join(format!("dslr_{}.jpg", Uuid::new_v4()));
-        Ok(tmp_path)
+        let camera_name = path_info.name();
+        let destination = unique_capture_path(&camera_name)?;
+        let partial = partial_path(&destination);
+        let downloaded = block_on(cam.fs().download_to(
+            &path_info.folder(),
+            &camera_name,
+            &partial,
+        ))
+        .map_err(|error| {
+            let _ = fs::remove_file(&partial);
+            anyhow!("Captured {camera_name} but failed to download it: {error}")
+        })?;
+        drop(downloaded);
+        let publish_result = (|| -> Result<()> {
+            let size = fs::metadata(&partial)
+                .with_context(|| format!("Inspect downloaded capture {}", partial.display()))?
+                .len();
+            if size == 0 {
+                return Err(anyhow!(
+                    "Camera returned an empty capture for {camera_name}"
+                ));
+            }
+            fs::File::open(&partial)
+                .with_context(|| format!("Open downloaded capture {}", partial.display()))?
+                .sync_all()
+                .with_context(|| format!("Sync downloaded capture {}", partial.display()))?;
+            fs::rename(&partial, &destination).with_context(|| {
+                format!(
+                    "Publish downloaded capture {} as {}",
+                    partial.display(),
+                    destination.display()
+                )
+            })
+        })();
+        if let Err(error) = publish_result {
+            let _ = fs::remove_file(&partial);
+            return Err(error);
+        }
+        if let Some(parent) = destination.parent() {
+            if let Err(error) = fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+                tracing::warn!(
+                    "Capture {} is published but directory sync failed: {}",
+                    destination.display(),
+                    error
+                );
+            }
+        }
+        Ok(destination)
     }
 
     fn capture_preview(&self) -> Result<Vec<u8>> {
@@ -257,80 +284,71 @@ impl Camera for GPhotoCamera {
     }
 
     fn set_config(&self, config: &CameraConfig) -> Result<()> {
+        if config.resolution.is_some() || config.fps.is_some() {
+            return Err(anyhow!(
+                "gPhoto still-capture adapter does not support video resolution/FPS controls"
+            ));
+        }
         let cam = self.camera.lock().unwrap();
         let gp_config =
             block_on(cam.config()).map_err(|e| anyhow!("Failed to get config: {}", e))?;
-
-        let mut changed = false;
-
-        // Helper to set value
-        let mut set_val = |label: &str, val: &str| {
-            if let Ok(widget) = gp_config.get_child_by_label(label) {
-                // Radio/Menu usually takes text
-                if let Widget::Radio(radio) = widget {
-                    match radio.set_choice(val) {
-                        Ok(_) => changed = true,
-                        Err(e) => tracing::warn!("Failed to set {}: {}", label, e),
-                    }
-                } else if let Widget::Text(text) = widget {
-                    match text.set_value(val) {
-                        Ok(_) => changed = true,
-                        Err(e) => tracing::warn!("Failed to set {}: {}", label, e),
-                    }
-                }
-            } else {
-                tracing::warn!("Widget {} not found", label);
-            }
-        };
-
+        let mut requested = Vec::new();
         if let Some(iso) = &config.iso {
-            set_val("ISO Speed", iso);
+            set_required_setting(&gp_config, "ISO", ISO_WIDGETS, iso)?;
+            requested.push(("ISO", ISO_WIDGETS, iso.as_str()));
         }
         if let Some(ss) = &config.shutter_speed {
-            set_val("Shutter Speed", ss);
+            set_required_setting(&gp_config, "shutter speed", SHUTTER_WIDGETS, ss)?;
+            requested.push(("shutter speed", SHUTTER_WIDGETS, ss.as_str()));
         }
         if let Some(ap) = &config.aperture {
-            // Try F-Number first then Aperture
-            if gp_config.get_child_by_label("F-Number").is_ok() {
-                set_val("F-Number", ap);
-            } else {
-                set_val("Aperture", ap);
-            }
+            set_required_setting(&gp_config, "aperture", APERTURE_WIDGETS, ap)?;
+            requested.push(("aperture", APERTURE_WIDGETS, ap.as_str()));
         }
         if let Some(wb) = &config.wb {
-            let wb_labels = [
-                "White Balance",
-                "White balance",
-                "whitebalance",
-                "WhiteBalance",
-                "WB",
-            ];
-            let mut applied = false;
-            for label in wb_labels {
-                if gp_config.get_child_by_label(label).is_ok() {
-                    set_val(label, wb);
-                    applied = true;
-                    break;
-                }
-            }
-            if !applied {
-                tracing::warn!("No white balance widget found for {}", self.id);
-            }
+            set_required_setting(&gp_config, "white balance", WHITE_BALANCE_WIDGETS, wb)?;
+            requested.push(("white balance", WHITE_BALANCE_WIDGETS, wb.as_str()));
         }
-
-        if changed {
+        if let Some(target) = &config.capture_target {
+            set_required_setting(&gp_config, "capture target", CAPTURE_TARGET_WIDGETS, target)?;
+            requested.push(("capture target", CAPTURE_TARGET_WIDGETS, target.as_str()));
+        }
+        if !requested.is_empty() {
             block_on(cam.set_config(&gp_config))
                 .map_err(|e| anyhow!("Failed to apply config: {}", e))?;
+            let mut last_error = None;
+            for attempt in 0..3 {
+                let verified = block_on(cam.config())
+                    .map_err(|e| anyhow!("Failed to verify config: {}", e))?;
+                let result = requested
+                    .iter()
+                    .try_for_each(|(setting, aliases, expected)| {
+                        verify_setting(&verified, setting, aliases, expected)
+                    });
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(error) => last_error = Some(error),
+                }
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+            }
+            return Err(last_error
+                .unwrap_or_else(|| anyhow!("Camera setting readback failed unexpectedly")));
         }
-
         Ok(())
     }
 
     fn ptz(&self, _pan: f32, _tilt: f32, _zoom: f32) -> Result<()> {
-        Ok(())
+        Err(anyhow!(
+            "PTZ control is not supported by the gPhoto adapter"
+        ))
     }
 
     fn drive_focus(&self, step: i32) -> Result<()> {
+        if step == 0 {
+            return Err(anyhow!("Manual focus drive step cannot be zero"));
+        }
         let cam = self.camera.lock().unwrap();
 
         let config = block_on(cam.config()).map_err(|e| anyhow!("Failed to get config: {}", e))?;
@@ -341,7 +359,8 @@ impl Camera for GPhotoCamera {
             tracing::info!("Found viewfinder widget, enabling...");
             if let Widget::Toggle(toggle) = widget {
                 toggle.set_toggled(true);
-                let _ = block_on(cam.set_config(&config));
+                block_on(cam.set_config(&config))
+                    .map_err(|e| anyhow!("Failed to enable live view for focus drive: {}", e))?;
             }
         }
 
@@ -392,12 +411,15 @@ impl Camera for GPhotoCamera {
                     range.set_value(val_f32);
                 }
                 Widget::Radio(radio) => {
-                    let _ = radio.set_choice(value_str);
+                    radio
+                        .set_choice(value_str)
+                        .map_err(|e| anyhow!("Failed to select focus drive command: {}", e))?;
                 }
                 Widget::Text(text) => {
-                    let _ = text.set_value(value_str);
+                    text.set_value(value_str)
+                        .map_err(|e| anyhow!("Failed to set text focus drive command: {}", e))?;
                 }
-                _ => {}
+                _ => return Err(anyhow!("Unsupported manual focus widget type")),
             }
 
             block_on(cam.set_config(&config))
@@ -405,7 +427,144 @@ impl Camera for GPhotoCamera {
             return Ok(());
         }
 
-        tracing::warn!("No suitable focus widget found.");
-        Ok(())
+        Err(anyhow!("Camera exposes no supported manual focus widget"))
+    }
+}
+
+fn find_widget(config: &GroupWidget, aliases: &[&str]) -> Option<Widget> {
+    aliases
+        .iter()
+        .find_map(|alias| config.get_child_by_label(alias).ok())
+        .or_else(|| {
+            aliases
+                .iter()
+                .find_map(|alias| config.get_child_by_name(alias).ok())
+        })
+}
+
+fn set_required_setting(
+    config: &GroupWidget,
+    setting: &str,
+    aliases: &[&str],
+    value: &str,
+) -> Result<()> {
+    let widget = find_widget(config, aliases)
+        .with_context(|| format!("Camera exposes no writable {setting} control"))?;
+    if widget.readonly() {
+        return Err(anyhow!("Camera {setting} control is read-only"));
+    }
+    match widget {
+        Widget::Radio(radio) => {
+            if !radio.choices_iter().any(|choice| choice == value) {
+                return Err(anyhow!(
+                    "Camera rejected unsupported {setting} value {value:?}"
+                ));
+            }
+            radio
+                .set_choice(value)
+                .with_context(|| format!("Set camera {setting} to {value:?}"))
+        }
+        Widget::Text(text) => text
+            .set_value(value)
+            .with_context(|| format!("Set camera {setting} to {value:?}")),
+        _ => Err(anyhow!(
+            "Camera {setting} control has an unsupported widget type"
+        )),
+    }
+}
+
+fn verify_setting(
+    config: &GroupWidget,
+    setting: &str,
+    aliases: &[&str],
+    expected: &str,
+) -> Result<()> {
+    let widget = find_widget(config, aliases)
+        .with_context(|| format!("Camera {setting} control disappeared during verification"))?;
+    let actual = match widget {
+        Widget::Radio(radio) => radio.choice(),
+        Widget::Text(text) => text.value(),
+        _ => {
+            return Err(anyhow!(
+                "Camera {setting} control cannot be read back exactly"
+            ))
+        }
+    };
+    if actual != expected {
+        return Err(anyhow!(
+            "Camera {setting} readback mismatch: requested {expected:?}, got {actual:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn unique_capture_path(camera_name: &str) -> Result<PathBuf> {
+    let root = std::env::var_os("TRUESHOT_CAPTURE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_local_dir().map(|path| path.join("TrueShot").join("captures")))
+        .context("Cannot determine local TrueShot capture directory")?;
+    fs::create_dir_all(&root)
+        .with_context(|| format!("Create capture directory {}", root.display()))?;
+    let safe_name = safe_camera_filename(camera_name);
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    Ok(root.join(format!("{timestamp}_{}_{}", Uuid::new_v4(), safe_name)))
+}
+
+fn safe_camera_filename(camera_name: &str) -> String {
+    let safe = Path::new(camera_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("capture.bin")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let safe = safe.trim_matches('.').to_string();
+    if safe.is_empty() {
+        "capture.bin".to_string()
+    } else {
+        safe
+    }
+}
+
+fn partial_path(destination: &Path) -> PathBuf {
+    let mut name = destination.as_os_str().to_os_string();
+    name.push(".part");
+    PathBuf::from(name)
+}
+
+#[cfg(target_os = "macos")]
+fn release_macos_ptp_helper() {
+    let result = std::process::Command::new("killall")
+        .arg("PTPCamera")
+        .output();
+    match result {
+        Ok(output) if output.status.success() => {
+            tracing::debug!("Released Apple's PTPCamera helper for tethered capture");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        Ok(_) => {}
+        Err(error) => tracing::debug!("Could not request PTPCamera release: {}", error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_filename_cannot_escape_capture_directory() {
+        assert_eq!(
+            safe_camera_filename("../../DCIM/DSC_0001.NEF"),
+            "DSC_0001.NEF"
+        );
+        assert_eq!(safe_camera_filename("a b?.nef"), "a_b_.nef");
+        assert_eq!(safe_camera_filename(".."), "capture.bin");
     }
 }

@@ -383,7 +383,10 @@ impl TetherCamera for KinectCamera {
         self.id.clone()
     }
 
-    fn capture(&self, _config: &CameraConfig) -> Result<PathBuf> {
+    fn capture(&self, config: &CameraConfig) -> Result<PathBuf> {
+        if config.has_requested_settings() {
+            self.set_config(config)?;
+        }
         let state = self
             .state
             .lock()
@@ -498,9 +501,27 @@ impl TetherCamera for KinectCamera {
         }
     }
 
-    fn set_config(&self, _config: &CameraConfig) -> Result<()> {
-        // Kinect has fixed resolution, so most config is ignored
-        // But we could use this to set stream type
+    fn set_config(&self, config: &CameraConfig) -> Result<()> {
+        if config.iso.is_some()
+            || config.shutter_speed.is_some()
+            || config.aperture.is_some()
+            || config.wb.is_some()
+            || config.capture_target.is_some()
+        {
+            return Err(anyhow!("Kinect does not support photographic controls"));
+        }
+        if config
+            .resolution
+            .is_some_and(|resolution| resolution != Self::RGB_RESOLUTION)
+            || config.fps.is_some_and(|fps| fps != Self::FRAME_RATE)
+        {
+            return Err(anyhow!(
+                "Kinect capture format is fixed at {}x{}@{}",
+                Self::RGB_RESOLUTION.0,
+                Self::RGB_RESOLUTION.1,
+                Self::FRAME_RATE
+            ));
+        }
         Ok(())
     }
 

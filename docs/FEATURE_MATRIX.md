@@ -1,6 +1,6 @@
 # TrueShot Feature Matrix
 
-Date: 2026-07-26
+Date: 2026-07-27
 
 Legend: **Shipping**, **In Progress**, **Planned**
 
@@ -11,7 +11,7 @@ Legend: **Shipping**, **In Progress**, **Planned**
 | Capture | Live coverage heatmap + IQA alerts | Shipping | Coverage overlay + blur/parallax/exposure warnings |
 | Capture | Auto-capture gating | Shipping | Auto-capture respects quality thresholds |
 | Capture | WebRTC low-latency streaming | Planned | WebRTC server still a stub |
-| Capture | HDR bracketing + focus stacking | In Progress | End-to-end hardware validation pending |
+| Capture | HDR bracketing + focus stacking | In Progress | gPhoto now applies and exactly reads back declared ISO/shutter/aperture/WB/target settings, downloads the real camera file into local app storage through sync + atomic rename, and fails unsupported controls instead of reporting success; Nikon end-to-end, interruption, throughput, focus-readback, and planner-loop validation remain |
 | Capture | Burst capture + best-frame selection | In Progress | Capture path wired; full selection policy tuning pending |
 | Capture | Explicit, deadlock-safe scan workflows | Shipping | Project load is side-effect free; file-backed and no-camera integration tests enforce bounded startup/capture behavior |
 | Capture | Thread-affine webcam and 360-camera lifecycle | Shipping | Nokhwa handles stay on bounded dedicated actors with deadline, panic, shutdown, and atomic-capture tests; no unsafe thread assertions |

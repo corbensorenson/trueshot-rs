@@ -57,7 +57,10 @@ impl TetherCamera for GenericWebcam {
         self.id.clone()
     }
 
-    fn capture(&self, _config: &CameraConfig) -> Result<PathBuf> {
+    fn capture(&self, config: &CameraConfig) -> Result<PathBuf> {
+        if config.has_requested_settings() {
+            self.set_config(config)?;
+        }
         self.camera.capture()
     }
 

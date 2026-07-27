@@ -176,11 +176,28 @@ impl CameraBackend for NokhwaBackend {
     }
 
     fn configure(&mut self, config: &CameraConfig) -> Result<()> {
-        let Some((width, height)) = config.resolution else {
-            return Ok(());
-        };
+        let unsupported = [
+            ("ISO", config.iso.as_ref()),
+            ("shutter speed", config.shutter_speed.as_ref()),
+            ("aperture", config.aperture.as_ref()),
+            ("white balance", config.wb.as_ref()),
+            ("capture target", config.capture_target.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|_| name))
+        .collect::<Vec<_>>();
+        if !unsupported.is_empty() {
+            return Err(anyhow!(
+                "AVFoundation camera does not support requested controls: {}",
+                unsupported.join(", ")
+            ));
+        }
         let camera = self.camera_mut()?;
         let current = camera.camera_format();
+        let (width, height) = config
+            .resolution
+            .map(|resolution| (resolution.0, resolution.1))
+            .unwrap_or((current.width(), current.height()));
         let frame_rate = config.fps.unwrap_or(current.frame_rate());
         if current.resolution() == Resolution::new(width, height)
             && current.frame_rate() == frame_rate
@@ -211,6 +228,25 @@ impl CameraBackend for NokhwaBackend {
                 height,
                 frame_rate,
                 error
+            ));
+        }
+        let actual = camera.camera_format();
+        if actual.resolution() != Resolution::new(width, height)
+            || actual.frame_rate() != frame_rate
+        {
+            let rollback =
+                RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(previous));
+            let _ = camera.stop_stream();
+            let _ = camera.set_camera_requset(rollback);
+            let _ = camera.open_stream();
+            return Err(anyhow!(
+                "camera negotiated {}x{}@{} instead of requested {}x{}@{}",
+                actual.width(),
+                actual.height(),
+                actual.frame_rate(),
+                width,
+                height,
+                frame_rate
             ));
         }
 
