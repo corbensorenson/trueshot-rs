@@ -803,7 +803,7 @@ fn validate_posterior(posterior: &CapturePosterior) -> Result<()> {
     }
     for (index, probe) in posterior.focus.iter().enumerate() {
         if !probe.mean_diopters.is_finite()
-            || probe.mean_diopters <= 0.0
+            || probe.mean_diopters < 0.0
             || !probe.variance_diopters2.is_finite()
             || probe.variance_diopters2 < 0.0
             || !probe.weight.is_finite()
@@ -983,6 +983,21 @@ mod tests {
             .candidates
             .windows(2)
             .all(|pair| !compare_candidate(&pair[0], &pair[1]).is_gt()));
+    }
+
+    #[test]
+    fn infinity_focus_is_valid_in_candidates_and_posteriors() {
+        let mut state = posterior();
+        state.current_focus_diopters = 0.0;
+        state.focus[0].mean_diopters = 0.0;
+        let decision = plan_next_capture(
+            &state,
+            &[candidate(0.01, 100, 0.0)],
+            &profile(),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(decision.selected.unwrap().candidate.focus_diopters, 0.0);
     }
 
     #[test]
