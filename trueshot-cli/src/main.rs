@@ -29,8 +29,9 @@ use trueshot_core::demosaic_ahd::ahd_demosaic_f32_owned;
 use trueshot_core::export::usd::{export_usd_with_options, UsdExportOptions};
 use trueshot_core::export::{
     export_fbx, export_glb, export_gltf, export_ply, export_point_cloud_ply,
-    save_depth_tiff_with_digest, save_metric_depth_pfm_with_digest, save_png_preview_with_digest,
-    save_tiff16_from_f32_with_digest, PlyExportOptions,
+    save_bytes_with_digest, save_depth_tiff_with_digest, save_metric_depth_pfm_with_digest,
+    save_png_preview_with_digest, save_tiff16_from_f32_with_digest, save_u16_map_png_with_digest,
+    save_u8_map_png_with_digest, PlyExportOptions,
 };
 use trueshot_core::gaussian_splatting::{Camera as GsCamera, GaussianSplatTrainer, TrainingConfig};
 use trueshot_core::intrinsics::{
@@ -38,7 +39,12 @@ use trueshot_core::intrinsics::{
 };
 use trueshot_core::inventory::{Device, Inventory, Machine, Model, Sequence, SequenceStatus};
 use trueshot_core::licensing::{Feature, LicenseError, LicenseManager};
-use trueshot_core::native_fusion::{fuse_native_group, NativeFusionConfig, NativeFusionResult};
+use trueshot_core::native_fusion::{
+    fuse_native_group, fusion_provenance_preview, NativeFusionConfig, NativeFusionResult,
+    FUSION_FLAG_BRACKET_ALIGNED, FUSION_FLAG_CENSORED, FUSION_FLAG_CENSOR_CONFLICT,
+    FUSION_FLAG_DISOCCLUDED, FUSION_FLAG_OUTLIER_REJECTED, FUSION_FLAG_SOURCE_FALLBACK,
+    FUSION_FLAG_UNCALIBRATED_NOISE, FUSION_FLAG_VISIBILITY_CORRECTED,
+};
 use trueshot_core::postprocess::postprocess_f32;
 use trueshot_core::processing_journal::{
     artifact_digest_from_parts, ArtifactDigest, ArtifactVerification, ClaimDecision,
@@ -1338,6 +1344,7 @@ fn run_burst_pipeline(
                 num_cpus::get(),
                 fusion_config.tile_size,
                 fusion_config.focus_coarse_stride,
+                fusion_config.local_alignment_cell_size,
                 fusion_config.analysis_max_dimension,
             )?;
             let memory_permit =
@@ -1376,16 +1383,22 @@ fn run_burst_pipeline(
                 focus_diopters,
                 confidence: _,
                 radiance_uncertainty: _,
-                source_map: _,
-                fusion_flags: _,
+                source_map,
+                fusion_flags,
                 foreground_mask,
                 transforms,
+                frame_alignments,
                 radiance_anchor,
-                noise_model_calibrated: _,
-                depth_refusion_pixels: _,
-                visibility_adjusted_pixels: _,
-                visibility_constrained: _,
+                noise_model_calibrated,
+                depth_refusion_pixels,
+                visibility_adjusted_pixels,
+                visibility_constrained,
             } = fused;
+            let (fusion_overlay_rgb, fusion_overlay_alpha) = fusion_provenance_preview(
+                &source_map,
+                &fusion_flags,
+                preview_max_dimension.min(2048),
+            )?;
             let rgb_cam: [[f32; 4]; 3] = [
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 1.0, 0.0, 0.0],
@@ -1398,25 +1411,71 @@ fn run_burst_pipeline(
 
             let output_path = burst_group_output_path(output, sequence, &capture_group.group_id);
             let preview_path = output_path.with_extension("png");
-            let depth_path = output_path.with_file_name(format!(
-                "{}_depth.tiff",
-                output_path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("trueshot-burst")
-            ));
-            let metric_depth_path = output_path.with_file_name(format!(
-                "{}_depth_m.pfm",
-                output_path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("trueshot-burst")
-            ));
+            let output_stem = output_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("trueshot-burst");
+            let depth_path = output_path.with_file_name(format!("{output_stem}_depth.tiff"));
+            let metric_depth_path =
+                output_path.with_file_name(format!("{output_stem}_depth_m.pfm"));
+            let source_map_path =
+                output_path.with_file_name(format!("{output_stem}_source_map.png"));
+            let fusion_flags_path =
+                output_path.with_file_name(format!("{output_stem}_fusion_flags.png"));
+            let fusion_overlay_path =
+                output_path.with_file_name(format!("{output_stem}_fusion_overlay.png"));
+            let fusion_report_path =
+                output_path.with_file_name(format!("{output_stem}_fusion_report.json"));
             let accepted_transforms = transforms
                 .iter()
                 .filter(|transform| transform.accepted)
                 .count();
             let transform_count = transforms.len();
+            let accepted_bracket_transforms = frame_alignments
+                .iter()
+                .filter(|alignment| !alignment.reference_frame && alignment.global_accepted)
+                .count();
+            let local_aligned_cells = frame_alignments
+                .iter()
+                .map(|alignment| u64::from(alignment.local_aligned_cells))
+                .sum::<u64>();
+            let disoccluded_cells = frame_alignments
+                .iter()
+                .map(|alignment| u64::from(alignment.disoccluded_cells))
+                .sum::<u64>();
+            let flag_count = |flag: u8| {
+                fusion_flags
+                    .iter()
+                    .filter(|value| **value & flag != 0)
+                    .count()
+            };
+            let fusion_report = serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "trueshot.fusion.provenance.v1",
+                "width": source_map.dim().1,
+                "height": source_map.dim().0,
+                "source_sentinel": u16::MAX,
+                "source_map": source_map_path.file_name(),
+                "fusion_flags": fusion_flags_path.file_name(),
+                "overlay": fusion_overlay_path.file_name(),
+                "flag_legend": {
+                    "censored": {"bit": FUSION_FLAG_CENSORED, "pixels": flag_count(FUSION_FLAG_CENSORED)},
+                    "outlier_rejected": {"bit": FUSION_FLAG_OUTLIER_REJECTED, "pixels": flag_count(FUSION_FLAG_OUTLIER_REJECTED)},
+                    "source_fallback": {"bit": FUSION_FLAG_SOURCE_FALLBACK, "pixels": flag_count(FUSION_FLAG_SOURCE_FALLBACK)},
+                    "uncalibrated_noise": {"bit": FUSION_FLAG_UNCALIBRATED_NOISE, "pixels": flag_count(FUSION_FLAG_UNCALIBRATED_NOISE)},
+                    "censor_conflict": {"bit": FUSION_FLAG_CENSOR_CONFLICT, "pixels": flag_count(FUSION_FLAG_CENSOR_CONFLICT)},
+                    "visibility_corrected": {"bit": FUSION_FLAG_VISIBILITY_CORRECTED, "pixels": flag_count(FUSION_FLAG_VISIBILITY_CORRECTED)},
+                    "bracket_aligned": {"bit": FUSION_FLAG_BRACKET_ALIGNED, "pixels": flag_count(FUSION_FLAG_BRACKET_ALIGNED)},
+                    "disoccluded": {"bit": FUSION_FLAG_DISOCCLUDED, "pixels": flag_count(FUSION_FLAG_DISOCCLUDED)}
+                },
+                "noise_model_calibrated": noise_model_calibrated,
+                "depth_refusion_pixels": depth_refusion_pixels,
+                "visibility_adjusted_pixels": visibility_adjusted_pixels,
+                "visibility_constrained": visibility_constrained,
+                "local_aligned_cells": local_aligned_cells,
+                "disoccluded_cells": disoccluded_cells,
+                "frame_alignments": frame_alignments,
+                "archival_policy": "measured_sources_only_no_generative_reconstruction"
+            }))?;
             let output_root = output.to_path_buf();
             let group_id = capture_group.group_id.clone();
             let label = sequence.meta.bone_id.clone();
@@ -1466,6 +1525,42 @@ fn run_burst_pipeline(
                             preview_digest.sha256,
                         )?,
                     ];
+                    let source_digest =
+                        save_u16_map_png_with_digest(&source_map, &source_map_path)?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &source_map_path,
+                        &output_root,
+                        source_digest.size_bytes,
+                        source_digest.sha256,
+                    )?);
+                    let flags_digest =
+                        save_u8_map_png_with_digest(&fusion_flags, &fusion_flags_path)?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &fusion_flags_path,
+                        &output_root,
+                        flags_digest.size_bytes,
+                        flags_digest.sha256,
+                    )?);
+                    let overlay_digest = save_png_preview_with_digest(
+                        &fusion_overlay_rgb,
+                        &fusion_overlay_alpha,
+                        &fusion_overlay_path,
+                        usize::MAX,
+                    )?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &fusion_overlay_path,
+                        &output_root,
+                        overlay_digest.size_bytes,
+                        overlay_digest.sha256,
+                    )?);
+                    let report_digest =
+                        save_bytes_with_digest(&fusion_report, &fusion_report_path)?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &fusion_report_path,
+                        &output_root,
+                        report_digest.size_bytes,
+                        report_digest.sha256,
+                    )?);
                     if let Some(depth) = depth {
                         let depth_digest = save_depth_tiff_with_digest(&depth, &depth_path)?;
                         artifacts.push(artifact_digest_from_parts(
@@ -1487,11 +1582,14 @@ fn run_burst_pipeline(
                     }
                     step_pb.inc(1);
                     step_pb.finish_with_message(format!(
-                        "Sequence complete ({:.1} MiB native + {:.1} MiB fused, {}/{} transforms, {} physical focus planes, anchor {:.3e})",
+                        "Sequence complete ({:.1} MiB native + {:.1} MiB fused, {}/{} focus transforms, {} bracket transforms, {} local/{} disoccluded cells, {} physical focus planes, anchor {:.3e})",
                         native_input_bytes as f64 / (1024.0 * 1024.0),
                         fused_bytes as f64 / (1024.0 * 1024.0),
                         accepted_transforms,
                         transform_count,
+                        accepted_bracket_transforms,
+                        local_aligned_cells,
+                        disoccluded_cells,
                         physical_focus_planes,
                         radiance_anchor,
                     ));

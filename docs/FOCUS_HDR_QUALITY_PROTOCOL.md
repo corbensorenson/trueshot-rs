@@ -69,9 +69,9 @@ oversharpening can increase the score while reducing fidelity.
 
 ## Release Gates
 
-- Synthetic focus-stack PSNR must remain at least 40 dB and depth accuracy at
+- Synthetic focus-stack PSNR must remain at least 44 dB and depth accuracy at
   least 98% on the current deterministic fixture. The 2026-07-26 baseline is
-  44.127 dB and 100%.
+  44.161 dB and 100%.
 - Static HDR radiance error must remain below 0.2% at valid green samples.
 - One corrupted bracket in a 3-shot stack must improve by at least 5x with
   deghosting enabled and finish below 0.2% radiance error.
@@ -94,6 +94,11 @@ Implemented:
 - Censored Poisson-Gaussian bracket estimation with exact-ISO/CFA noise-profile
   validation, posterior radiance uncertainty, source attribution, and explicit
   clipping/rejection/fallback state.
+- Exposure-normalized per-bracket global translation, selective compact
+  gradient-cell refinement, forward/backward disocclusion rejection, and
+  measured-reference fallback.
+- Exact 16-bit source maps, exact 8-bit fusion-state maps, a bounded visible
+  provenance overlay, and a machine-readable fusion report.
 - Confidence- and edge-aware depth regularization with dominant-plane refusion.
 - Synthetic focus, radiance invariance, deghost, tile-boundary, and fail-closed
   gates.
@@ -101,15 +106,20 @@ Implemented:
   refusion coverage and 5.7% fusion overhead (13.08 seconds versus 12.37
   seconds). Disabling robust deghosting as well reached 11.31 seconds.
   Release-mode Apple baselines remain required.
+- After selective bracket alignment, the same private stack measured 11.43
+  seconds decode and 16.95 seconds fusion in a debug build. All 14
+  nonreference brackets passed global registration; 192 compact cells received
+  local correction and 40 inconsistent cells were excluded. The retained
+  39.75% refusion distribution was unchanged from the immediately preceding
+  implementation. This is engineering evidence, not a competitor result.
 
 Not yet qualified:
 
 - Direct Helicon/Lightroom corpus results.
 - Z9 camera-to-standard color matrix, ICC/DNG profile tagging, and DeltaE 2000
   release gate.
-- Per-bracket local motion alignment and user-visible deghost overlay.
-- Hair/thin-structure halo gates, retouch workflow, and multi-method automatic
-  focus strategy.
+- Interactive source/deghost retouching in the dashboard.
+- Hair/thin-structure halo gates and multi-method automatic focus strategy.
 - Per-ISO/CFA photon-transfer calibration capture/fit and empirical posterior
   uncertainty calibration. Validated profile persistence and production loading
   are implemented.

@@ -78,6 +78,19 @@ pub fn align_phasecorr_gray_with_scale(
     (dx, dy, scale)
 }
 
+/// Align two exposure-normalized grayscale images without estimating scale.
+///
+/// HDR brackets share one optical focus setting, so permitting scale here can
+/// turn clipping or illumination changes into false geometry. Focus-plane
+/// alignment continues to use [`align_phasecorr_gray_with_scale`].
+pub fn align_phasecorr_gray(
+    reference: &Array2<f64>,
+    frame: &Array2<f64>,
+    num_levels: usize,
+) -> (f64, f64) {
+    multiscale_phase_correlation(reference, frame, num_levels)
+}
+
 /// Extract green channel from Bayer array (RGGB pattern)
 fn extract_green_channel_from_array(bayer: &Array2<f64>) -> Array2<f64> {
     let (height, width) = bayer.dim();

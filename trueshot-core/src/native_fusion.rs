@@ -4,7 +4,7 @@
 //! green-channel analysis images use `f64` for FFT alignment; calibrated
 //! radiance, focus measures, depth, and confidence remain `f32`.
 
-use crate::align_raw::align_phasecorr_gray_with_scale;
+use crate::align_raw::{align_phasecorr_gray, align_phasecorr_gray_with_scale};
 use crate::sensor_noise::{SensorNoiseModel, SensorNoiseProfile};
 use crate::smart_loader::NativeFrameGroup;
 use crate::types::Meta;
@@ -21,6 +21,8 @@ pub const FUSION_FLAG_SOURCE_FALLBACK: u8 = 1 << 2;
 pub const FUSION_FLAG_UNCALIBRATED_NOISE: u8 = 1 << 3;
 pub const FUSION_FLAG_CENSOR_CONFLICT: u8 = 1 << 4;
 pub const FUSION_FLAG_VISIBILITY_CORRECTED: u8 = 1 << 5;
+pub const FUSION_FLAG_BRACKET_ALIGNED: u8 = 1 << 6;
+pub const FUSION_FLAG_DISOCCLUDED: u8 = 1 << 7;
 
 #[derive(Debug, Clone)]
 pub struct NativeFusionConfig {
@@ -38,6 +40,21 @@ pub struct NativeFusionConfig {
     pub alignment_levels: usize,
     /// Reject uncertain focus-plane transforms below this normalized score.
     pub minimum_alignment_score: f32,
+    /// Refine HDR bracket motion only in compact tiles with unexplained
+    /// exposure-normalized gradient residuals.
+    pub selective_local_alignment: bool,
+    /// Edge of one local-motion cell in compact green-analysis pixels.
+    pub local_alignment_cell_size: usize,
+    /// Maximum residual search around the global bracket shift, in compact
+    /// green-analysis pixels.
+    pub local_alignment_search_radius: usize,
+    /// Tiles already exceeding this gradient agreement remain on the global
+    /// model and avoid unnecessary local search.
+    pub local_alignment_trigger_score: f32,
+    /// Minimum bidirectionally consistent gradient score for local motion.
+    pub minimum_local_alignment_score: f32,
+    /// Maximum forward/backward disagreement in compact analysis pixels.
+    pub disocclusion_consistency_threshold: f32,
     /// Optional sensor black-point override; metadata profile is the default.
     pub black_level: Option<f32>,
     /// Optional sensor saturation override; metadata profile is the default.
@@ -73,6 +90,12 @@ impl Default for NativeFusionConfig {
             // between levels. One high-resolution compact FFT is exact.
             alignment_levels: 1,
             minimum_alignment_score: 0.08,
+            selective_local_alignment: true,
+            local_alignment_cell_size: 24,
+            local_alignment_search_radius: 3,
+            local_alignment_trigger_score: 0.90,
+            minimum_local_alignment_score: 0.55,
+            disocclusion_consistency_threshold: 0.75,
             black_level: None,
             white_level: None,
             read_noise_dn: 3.0,
@@ -98,6 +121,20 @@ pub struct PlaneTransform {
     pub accepted: bool,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct FrameAlignmentSummary {
+    pub frame_index: u16,
+    pub focus_plane: u16,
+    pub reference_frame: bool,
+    /// Bracket translation in full-resolution Bayer pixels.
+    pub shift_x: f32,
+    pub shift_y: f32,
+    pub global_quality: f32,
+    pub global_accepted: bool,
+    pub local_aligned_cells: u32,
+    pub disoccluded_cells: u32,
+}
+
 impl PlaneTransform {
     pub fn identity() -> Self {
         Self {
@@ -117,6 +154,184 @@ impl PlaneTransform {
             center_x + (x - center_x) * self.source_scale - self.shift_x,
             center_y + (y - center_y) * self.source_scale - self.shift_y,
         )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FrameWarp {
+    plane: PlaneTransform,
+    bracket_shift_x: f32,
+    bracket_shift_y: f32,
+    global_accepted: bool,
+    reference_frame: bool,
+    local: Option<LocalMotionField>,
+}
+
+impl FrameWarp {
+    fn identity(plane: PlaneTransform, reference_frame: bool) -> Self {
+        Self {
+            plane,
+            bracket_shift_x: 0.0,
+            bracket_shift_y: 0.0,
+            global_accepted: true,
+            reference_frame,
+            local: None,
+        }
+    }
+
+    fn source_coordinate_from_plane(&self, plane_x: f32, plane_y: f32) -> WarpedCoordinate {
+        if !self.reference_frame && !self.global_accepted {
+            return WarpedCoordinate {
+                x: plane_x,
+                y: plane_y,
+                aligned: false,
+                disoccluded: true,
+            };
+        }
+        let local = self
+            .local
+            .as_ref()
+            .map_or_else(LocalMotionSample::default, |field| {
+                field.sample(plane_x, plane_y)
+            });
+        if local.disoccluded {
+            return WarpedCoordinate {
+                x: plane_x,
+                y: plane_y,
+                aligned: false,
+                disoccluded: true,
+            };
+        }
+        WarpedCoordinate {
+            x: plane_x - self.bracket_shift_x - local.shift_x,
+            y: plane_y - self.bracket_shift_y - local.shift_y,
+            aligned: !self.reference_frame
+                && (local.aligned
+                    || self.global_accepted
+                        && (self.bracket_shift_x.abs() > 1e-4
+                            || self.bracket_shift_y.abs() > 1e-4)),
+            disoccluded: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LocalMotionCell {
+    /// Residual alignment shift in full-resolution Bayer pixels.
+    shift_x: f32,
+    shift_y: f32,
+    confidence: f32,
+    active: bool,
+    disoccluded: bool,
+}
+
+#[derive(Debug, Clone)]
+struct LocalMotionField {
+    cells: Vec<LocalMotionCell>,
+    grid_width: usize,
+    grid_height: usize,
+    cell_size_analysis: usize,
+    raw_pixels_per_analysis_pixel: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LocalMotionSample {
+    shift_x: f32,
+    shift_y: f32,
+    aligned: bool,
+    disoccluded: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WarpedCoordinate {
+    x: f32,
+    y: f32,
+    aligned: bool,
+    disoccluded: bool,
+}
+
+impl LocalMotionField {
+    fn sample(&self, raw_x: f32, raw_y: f32) -> LocalMotionSample {
+        if self.cells.is_empty() || self.grid_width == 0 || self.grid_height == 0 {
+            return LocalMotionSample::default();
+        }
+        let cell_size = self.cell_size_analysis as f32;
+        let analysis_x = raw_x / self.raw_pixels_per_analysis_pixel;
+        let analysis_y = raw_y / self.raw_pixels_per_analysis_pixel;
+        let grid_x = analysis_x / cell_size - 0.5;
+        let grid_y = analysis_y / cell_size - 0.5;
+        let nearest_x = grid_x
+            .round()
+            .clamp(0.0, self.grid_width.saturating_sub(1) as f32) as usize;
+        let nearest_y = grid_y
+            .round()
+            .clamp(0.0, self.grid_height.saturating_sub(1) as f32) as usize;
+        let nearest = self.cells[nearest_y * self.grid_width + nearest_x];
+        if nearest.disoccluded {
+            return LocalMotionSample {
+                disoccluded: true,
+                ..LocalMotionSample::default()
+            };
+        }
+        if !nearest.active {
+            return LocalMotionSample::default();
+        }
+
+        let x0 = grid_x
+            .floor()
+            .clamp(0.0, self.grid_width.saturating_sub(1) as f32) as usize;
+        let y0 = grid_y
+            .floor()
+            .clamp(0.0, self.grid_height.saturating_sub(1) as f32) as usize;
+        let x1 = (x0 + 1).min(self.grid_width - 1);
+        let y1 = (y0 + 1).min(self.grid_height - 1);
+        let tx = (grid_x - x0 as f32).clamp(0.0, 1.0);
+        let ty = (grid_y - y0 as f32).clamp(0.0, 1.0);
+        let candidates = [
+            (x0, y0, (1.0 - tx) * (1.0 - ty)),
+            (x1, y0, tx * (1.0 - ty)),
+            (x0, y1, (1.0 - tx) * ty),
+            (x1, y1, tx * ty),
+        ];
+        let shift_tolerance =
+            self.raw_pixels_per_analysis_pixel * self.cell_size_analysis as f32 * 0.5;
+        let mut shift_x = 0.0f32;
+        let mut shift_y = 0.0f32;
+        let mut weight_sum = 0.0f32;
+        for (x, y, geometric_weight) in candidates {
+            let cell = self.cells[y * self.grid_width + x];
+            if geometric_weight <= 0.0
+                || cell.disoccluded
+                || (cell.active
+                    && ((cell.shift_x - nearest.shift_x).abs() > shift_tolerance
+                        || (cell.shift_y - nearest.shift_y).abs() > shift_tolerance))
+            {
+                continue;
+            }
+            let confidence = if cell.active {
+                cell.confidence.max(0.1)
+            } else {
+                1.0
+            };
+            let weight = geometric_weight * confidence;
+            shift_x += weight * cell.shift_x;
+            shift_y += weight * cell.shift_y;
+            weight_sum += weight;
+        }
+        if weight_sum <= 1e-8 {
+            return LocalMotionSample {
+                shift_x: nearest.shift_x,
+                shift_y: nearest.shift_y,
+                aligned: true,
+                disoccluded: false,
+            };
+        }
+        LocalMotionSample {
+            shift_x: shift_x / weight_sum,
+            shift_y: shift_y / weight_sum,
+            aligned: true,
+            disoccluded: false,
+        }
     }
 }
 
@@ -144,6 +359,8 @@ pub struct NativeFusionResult {
     pub foreground_mask: Array2<u8>,
     /// One transform per focus plane, shared by all bracketed exposures.
     pub transforms: Vec<PlaneTransform>,
+    /// Per-bracket global/local alignment evidence retained for diagnostics.
+    pub frame_alignments: Vec<FrameAlignmentSummary>,
     /// Shortest sensor exposure used as the radiance normalization anchor.
     pub radiance_anchor: f32,
     /// True only when every frame used an exact retained per-ISO profile.
@@ -173,7 +390,97 @@ impl NativeFusionResult {
             + self.fusion_flags.len()
             + self.foreground_mask.len()
             + self.transforms.len() * std::mem::size_of::<PlaneTransform>()
+            + self.frame_alignments.len() * std::mem::size_of::<FrameAlignmentSummary>()
     }
+}
+
+/// Build a bounded, user-visible provenance overlay while preserving exact
+/// source/flag maps separately for archival inspection.
+pub fn fusion_provenance_preview(
+    source_map: &Array2<u16>,
+    fusion_flags: &Array2<u8>,
+    max_dimension: usize,
+) -> Result<(Array3<u8>, Array2<u8>)> {
+    if source_map.dim() != fusion_flags.dim() || source_map.is_empty() || max_dimension == 0 {
+        anyhow::bail!("Fusion provenance preview dimensions are invalid");
+    }
+    let (height, width) = source_map.dim();
+    let scale = (max_dimension as f64 / width.max(height) as f64).min(1.0);
+    let output_width = ((width as f64 * scale).round() as usize).max(1);
+    let output_height = ((height as f64 * scale).round() as usize).max(1);
+    let mut rgb = vec![0u8; output_width * output_height * 3];
+    let mut alpha = vec![0u8; output_width * output_height];
+
+    for output_y in 0..output_height {
+        let source_y0 = (output_y * height / output_height).min(height - 1);
+        let source_y1 = ((output_y + 1) * height)
+            .div_ceil(output_height)
+            .min(height);
+        for output_x in 0..output_width {
+            let source_x0 = (output_x * width / output_width).min(width - 1);
+            let source_x1 = ((output_x + 1) * width).div_ceil(output_width).min(width);
+            let mut combined_flags = 0u8;
+            for y in source_y0..source_y1 {
+                for x in source_x0..source_x1 {
+                    combined_flags |= fusion_flags[[y, x]];
+                }
+            }
+            let center_x = ((source_x0 + source_x1) / 2).min(width - 1);
+            let center_y = ((source_y0 + source_y1) / 2).min(height - 1);
+            let source = source_map[[center_y, center_x]];
+            let (color, opacity) = provenance_color(source, combined_flags);
+            let index = output_y * output_width + output_x;
+            rgb[index * 3..index * 3 + 3].copy_from_slice(&color);
+            alpha[index] = opacity;
+        }
+    }
+
+    Ok((
+        Array3::from_shape_vec((output_height, output_width, 3), rgb)
+            .context("Shape fusion provenance RGB preview")?,
+        Array2::from_shape_vec((output_height, output_width), alpha)
+            .context("Shape fusion provenance alpha preview")?,
+    ))
+}
+
+fn provenance_color(source: u16, flags: u8) -> ([u8; 3], u8) {
+    if flags & FUSION_FLAG_DISOCCLUDED != 0 {
+        return ([235, 55, 210], 230);
+    }
+    if flags & FUSION_FLAG_SOURCE_FALLBACK != 0 {
+        return ([245, 55, 65], 230);
+    }
+    if flags & FUSION_FLAG_CENSOR_CONFLICT != 0 {
+        return ([255, 50, 125], 225);
+    }
+    if flags & FUSION_FLAG_OUTLIER_REJECTED != 0 {
+        return ([255, 125, 35], 220);
+    }
+    if flags & FUSION_FLAG_CENSORED != 0 {
+        return ([250, 205, 45], 210);
+    }
+    if flags & FUSION_FLAG_BRACKET_ALIGNED != 0 {
+        return ([20, 205, 230], 150);
+    }
+    if flags & FUSION_FLAG_VISIBILITY_CORRECTED != 0 {
+        return ([55, 120, 245], 150);
+    }
+    if flags & FUSION_FLAG_UNCALIBRATED_NOISE != 0 {
+        return ([150, 155, 165], 130);
+    }
+    if source == u16::MAX {
+        return ([0, 0, 0], 0);
+    }
+    // Stable categorical palette for source-frame awareness.
+    let hash = u32::from(source).wrapping_mul(2_654_435_761);
+    (
+        [
+            70 + ((hash >> 16) & 0x7f) as u8,
+            70 + ((hash >> 8) & 0x7f) as u8,
+            70 + (hash & 0x7f) as u8,
+        ],
+        72,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -193,6 +500,7 @@ struct HdrSample {
     fallback_score: f32,
     frame_index: u16,
     censored: bool,
+    reference_frame: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -332,6 +640,14 @@ pub fn fuse_native_group(
 
     let transforms =
         estimate_plane_transforms(group, meta, config, &calibrations, exposures_per_focus)?;
+    let (frame_warps, frame_alignments) = estimate_frame_warps(
+        group,
+        config,
+        &calibrations,
+        &transforms,
+        focus_steps,
+        exposures_per_focus,
+    )?;
 
     let width = group.width;
     let height = group.height;
@@ -371,7 +687,7 @@ pub fn fuse_native_group(
                 process_band(
                     group,
                     &calibrations,
-                    &transforms,
+                    &frame_warps,
                     focus_model.as_ref(),
                     focus_steps,
                     exposures_per_focus,
@@ -420,7 +736,7 @@ pub fn fuse_native_group(
             depth_refusion_pixels = refuse_regularized_depth(
                 group,
                 &calibrations,
-                &transforms,
+                &frame_warps,
                 focus_steps,
                 exposures_per_focus,
                 radiance_anchor,
@@ -481,6 +797,7 @@ pub fn fuse_native_group(
         foreground_mask: Array2::from_shape_vec((height, width), foreground_mask)
             .context("Unable to shape fused foreground mask")?,
         transforms,
+        frame_alignments,
         radiance_anchor,
         noise_model_calibrated: calibrations
             .iter()
@@ -534,6 +851,18 @@ fn validate_group(
         || !(0.0..=2.0).contains(&config.focus_detail_edge_weight)
     {
         anyhow::bail!("Native fusion scale-decoupled focus configuration is invalid");
+    }
+    if !(8..=128).contains(&config.local_alignment_cell_size)
+        || config.local_alignment_search_radius > 12
+        || !config.local_alignment_trigger_score.is_finite()
+        || !(0.5..=1.0).contains(&config.local_alignment_trigger_score)
+        || !config.minimum_local_alignment_score.is_finite()
+        || !(0.0..=1.0).contains(&config.minimum_local_alignment_score)
+        || config.minimum_local_alignment_score > config.local_alignment_trigger_score
+        || !config.disocclusion_consistency_threshold.is_finite()
+        || !(0.1..=4.0).contains(&config.disocclusion_consistency_threshold)
+    {
+        anyhow::bail!("Native fusion selective local-alignment configuration is invalid");
     }
     let reference = &group.metadata[0];
     for (index, metadata) in group.metadata.iter().enumerate() {
@@ -782,24 +1111,7 @@ fn estimate_plane_transforms(
     }
 
     let reference_focus = usize::from(meta.ref_focus).min(focus_steps - 1);
-    let target_exposure = median(
-        &mut calibrations
-            .iter()
-            .map(|calibration| calibration.exposure)
-            .collect::<Vec<_>>(),
-    );
-    let selected_frames: Vec<usize> = (0..focus_steps)
-        .map(|focus| {
-            let start = focus * exposures_per_focus;
-            (start..start + exposures_per_focus)
-                .min_by(|&left, &right| {
-                    exposure_log_distance(calibrations[left].exposure, target_exposure).total_cmp(
-                        &exposure_log_distance(calibrations[right].exposure, target_exposure),
-                    )
-                })
-                .unwrap_or(start)
-        })
-        .collect();
+    let selected_frames = select_alignment_frames(calibrations, focus_steps, exposures_per_focus);
 
     let analysis_stride = analysis_stride(group.width, group.height, config);
     let reference = build_green_analysis(
@@ -856,6 +1168,164 @@ fn estimate_plane_transforms(
         }
     }
     Ok(transforms)
+}
+
+fn select_alignment_frames(
+    calibrations: &[FrameCalibration],
+    focus_steps: usize,
+    exposures_per_focus: usize,
+) -> Vec<usize> {
+    let target_exposure = median(
+        &mut calibrations
+            .iter()
+            .map(|calibration| calibration.exposure)
+            .collect::<Vec<_>>(),
+    );
+    (0..focus_steps)
+        .map(|focus| {
+            let start = focus * exposures_per_focus;
+            (start..start + exposures_per_focus)
+                .min_by(|&left, &right| {
+                    exposure_log_distance(calibrations[left].exposure, target_exposure).total_cmp(
+                        &exposure_log_distance(calibrations[right].exposure, target_exposure),
+                    )
+                })
+                .unwrap_or(start)
+        })
+        .collect()
+}
+
+fn estimate_frame_warps(
+    group: &NativeFrameGroup<'_>,
+    config: &NativeFusionConfig,
+    calibrations: &[FrameCalibration],
+    transforms: &[PlaneTransform],
+    focus_steps: usize,
+    exposures_per_focus: usize,
+) -> Result<(Vec<FrameWarp>, Vec<FrameAlignmentSummary>)> {
+    let selected_frames = select_alignment_frames(calibrations, focus_steps, exposures_per_focus);
+    let analysis_stride = analysis_stride(group.width, group.height, config);
+    let raw_pixels_per_analysis_pixel = (analysis_stride * 2) as f32;
+    let compact_alignment_available = group.width >= 32 && group.height >= 32;
+    let mut warps = Vec::with_capacity(group.len());
+    let mut summaries = Vec::with_capacity(group.len());
+
+    for focus in 0..focus_steps {
+        let reference_frame = selected_frames[focus];
+        let reference_analysis = if exposures_per_focus > 1 && compact_alignment_available {
+            Some(build_green_analysis(
+                group,
+                reference_frame,
+                calibrations[reference_frame],
+                analysis_stride,
+            )?)
+        } else {
+            None
+        };
+        let reference_gradient = reference_analysis
+            .as_ref()
+            .map(GradientAnalysis::from_image);
+        let frame_start = focus * exposures_per_focus;
+        for frame_index in frame_start..frame_start + exposures_per_focus {
+            if frame_index == reference_frame || reference_analysis.is_none() {
+                warps.push(FrameWarp::identity(
+                    transforms[focus],
+                    frame_index == reference_frame,
+                ));
+                summaries.push(FrameAlignmentSummary {
+                    frame_index: u16::try_from(frame_index).unwrap_or(u16::MAX),
+                    focus_plane: u16::try_from(focus).unwrap_or(u16::MAX),
+                    reference_frame: frame_index == reference_frame,
+                    shift_x: 0.0,
+                    shift_y: 0.0,
+                    global_quality: 1.0,
+                    global_accepted: true,
+                    local_aligned_cells: 0,
+                    disoccluded_cells: 0,
+                });
+                continue;
+            }
+
+            let reference = reference_analysis
+                .as_ref()
+                .expect("reference analysis was checked above");
+            let analysis = build_green_analysis(
+                group,
+                frame_index,
+                calibrations[frame_index],
+                analysis_stride,
+            )?;
+            let identity_quality = transformed_ncc(reference, &analysis, 0.0, 0.0, 1.0) as f32;
+            let (dx, dy, quality) = if identity_quality >= config.local_alignment_trigger_score {
+                (0.0, 0.0, identity_quality)
+            } else {
+                let (dx, dy) =
+                    align_phasecorr_gray(reference, &analysis, config.alignment_levels.max(1));
+                (
+                    dx,
+                    dy,
+                    transformed_ncc(reference, &analysis, dx, dy, 1.0) as f32,
+                )
+            };
+            let shift_x = dx as f32 * raw_pixels_per_analysis_pixel;
+            let shift_y = dy as f32 * raw_pixels_per_analysis_pixel;
+            let plausible_shift = shift_x.abs() <= group.width as f32 * 0.12
+                && shift_y.abs() <= group.height as f32 * 0.12;
+            let accepted = quality >= config.minimum_alignment_score && plausible_shift;
+            let (local, local_aligned_cells, disoccluded_cells) =
+                if config.selective_local_alignment && accepted {
+                    let frame_gradient = GradientAnalysis::from_image(&analysis);
+                    let field = estimate_local_motion_field_from_gradients(
+                        reference_gradient
+                            .as_ref()
+                            .expect("reference gradient accompanies reference analysis"),
+                        &frame_gradient,
+                        dx as f32,
+                        dy as f32,
+                        raw_pixels_per_analysis_pixel,
+                        config,
+                    );
+                    let aligned = field.cells.iter().filter(|cell| cell.active).count();
+                    let disoccluded = field.cells.iter().filter(|cell| cell.disoccluded).count();
+                    (
+                        (aligned > 0 || disoccluded > 0).then_some(field),
+                        aligned,
+                        disoccluded,
+                    )
+                } else {
+                    (None, 0, 0)
+                };
+            if !accepted {
+                tracing::warn!(
+                    "Rejected bracket frame {} transform dx={:.2} dy={:.2} NCC={:.3}",
+                    frame_index,
+                    shift_x,
+                    shift_y,
+                    quality
+                );
+            }
+            warps.push(FrameWarp {
+                plane: transforms[focus],
+                bracket_shift_x: if accepted { shift_x } else { 0.0 },
+                bracket_shift_y: if accepted { shift_y } else { 0.0 },
+                global_accepted: accepted,
+                reference_frame: false,
+                local,
+            });
+            summaries.push(FrameAlignmentSummary {
+                frame_index: u16::try_from(frame_index).unwrap_or(u16::MAX),
+                focus_plane: u16::try_from(focus).unwrap_or(u16::MAX),
+                reference_frame: false,
+                shift_x: if accepted { shift_x } else { 0.0 },
+                shift_y: if accepted { shift_y } else { 0.0 },
+                global_quality: quality,
+                global_accepted: accepted,
+                local_aligned_cells: u32::try_from(local_aligned_cells).unwrap_or(u32::MAX),
+                disoccluded_cells: u32::try_from(disoccluded_cells).unwrap_or(u32::MAX),
+            });
+        }
+    }
+    Ok((warps, summaries))
 }
 
 fn analysis_stride(width: usize, height: usize, config: &NativeFusionConfig) -> usize {
@@ -949,10 +1419,378 @@ fn transformed_ncc(
     dot / (ref_energy * frame_energy).sqrt()
 }
 
+#[derive(Debug)]
+struct GradientAnalysis {
+    width: usize,
+    height: usize,
+    gx: Vec<f32>,
+    gy: Vec<f32>,
+}
+
+impl GradientAnalysis {
+    fn from_image(image: &Array2<f64>) -> Self {
+        let (height, width) = image.dim();
+        let mut gx = vec![0.0f32; width * height];
+        let mut gy = vec![0.0f32; width * height];
+        for y in 0..height {
+            let y0 = y.saturating_sub(1);
+            let y1 = (y + 1).min(height - 1);
+            for x in 0..width {
+                let x0 = x.saturating_sub(1);
+                let x1 = (x + 1).min(width - 1);
+                let index = y * width + x;
+                gx[index] = ((image[[y, x1]] - image[[y, x0]]) * 0.5) as f32;
+                gy[index] = ((image[[y1, x]] - image[[y0, x]]) * 0.5) as f32;
+            }
+        }
+        Self {
+            width,
+            height,
+            gx,
+            gy,
+        }
+    }
+
+    fn sample(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        if x < 0.0
+            || y < 0.0
+            || x > self.width.saturating_sub(1) as f32
+            || y > self.height.saturating_sub(1) as f32
+        {
+            return None;
+        }
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let x1 = (x0 + 1).min(self.width - 1);
+        let y1 = (y0 + 1).min(self.height - 1);
+        let tx = x - x0 as f32;
+        let ty = y - y0 as f32;
+        let bilinear = |values: &[f32]| {
+            let top = values[y0 * self.width + x0]
+                + (values[y0 * self.width + x1] - values[y0 * self.width + x0]) * tx;
+            let bottom = values[y1 * self.width + x0]
+                + (values[y1 * self.width + x1] - values[y1 * self.width + x0]) * tx;
+            top + (bottom - top) * ty
+        };
+        Some((bilinear(&self.gx), bilinear(&self.gy)))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PatchAlignment {
+    shift_x: f32,
+    shift_y: f32,
+    score: f32,
+    texture: f32,
+}
+
+fn estimate_local_motion_field(
+    reference: &Array2<f64>,
+    frame: &Array2<f64>,
+    global_shift_x: f32,
+    global_shift_y: f32,
+    raw_pixels_per_analysis_pixel: f32,
+    config: &NativeFusionConfig,
+) -> LocalMotionField {
+    let reference_gradient = GradientAnalysis::from_image(reference);
+    let frame_gradient = GradientAnalysis::from_image(frame);
+    estimate_local_motion_field_from_gradients(
+        &reference_gradient,
+        &frame_gradient,
+        global_shift_x,
+        global_shift_y,
+        raw_pixels_per_analysis_pixel,
+        config,
+    )
+}
+
+fn estimate_local_motion_field_from_gradients(
+    reference_gradient: &GradientAnalysis,
+    frame_gradient: &GradientAnalysis,
+    global_shift_x: f32,
+    global_shift_y: f32,
+    raw_pixels_per_analysis_pixel: f32,
+    config: &NativeFusionConfig,
+) -> LocalMotionField {
+    let width = reference_gradient.width;
+    let height = reference_gradient.height;
+    let cell_size = config.local_alignment_cell_size;
+    let grid_width = width.div_ceil(cell_size);
+    let grid_height = height.div_ceil(cell_size);
+    let patch_radius = (cell_size / 4).clamp(3, 12);
+    let mut cells = Vec::with_capacity(grid_width * grid_height);
+
+    for grid_y in 0..grid_height {
+        let center_y = ((grid_y * cell_size + cell_size / 2).min(height - 1)) as f32;
+        for grid_x in 0..grid_width {
+            let center_x = ((grid_x * cell_size + cell_size / 2).min(width - 1)) as f32;
+            let baseline = gradient_patch_score(
+                reference_gradient,
+                frame_gradient,
+                center_x,
+                center_y,
+                global_shift_x,
+                global_shift_y,
+                patch_radius,
+            );
+            if baseline.texture < 1e-4 || baseline.score >= config.local_alignment_trigger_score {
+                cells.push(LocalMotionCell::default());
+                continue;
+            }
+
+            let forward = search_gradient_patch(
+                reference_gradient,
+                frame_gradient,
+                center_x,
+                center_y,
+                global_shift_x,
+                global_shift_y,
+                config.local_alignment_search_radius,
+                patch_radius,
+            );
+            if forward.score < config.minimum_local_alignment_score {
+                cells.push(LocalMotionCell {
+                    disoccluded: true,
+                    ..LocalMotionCell::default()
+                });
+                continue;
+            }
+            let source_x = center_x - forward.shift_x;
+            let source_y = center_y - forward.shift_y;
+            let reverse = search_gradient_patch(
+                frame_gradient,
+                reference_gradient,
+                source_x,
+                source_y,
+                -forward.shift_x,
+                -forward.shift_y,
+                config.local_alignment_search_radius,
+                patch_radius,
+            );
+            let consistency = ((forward.shift_x + reverse.shift_x).powi(2)
+                + (forward.shift_y + reverse.shift_y).powi(2))
+            .sqrt();
+            if reverse.score < config.minimum_local_alignment_score
+                || consistency > config.disocclusion_consistency_threshold
+            {
+                cells.push(LocalMotionCell {
+                    disoccluded: true,
+                    ..LocalMotionCell::default()
+                });
+                continue;
+            }
+
+            let residual_x = forward.shift_x - global_shift_x;
+            let residual_y = forward.shift_y - global_shift_y;
+            let residual_norm = (residual_x * residual_x + residual_y * residual_y).sqrt();
+            let improvement = forward.score - baseline.score;
+            let active = residual_norm > 0.05 && improvement > 0.015;
+            let confidence = ((forward.score - config.minimum_local_alignment_score)
+                / (1.0 - config.minimum_local_alignment_score).max(1e-6))
+            .clamp(0.0, 1.0)
+                * (1.0 - consistency / config.disocclusion_consistency_threshold.max(1e-6))
+                    .clamp(0.0, 1.0);
+            cells.push(LocalMotionCell {
+                shift_x: if active {
+                    residual_x * raw_pixels_per_analysis_pixel
+                } else {
+                    0.0
+                },
+                shift_y: if active {
+                    residual_y * raw_pixels_per_analysis_pixel
+                } else {
+                    0.0
+                },
+                confidence,
+                active,
+                disoccluded: false,
+            });
+        }
+    }
+
+    LocalMotionField {
+        cells,
+        grid_width,
+        grid_height,
+        cell_size_analysis: cell_size,
+        raw_pixels_per_analysis_pixel,
+    }
+}
+
+fn search_gradient_patch(
+    reference: &GradientAnalysis,
+    frame: &GradientAnalysis,
+    center_x: f32,
+    center_y: f32,
+    initial_shift_x: f32,
+    initial_shift_y: f32,
+    search_radius: usize,
+    patch_radius: usize,
+) -> PatchAlignment {
+    let mut best = gradient_patch_score(
+        reference,
+        frame,
+        center_x,
+        center_y,
+        initial_shift_x,
+        initial_shift_y,
+        patch_radius,
+    );
+    best.shift_x = initial_shift_x;
+    best.shift_y = initial_shift_y;
+    let radius = search_radius as i32;
+    for offset_y in -radius..=radius {
+        for offset_x in -radius..=radius {
+            let shift_x = initial_shift_x + offset_x as f32;
+            let shift_y = initial_shift_y + offset_y as f32;
+            let mut candidate = gradient_patch_score(
+                reference,
+                frame,
+                center_x,
+                center_y,
+                shift_x,
+                shift_y,
+                patch_radius,
+            );
+            candidate.shift_x = shift_x;
+            candidate.shift_y = shift_y;
+            if candidate.score > best.score {
+                best = candidate;
+            }
+        }
+    }
+
+    let x_minus = gradient_patch_score(
+        reference,
+        frame,
+        center_x,
+        center_y,
+        best.shift_x - 1.0,
+        best.shift_y,
+        patch_radius,
+    )
+    .score;
+    let x_plus = gradient_patch_score(
+        reference,
+        frame,
+        center_x,
+        center_y,
+        best.shift_x + 1.0,
+        best.shift_y,
+        patch_radius,
+    )
+    .score;
+    let y_minus = gradient_patch_score(
+        reference,
+        frame,
+        center_x,
+        center_y,
+        best.shift_x,
+        best.shift_y - 1.0,
+        patch_radius,
+    )
+    .score;
+    let y_plus = gradient_patch_score(
+        reference,
+        frame,
+        center_x,
+        center_y,
+        best.shift_x,
+        best.shift_y + 1.0,
+        patch_radius,
+    )
+    .score;
+    best.shift_x += parabolic_peak_offset(x_minus, best.score, x_plus);
+    best.shift_y += parabolic_peak_offset(y_minus, best.score, y_plus);
+    let refined = gradient_patch_score(
+        reference,
+        frame,
+        center_x,
+        center_y,
+        best.shift_x,
+        best.shift_y,
+        patch_radius,
+    );
+    PatchAlignment {
+        score: refined.score,
+        texture: refined.texture,
+        ..best
+    }
+}
+
+fn parabolic_peak_offset(left: f32, center: f32, right: f32) -> f32 {
+    if !left.is_finite() || !center.is_finite() || !right.is_finite() {
+        return 0.0;
+    }
+    let denominator = left - 2.0 * center + right;
+    if denominator >= -1e-6 {
+        0.0
+    } else {
+        (0.5 * (left - right) / denominator).clamp(-0.5, 0.5)
+    }
+}
+
+fn gradient_patch_score(
+    reference: &GradientAnalysis,
+    frame: &GradientAnalysis,
+    center_x: f32,
+    center_y: f32,
+    shift_x: f32,
+    shift_y: f32,
+    radius: usize,
+) -> PatchAlignment {
+    let radius = radius as i32;
+    let center_x = center_x.round() as i32;
+    let center_y = center_y.round() as i32;
+    let mut dot = 0.0f64;
+    let mut reference_energy = 0.0f64;
+    let mut frame_energy = 0.0f64;
+    let mut count = 0usize;
+    for offset_y in -radius..=radius {
+        let y = center_y + offset_y;
+        if y < 0 || y >= reference.height as i32 {
+            continue;
+        }
+        for offset_x in -radius..=radius {
+            let x = center_x + offset_x;
+            if x < 0 || x >= reference.width as i32 {
+                continue;
+            }
+            let index = y as usize * reference.width + x as usize;
+            let reference_x = reference.gx[index];
+            let reference_y = reference.gy[index];
+            let Some((frame_x, frame_y)) = frame.sample(x as f32 - shift_x, y as f32 - shift_y)
+            else {
+                continue;
+            };
+            dot += f64::from(reference_x * frame_x + reference_y * frame_y);
+            reference_energy += f64::from(reference_x * reference_x + reference_y * reference_y);
+            frame_energy += f64::from(frame_x * frame_x + frame_y * frame_y);
+            count += 1;
+        }
+    }
+    let denominator = (reference_energy * frame_energy).sqrt();
+    let score = if count >= 25 && denominator > 1e-12 {
+        (dot / denominator).clamp(-1.0, 1.0) as f32
+    } else {
+        -1.0
+    };
+    PatchAlignment {
+        shift_x,
+        shift_y,
+        score,
+        texture: if count > 0 {
+            (reference_energy / count as f64) as f32
+        } else {
+            0.0
+        },
+    }
+}
+
 fn process_band(
     group: &NativeFrameGroup<'_>,
     calibrations: &[FrameCalibration],
-    transforms: &[PlaneTransform],
+    frame_warps: &[FrameWarp],
     focus_model: Option<&PhysicalFocusModel>,
     focus_steps: usize,
     exposures_per_focus: usize,
@@ -1029,9 +1867,9 @@ fn process_band(
                     if let Some(estimate) = fuse_hdr_sample(
                         group,
                         calibrations,
+                        frame_warps,
                         frame_start,
                         frame_end,
-                        transforms[focus],
                         output_x,
                         output_y,
                         radiance_anchor,
@@ -1255,32 +2093,50 @@ fn subplane_focus_position(
 fn fuse_hdr_sample(
     group: &NativeFrameGroup<'_>,
     calibrations: &[FrameCalibration],
+    frame_warps: &[FrameWarp],
     frame_start: usize,
     frame_end: usize,
-    transform: PlaneTransform,
     output_x: usize,
     output_y: usize,
     radiance_anchor: f32,
     config: &NativeFusionConfig,
 ) -> Option<HdrEstimate> {
-    let (source_x, source_y) =
-        transform.source_coordinate(output_x as f32, output_y as f32, group.width, group.height);
     let site = ((output_y & 1) << 1) | (output_x & 1);
     let mut samples = [HdrSample::default(); MAX_HDR_EXPOSURES];
     let mut sample_count = 0usize;
+    let mut alignment_flags = 0u8;
+    let plane_warp = frame_warps.get(frame_start)?;
+    let (plane_x, plane_y) = plane_warp.plane.source_coordinate(
+        output_x as f32,
+        output_y as f32,
+        group.width,
+        group.height,
+    );
 
     for frame_index in frame_start..frame_end {
         let frame = group.frame(frame_index)?;
         let calibration = calibrations[frame_index];
-        let raw = sample_same_cfa(
+        let warp = frame_warps.get(frame_index)?;
+        let coordinate = warp.source_coordinate_from_plane(plane_x, plane_y);
+        if coordinate.disoccluded {
+            alignment_flags |= FUSION_FLAG_DISOCCLUDED;
+            continue;
+        }
+        if coordinate.aligned {
+            alignment_flags |= FUSION_FLAG_BRACKET_ALIGNED;
+        }
+        let Some(raw) = sample_same_cfa(
             frame,
             group.width,
             group.height,
-            source_x,
-            source_y,
+            coordinate.x,
+            coordinate.y,
             output_x & 1,
             output_y & 1,
-        )?;
+        ) else {
+            alignment_flags |= FUSION_FLAG_DISOCCLUDED;
+            continue;
+        };
         let range_dn = calibration.inverse_range.recip();
         let signal = ((raw - calibration.black) * calibration.inverse_range).max(0.0);
         let radiance_scale = radiance_anchor / calibration.exposure * calibration.wb_by_site[site];
@@ -1301,6 +2157,7 @@ fn fuse_hdr_sample(
                 fallback_score: calibration.exposure * (1.0 - signal.min(1.0)),
                 frame_index: u16::try_from(frame_index).unwrap_or(u16::MAX),
                 censored,
+                reference_frame: warp.reference_frame,
             };
             sample_count += 1;
         }
@@ -1311,11 +2168,12 @@ fn fuse_hdr_sample(
     }
 
     let valid = &samples[..sample_count];
-    let mut flags = if valid.iter().any(|sample| sample.censored) {
-        FUSION_FLAG_CENSORED
-    } else {
-        0
-    };
+    let mut flags = alignment_flags
+        | if valid.iter().any(|sample| sample.censored) {
+            FUSION_FLAG_CENSORED
+        } else {
+            0
+        };
     if valid.iter().any(|sample| {
         !calibrations[usize::from(sample.frame_index)]
             .noise_model
@@ -1420,6 +2278,13 @@ fn fuse_hdr_sample(
         if rejected {
             flags |= FUSION_FLAG_OUTLIER_REJECTED;
         }
+        if flags & FUSION_FLAG_DISOCCLUDED != 0
+            && valid
+                .iter()
+                .any(|sample| sample.frame_index == source_index && sample.reference_frame)
+        {
+            flags |= FUSION_FLAG_SOURCE_FALLBACK;
+        }
         Some(HdrEstimate {
             radiance,
             uncertainty,
@@ -1471,7 +2336,7 @@ fn sample_median(samples: &mut [HdrSample]) -> f32 {
 fn refuse_regularized_depth(
     group: &NativeFrameGroup<'_>,
     calibrations: &[FrameCalibration],
-    transforms: &[PlaneTransform],
+    frame_warps: &[FrameWarp],
     focus_steps: usize,
     exposures_per_focus: usize,
     radiance_anchor: f32,
@@ -1512,9 +2377,9 @@ fn refuse_regularized_depth(
                         fuse_hdr_sample(
                             group,
                             calibrations,
+                            frame_warps,
                             frame_start,
                             frame_start + exposures_per_focus,
-                            transforms[focus],
                             x,
                             y,
                             radiance_anchor,
@@ -2133,6 +2998,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provenance_preview_preserves_sparse_critical_flags_when_downsampled() {
+        let mut sources = Array2::from_elem((4, 4), 3u16);
+        sources[[2, 2]] = 7;
+        let mut flags = Array2::zeros((4, 4));
+        flags[[0, 3]] = FUSION_FLAG_DISOCCLUDED | FUSION_FLAG_SOURCE_FALLBACK;
+
+        let (rgb, alpha) = fusion_provenance_preview(&sources, &flags, 1).unwrap();
+
+        assert_eq!(rgb.dim(), (1, 1, 3));
+        assert_eq!(
+            [rgb[[0, 0, 0]], rgb[[0, 0, 1]], rgb[[0, 0, 2]]],
+            [235, 55, 210]
+        );
+        assert_eq!(alpha[[0, 0]], 230);
+    }
+
+    #[test]
+    fn rejected_global_bracket_fails_closed() {
+        let warp = FrameWarp {
+            plane: PlaneTransform::identity(),
+            bracket_shift_x: 0.0,
+            bracket_shift_y: 0.0,
+            global_accepted: false,
+            reference_frame: false,
+            local: None,
+        };
+
+        let coordinate = warp.source_coordinate_from_plane(12.0, 8.0);
+
+        assert!(coordinate.disoccluded);
+        assert!(!coordinate.aligned);
+    }
+
     fn physical_model(distances_m: &[f32]) -> PhysicalFocusModel {
         let focal_length_mm = 105.0;
         PhysicalFocusModel {
@@ -2295,6 +3194,107 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn alignment_texture(width: usize, height: usize) -> Array2<f64> {
+        Array2::from_shape_fn((height, width), |(y, x)| {
+            let hash = ((x * 73 + y * 151 + x * y * 17) % 251) as f64 / 251.0;
+            hash + (x as f64 * 0.17).sin() * 0.4 + (y as f64 * 0.11).cos() * 0.3
+        })
+    }
+
+    #[test]
+    fn selective_local_alignment_recovers_bidirectionally_consistent_motion() {
+        let width = 96;
+        let height = 80;
+        let reference = alignment_texture(width, height);
+        let frame = Array2::from_shape_fn((height, width), |(y, x)| {
+            reference[[y, x.saturating_sub(2)]]
+        });
+        let config = NativeFusionConfig {
+            local_alignment_cell_size: 16,
+            local_alignment_search_radius: 4,
+            local_alignment_trigger_score: 0.999,
+            minimum_local_alignment_score: 0.4,
+            ..NativeFusionConfig::default()
+        };
+        let field = estimate_local_motion_field(&reference, &frame, 0.0, 0.0, 1.0, &config);
+        let sample = field.sample(48.0, 40.0);
+        assert!(sample.aligned);
+        assert!(!sample.disoccluded);
+        assert!(
+            (sample.shift_x + 2.0).abs() < 0.35,
+            "local shift was {}",
+            sample.shift_x
+        );
+        assert!(sample.shift_y.abs() < 0.35);
+    }
+
+    #[test]
+    fn disocclusion_uses_traceable_reference_fallback() {
+        let width = 64;
+        let height = 64;
+        let white = 16_383.0f32;
+        let exposures = [1.0f64, 2.0, 4.0];
+        let mut pixels = Vec::with_capacity(width * height * exposures.len());
+        for (frame_index, exposure) in exposures.iter().enumerate() {
+            for y in 0..height {
+                for x in 0..width {
+                    let texture =
+                        (((x * 37 + y * 67 + x * y * 3) % 97) as f32 / 97.0) * 0.08 + 0.06;
+                    let moving_region = (22..42).contains(&x) && (22..42).contains(&y);
+                    let radiance = if frame_index != 1 && moving_region {
+                        if frame_index == 0 {
+                            0.42
+                        } else {
+                            0.01
+                        }
+                    } else {
+                        texture
+                    };
+                    pixels.push((radiance * *exposure as f32 * white).min(white).round() as u16);
+                }
+            }
+        }
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            exposures.len(),
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            exposures
+                .iter()
+                .map(|exposure| metadata(*exposure))
+                .collect(),
+        )
+        .unwrap();
+        let result = fuse_native_group(
+            &group,
+            &meta(1, exposures.len()),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                tile_size: 32,
+                local_alignment_cell_size: 8,
+                local_alignment_search_radius: 3,
+                local_alignment_trigger_score: 0.98,
+                minimum_local_alignment_score: 0.45,
+                regularize_depth: false,
+                ..NativeFusionConfig::default()
+            },
+        )
+        .unwrap();
+        let x = 33;
+        let y = 32;
+        let flags = result.fusion_flags[[y, x]];
+        assert_ne!(flags & FUSION_FLAG_DISOCCLUDED, 0);
+        assert_ne!(flags & FUSION_FLAG_SOURCE_FALLBACK, 0);
+        assert_eq!(result.source_map[[y, x]], 1);
+        assert!(result
+            .frame_alignments
+            .iter()
+            .filter(|summary| !summary.reference_frame)
+            .all(|summary| !summary.global_accepted || summary.disoccluded_cells > 0));
     }
 
     #[test]
@@ -2460,10 +3460,14 @@ mod tests {
         let source_depth = vec![0.0; width * height];
         let mut regularized_depth = source_depth.clone();
         regularized_depth[8 * width + 9] = 1.0;
+        let frame_warps = vec![
+            FrameWarp::identity(PlaneTransform::identity(), true),
+            FrameWarp::identity(PlaneTransform::identity(), true),
+        ];
         refuse_regularized_depth(
             &group,
             &calibrations,
-            &[PlaneTransform::identity(); 2],
+            &frame_warps,
             2,
             1,
             1.0,

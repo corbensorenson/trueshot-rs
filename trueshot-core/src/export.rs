@@ -96,6 +96,23 @@ pub struct ExportDigest {
     pub sha256: String,
 }
 
+/// Atomically publish an arbitrary diagnostic/report artifact while retaining
+/// the same digest and provenance contract as image exports.
+pub fn save_bytes_with_digest(bytes: &[u8], path: &Path) -> Result<ExportDigest> {
+    let (partial, file) = PartialExport::create(path)?;
+    let mut writer = DigestWriter::new(BufWriter::with_capacity(
+        bytes.len().clamp(4096, 1024 * 1024),
+        file,
+    ));
+    writer.write_all(bytes)?;
+    writer.flush()?;
+    let digest = writer.export_digest();
+    drop(writer);
+    partial.publish(path)?;
+    write_provenance_for_export(path)?;
+    Ok(digest)
+}
+
 struct DigestWriter<W> {
     inner: W,
     digest: Sha256,
@@ -402,6 +419,69 @@ pub fn save_depth_tiff_with_digest(depth: &Array2<f32>, path: &Path) -> Result<E
         }
         writer.write_all(&strip)?;
     }
+    writer.flush()?;
+    let digest = writer.export_digest();
+    drop(writer);
+    partial.publish(path)?;
+    write_provenance_for_export(path)?;
+    Ok(digest)
+}
+
+/// Save an exact one-channel `u16` diagnostic map as a compressed, crash-safe
+/// PNG. Values are not normalized, so frame IDs and `u16::MAX` sentinels round
+/// trip exactly.
+pub fn save_u16_map_png_with_digest(values: &Array2<u16>, path: &Path) -> Result<ExportDigest> {
+    let (height, width) = values.dim();
+    let contiguous = values
+        .as_slice()
+        .context("u16 diagnostic map must be contiguous")?;
+    if width == 0 || height == 0 {
+        anyhow::bail!("Cannot export an empty u16 diagnostic map");
+    }
+    let (partial, file) = PartialExport::create(path)?;
+    let mut writer = DigestWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut writer,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    )
+    .write_image(
+        bytemuck::cast_slice(contiguous),
+        u32::try_from(width).context("PNG width exceeds u32")?,
+        u32::try_from(height).context("PNG height exceeds u32")?,
+        image::ExtendedColorType::L16,
+    )?;
+    writer.flush()?;
+    let digest = writer.export_digest();
+    drop(writer);
+    partial.publish(path)?;
+    write_provenance_for_export(path)?;
+    Ok(digest)
+}
+
+/// Save an exact one-channel `u8` diagnostic map as a compressed, crash-safe
+/// PNG. Bitwise fusion flags therefore remain machine-readable.
+pub fn save_u8_map_png_with_digest(values: &Array2<u8>, path: &Path) -> Result<ExportDigest> {
+    let (height, width) = values.dim();
+    let contiguous = values
+        .as_slice()
+        .context("u8 diagnostic map must be contiguous")?;
+    if width == 0 || height == 0 {
+        anyhow::bail!("Cannot export an empty u8 diagnostic map");
+    }
+    let (partial, file) = PartialExport::create(path)?;
+    let mut writer = DigestWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut writer,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    )
+    .write_image(
+        contiguous,
+        u32::try_from(width).context("PNG width exceeds u32")?,
+        u32::try_from(height).context("PNG height exceeds u32")?,
+        image::ExtendedColorType::L8,
+    )?;
     writer.flush()?;
     let digest = writer.export_digest();
     drop(writer);
@@ -723,5 +803,22 @@ mod tests {
                 .to_string_lossy()
                 .contains(".part")
         }));
+    }
+
+    #[test]
+    fn exact_diagnostic_png_maps_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.png");
+        let flags_path = directory.path().join("flags.png");
+        let source =
+            Array2::from_shape_vec((2, 3), vec![0u16, 1, 257, 4096, 65_534, u16::MAX]).unwrap();
+        let flags = Array2::from_shape_vec((2, 3), vec![0u8, 1, 2, 64, 128, 255]).unwrap();
+        save_u16_map_png_with_digest(&source, &source_path).unwrap();
+        save_u8_map_png_with_digest(&flags, &flags_path).unwrap();
+
+        let decoded_source = image::open(&source_path).unwrap().into_luma16();
+        let decoded_flags = image::open(&flags_path).unwrap().into_luma8();
+        assert_eq!(decoded_source.into_raw(), source.into_raw_vec());
+        assert_eq!(decoded_flags.into_raw(), flags.into_raw_vec());
     }
 }

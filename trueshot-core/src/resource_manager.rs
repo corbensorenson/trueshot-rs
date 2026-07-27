@@ -162,6 +162,7 @@ impl NativeSequenceMemoryEstimate {
         fusion_workers: usize,
         tile_size: usize,
         focus_coarse_stride: usize,
+        local_alignment_cell_size: usize,
         analysis_max_dimension: usize,
     ) -> Result<Self> {
         let pixels = u64::try_from(
@@ -197,10 +198,22 @@ impl NativeSequenceMemoryEstimate {
         let worker_scratch_bytes = scratch_per_worker
             .checked_mul(fusion_workers.max(1) as u64)
             .context("Native worker scratch estimate overflow")?;
-        let analysis_bytes = (analysis_max_dimension.max(32) as u64)
-            .checked_mul(analysis_max_dimension.max(32) as u64)
-            .and_then(|value| value.checked_mul(16))
+        let analysis_edge = analysis_max_dimension.max(32) as u64;
+        // Two f64 analysis planes, two two-channel f32 gradient planes, FFT
+        // workspaces, and bounded score-search scratch.
+        let analysis_bytes = analysis_edge
+            .checked_mul(analysis_edge)
+            .and_then(|value| value.checked_mul(64))
             .context("Native alignment estimate overflow")?;
+        let motion_grid_edge = analysis_max_dimension
+            .max(32)
+            .div_ceil(local_alignment_cell_size.max(1)) as u64;
+        // Compact residual/confidence/state cells retained for every frame.
+        let local_motion_bytes = motion_grid_edge
+            .checked_mul(motion_grid_edge)
+            .and_then(|value| value.checked_mul(frame_count as u64))
+            .and_then(|value| value.checked_mul(24))
+            .context("Native local-motion estimate overflow")?;
         // Sensor-surface projection retains original depth, log distance, and
         // a one-byte provenance mask.
         let visibility_working_bytes = pixels
@@ -210,11 +223,13 @@ impl NativeSequenceMemoryEstimate {
             .checked_add(fusion_output_bytes)
             .and_then(|value| value.checked_add(worker_scratch_bytes))
             .and_then(|value| value.checked_add(analysis_bytes))
+            .and_then(|value| value.checked_add(local_motion_bytes))
             .and_then(|value| value.checked_add(visibility_working_bytes))
             .context("Native fusion peak estimate overflow")?;
-        // Linear RGB + display RGB + u8 preview + retained depth/confidence/mask.
+        // Linear/display RGB, u8 preview, all retained fusion diagnostics, and
+        // PNG's temporary endian conversion for the exact u16 source map.
         let postprocess_peak = pixels
-            .checked_mul(12 + 12 + 3 + 9)
+            .checked_mul(12 + 12 + 3 + 20 + 2)
             .and_then(|value| value.checked_add(12 * 1024 * 1024))
             .context("Native postprocess peak estimate overflow")?;
         let peak_memory_bytes = fusion_peak.max(postprocess_peak);
@@ -721,10 +736,10 @@ mod tests {
     #[test]
     fn native_estimate_matches_bounded_group_architecture() {
         let estimate =
-            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 512).unwrap();
+            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 24, 512).unwrap();
         let peak_mib = estimate.peak_memory_bytes as f64 / (1024.0 * 1024.0);
         assert!(
-            (175.0..200.0).contains(&peak_mib),
+            (185.0..225.0).contains(&peak_mib),
             "peak was {peak_mib:.1} MiB"
         );
         assert_eq!(estimate.input_arena_bytes, 21 * 1310 * 1304 * 2);

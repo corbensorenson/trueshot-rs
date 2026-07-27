@@ -112,6 +112,7 @@ fn run(
 
         let fused_bytes = fused.size_bytes();
         let transforms = fused.transforms.clone();
+        let frame_alignments = fused.frame_alignments.clone();
         let depth_refusion_pixels = fused.depth_refusion_pixels;
         let mut depth_values: Vec<f32> = fused.depth.iter().copied().collect();
         let mut confidence_values: Vec<f32> = fused.confidence.iter().copied().collect();
@@ -159,6 +160,22 @@ fn run(
             .iter()
             .filter(|transform| transform.accepted)
             .count();
+        let bracket_frames = frame_alignments
+            .iter()
+            .filter(|alignment| !alignment.reference_frame)
+            .count();
+        let accepted_brackets = frame_alignments
+            .iter()
+            .filter(|alignment| !alignment.reference_frame && alignment.global_accepted)
+            .count();
+        let local_aligned_cells: u32 = frame_alignments
+            .iter()
+            .map(|alignment| alignment.local_aligned_cells)
+            .sum();
+        let disoccluded_cells: u32 = frame_alignments
+            .iter()
+            .map(|alignment| alignment.disoccluded_cells)
+            .sum();
         println!(
             "group {}/{}: {} frames, {}x{}, native {:.2} MiB, fused {:.2} MiB",
             sequence_index + 1,
@@ -192,6 +209,10 @@ fn run(
             depth_refusion_pixels,
             linear_rgb.dim().0 * linear_rgb.dim().1,
             depth_refusion_pixels as f64 * 100.0 / (linear_rgb.dim().0 * linear_rgb.dim().1) as f64,
+        );
+        println!(
+            "  bracket alignment: {accepted_brackets}/{bracket_frames} global accepted, \
+             {local_aligned_cells} local cells, {disoccluded_cells} disoccluded cells"
         );
         for (index, transform) in transforms.iter().enumerate() {
             println!(
