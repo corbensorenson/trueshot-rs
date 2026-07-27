@@ -16,7 +16,7 @@ use ndarray::{Array2, Array3};
 pub struct FusionResult {
     /// Display-ready RGB image (sRGB, gamma corrected, 8-bit)
     pub rgb_u8: Array3<u8>,
-    /// Linear RGB image (ProPhoto/Linear, 16-bit precision, for archiving)
+    /// Camera-linear RGB image for archiving; no standard color-space claim.
     pub rgb_f64: Array3<f64>,
     /// Foreground mask
     pub mask: Array2<u8>,

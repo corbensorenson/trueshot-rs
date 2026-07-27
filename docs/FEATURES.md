@@ -833,7 +833,7 @@ Connect external storage for scan data: NAS, Amazon S3, Google Cloud Storage, Az
 
 ## 11. Photo Management
 
-### 11.1 Photo Editor Mode (Lightroom Alternative) 🆕
+### 11.1 Photo Editor Mode (Lightroom-Style Workflow) 🆕
 
 | Attribute | Value |
 |-----------|-------|
@@ -845,8 +845,8 @@ Connect external storage for scan data: NAS, Amazon S3, Google Cloud Storage, Az
 **Description:**
 Professional photo editing integrated directly into TrueShot. Toggle between Scan Mode and Photo Editor Mode on the main page. Non-destructive RAW processing with comprehensive adjustments, GPU-accelerated preview, and preset system.
 
-**Why State-of-the-Art:**
-- No need for external Adobe Lightroom/Darktable
+**Product Goal:**
+- Reduce dependence on external editors after color-managed RAW parity is validated
 - GPU compute shaders for instant real-time preview
 - Direct integration with 3DGS pipeline - edited photos feed into reconstruction
 - XMP sidecar compatibility for interoperability
@@ -886,13 +886,12 @@ Professional photo editing integrated directly into TrueShot. Toggle between Sca
 | **Tier** | Core |
 
 **Description:**
-Professional tethered capture matching or exceeding NKTether/Capture One. HDR bracket capture with auto-merge, focus stacking with auto-stack, and combined HDR + Focus Stack workflows. Full save location control.
+Professional tethered capture with HDR bracket capture, focus stacking, and combined HDR + Focus Stack workflows. Full save location control. End-to-end hardware and direct competitor qualification remain in progress.
 
-**Why State-of-the-Art:**
-- Matches professional tethering software features
-- Automated HDR merge using Mertens Fusion or Debevec algorithms
-- Automated focus stacking using Laplacian pyramid blending
-- Combined HDR+FS for maximum dynamic range AND depth of field
+**Current Architecture:**
+- Native NEF groups use one linear, CFA-safe HDR/focus fusion path
+- Mertens/Debevec and 8-bit Laplacian utilities are preview-grade until routed through the validated linear core
+- Combined HDR+FS retains dynamic range and focus depth without intermediate image files
 - Integration with Scene Reconstruction for HDR 4DGS
 
 **Key Features:**
@@ -900,7 +899,7 @@ Professional tethered capture matching or exceeding NKTether/Capture One. HDR br
 |---------|-------------|
 | HDR Bracketing | 3/5/7/9 shots, 1-3 EV spacing, auto-merge |
 | Focus Stacking | 5-50 slices, front-to-back/back-to-front/center-out |
-| HDR + Focus | Combined workflow for ultimate quality |
+| HDR + Focus | Combined workflow; direct output-quality qualification is in progress |
 | Manual Focus | Fine-grained digital focus control |
 | Save Location | Camera SD / Computer / Both |
 
@@ -913,8 +912,8 @@ Professional tethered capture matching or exceeding NKTether/Capture One. HDR br
 | Competitor | Has Feature? | Our Advantage |
 |------------|-------------|---------------|
 | NKTether | ✅ | Integrated in scanning pipeline |
-| Capture One | ✅ | Free with TrueShot, no extra cost |
-| Helicon Remote | Partial | Combined HDR+FS workflow |
+| Capture One | ✅ | Integrated local-first workflow is the target; parity is not yet qualified |
+| Helicon Remote | Partial | Combined HDR+FS capture exists; output quality comparison is pending |
 
 ---
 
@@ -1070,5 +1069,5 @@ Mount any smartphone as a server-controlled camera for 3DGS scanning. Phones con
 6. **Scene Reconstruction from crowd-sourced footage** (NEW)
 7. **Integrated Avatar creation pipeline** (NEW)
 8. **Guest Portal for event crowd-capture** ⭐ MARKET EXCLUSIVE
-9. **Integrated Photo Editor - no Lightroom needed**
-10. **Professional HDR + Focus Stacking in-app**
+9. **Integrated photo editor workflow (color-managed Lightroom parity in progress)**
+10. **Native RAW HDR + focus stacking (direct competitor qualification in progress)**

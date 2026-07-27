@@ -199,6 +199,14 @@ enum Commands {
         #[arg(long, default_value_t = 1600)]
         preview_max_dimension: usize,
 
+        /// Robust HDR motion rejection (0 disables, 1 standard, 2 strongest)
+        #[arg(long, default_value_t = 1.0)]
+        deghost_strength: f32,
+
+        /// Skip the second CFA-safe pass when depth regularization changes a focus plane
+        #[arg(long)]
+        no_depth_refusion: bool,
+
         /// Attempt to start a local trial if no license is present
         #[arg(long)]
         trial: bool,
@@ -518,6 +526,8 @@ fn main() -> Result<()> {
             depth,
             full_resolution_preview,
             preview_max_dimension,
+            deghost_strength,
+            no_depth_refusion,
             trial,
             trial_days,
         } => cmd_process(
@@ -531,6 +541,8 @@ fn main() -> Result<()> {
             depth,
             full_resolution_preview,
             preview_max_dimension,
+            deghost_strength,
+            no_depth_refusion,
             trial,
             trial_days,
         ),
@@ -610,11 +622,16 @@ fn cmd_process(
     export_depth: bool,
     full_resolution_preview: bool,
     preview_max_dimension: usize,
+    deghost_strength: f32,
+    no_depth_refusion: bool,
     trial: bool,
     trial_days: Option<i64>,
 ) -> Result<()> {
     if !(64..=16_384).contains(&preview_max_dimension) {
         anyhow::bail!("Preview max dimension must be between 64 and 16384 pixels");
+    }
+    if !deghost_strength.is_finite() || !(0.0..=2.0).contains(&deghost_strength) {
+        anyhow::bail!("Deghost strength must be between 0 and 2");
     }
     let mut license_manager = init_license_manager()?;
     let required = process_required_features(mode);
@@ -658,6 +675,8 @@ fn cmd_process(
             export_depth,
             full_resolution_preview,
             preview_max_dimension,
+            deghost_strength,
+            !no_depth_refusion,
             Some(&inventory_ctx),
             Some(&mut run_state),
         ),
@@ -1142,6 +1161,8 @@ fn run_burst_pipeline(
     export_depth: bool,
     full_resolution_preview: bool,
     preview_max_dimension: usize,
+    deghost_strength: f32,
+    depth_consistent_refusion: bool,
     _inventory_ctx: Option<&InventoryContext>,
     mut run_state: Option<&mut RunStateManager>,
 ) -> Result<()> {
@@ -1174,7 +1195,11 @@ fn run_burst_pipeline(
         state.mark_step_completed("scan_input", vec![]);
         state.mark_step_started("sfm");
     }
-    let fusion_config = native_fusion_config(quality);
+    let fusion_config = NativeFusionConfig {
+        deghost_strength,
+        depth_consistent_refusion,
+        ..native_fusion_config(quality)
+    };
     let mut native_arena = NativeGroupArena::default();
     let resources = SystemResources::query();
     let memory_budget_bytes = configured_memory_budget(resources.available_memory)?;
@@ -1322,6 +1347,7 @@ fn run_burst_pipeline(
                 foreground_mask,
                 transforms,
                 radiance_anchor,
+                depth_refusion_pixels: _,
             } = fused;
             let rgb_cam: [[f32; 4]; 3] = [
                 [1.0, 0.0, 0.0, 0.0],

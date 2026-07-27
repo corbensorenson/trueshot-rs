@@ -13,12 +13,14 @@ use trueshot_core::types::ProcessingOptions;
 
 fn main() -> Result<()> {
     let mut arguments = std::env::args_os().skip(1);
-    let input = arguments
-        .next()
-        .map(PathBuf::from)
-        .context("usage: nef_native_fusion_benchmark <nef_dir> [output_dir] [--workers N]")?;
+    let input = arguments.next().map(PathBuf::from).context(
+        "usage: nef_native_fusion_benchmark <nef_dir> [output_dir] \
+             [--workers N] [--no-depth-refusion] [--deghost-strength 0..2]",
+    )?;
     let mut output = None;
     let mut workers = None;
+    let mut depth_refusion = true;
+    let mut deghost_strength = 1.0;
     while let Some(argument) = arguments.next() {
         if argument == "--workers" {
             workers = Some(
@@ -32,6 +34,18 @@ fn main() -> Result<()> {
             if workers == Some(0) {
                 anyhow::bail!("--workers must be positive");
             }
+        } else if argument == "--no-depth-refusion" {
+            depth_refusion = false;
+        } else if argument == "--deghost-strength" {
+            deghost_strength = arguments
+                .next()
+                .context("--deghost-strength requires a value from 0 to 2")?
+                .to_string_lossy()
+                .parse::<f32>()
+                .context("--deghost-strength must be numeric")?;
+            if !(0.0..=2.0).contains(&deghost_strength) {
+                anyhow::bail!("--deghost-strength must be between 0 and 2");
+            }
         } else if argument.to_string_lossy().starts_with('-') {
             anyhow::bail!("Unknown option {}", argument.to_string_lossy());
         } else if output.is_none() {
@@ -41,10 +55,22 @@ fn main() -> Result<()> {
         }
     }
 
-    run(&input, output.as_deref(), workers)
+    run(
+        &input,
+        output.as_deref(),
+        workers,
+        depth_refusion,
+        deghost_strength,
+    )
 }
 
-fn run(input: &Path, output: Option<&Path>, workers: Option<usize>) -> Result<()> {
+fn run(
+    input: &Path,
+    output: Option<&Path>,
+    workers: Option<usize>,
+    depth_refusion: bool,
+    deghost_strength: f32,
+) -> Result<()> {
     if let Some(output) = output {
         std::fs::create_dir_all(output)?;
     }
@@ -72,12 +98,21 @@ fn run(input: &Path, output: Option<&Path>, workers: Option<usize>) -> Result<()
         let input_bytes = group.size_bytes();
 
         let fusion_started = Instant::now();
-        let fused = fuse_native_group(&group, &sequence.meta, &NativeFusionConfig::default())?;
+        let fused = fuse_native_group(
+            &group,
+            &sequence.meta,
+            &NativeFusionConfig {
+                depth_consistent_refusion: depth_refusion,
+                deghost_strength,
+                ..NativeFusionConfig::default()
+            },
+        )?;
         let fusion_elapsed = fusion_started.elapsed();
         drop(group);
 
         let fused_bytes = fused.size_bytes();
         let transforms = fused.transforms.clone();
+        let depth_refusion_pixels = fused.depth_refusion_pixels;
         let mut depth_values: Vec<f32> = fused.depth.iter().copied().collect();
         let mut confidence_values: Vec<f32> = fused.confidence.iter().copied().collect();
         depth_values.sort_unstable_by(f32::total_cmp);
@@ -151,6 +186,12 @@ fn run(input: &Path, output: Option<&Path>, workers: Option<usize>) -> Result<()
             percentile(&confidence_values, 0.05),
             percentile(&confidence_values, 0.50),
             percentile(&confidence_values, 0.95),
+        );
+        println!(
+            "  depth-consistent refusion: {} / {} pixels ({:.2}%)",
+            depth_refusion_pixels,
+            linear_rgb.dim().0 * linear_rgb.dim().1,
+            depth_refusion_pixels as f64 * 100.0 / (linear_rgb.dim().0 * linear_rgb.dim().1) as f64,
         );
         for (index, transform) in transforms.iter().enumerate() {
             println!(

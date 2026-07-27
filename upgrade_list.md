@@ -2201,3 +2201,35 @@ Scope: local-first product architecture + monetization operations reconciliation
   - Replaced panic-prone scale coordinates and unnormalized scoring with signed bilinear zero-mean NCC; a private 4612x2776 Z9 crop now completes decode, fusion, and demosaic without the former alignment panic.
   - Removed joint-demosaic per-pixel exposure allocations, added structural/calibration validation, and replaced zero edge padding with same-CFA-parity boundary sampling.
   - Remaining: exact multi-pass Metal AHD, calibrated sensor-noise/lens/defect corrections, real chart/corpus quality gates, and release-mode Apple hardware baselines.
+
+157. Focus/HDR quality is not yet qualified against Helicon Focus and Lightroom
+- Evidence:
+  - Helicon exposes three materially different focus-stack methods, radius/smoothing controls, 16-bit processing, retouching, alignment, and method-combination workflows; TrueShot's shipping NEF path currently exposes one automatic strategy.
+  - Lightroom HDR exposes Auto Align, selectable deghost strength/overlay, and a color-managed HDR DNG workflow.
+  - TrueShot regularized its exported depth map without re-sampling the Bayer result, so the photograph could retain a focus-plane seam that disappeared only in the depth preview.
+  - The HDR robust estimator centered rejection on a weighted mean, allowing one high-weight moving bracket to pull the estimate and inflate its own rejection scale.
+  - The native TIFF is white-balanced camera-linear RGB but has no calibrated Z9 camera-to-standard transform and no ICC/DNG color profile. Existing `docs/FEATURES.md` Lightroom-replacement language therefore exceeds verified capability.
+  - Separate 8-bit capture stack utilities use nearest-neighbor pyramid construction, hard coefficient selection, and simplified linear-response assumptions; they are preview-grade and must not be confused with the native RAW path.
+- Risk: focus halos, depth seams, bracket ghosts, inaccurate color, and unsupported superiority claims can make real customer results worse than an expert Helicon + Lightroom workflow.
+- Upgrade actions:
+  - Execute `docs/FOCUS_HDR_QUALITY_PROTOCOL.md` against licensed Helicon/Lightroom outputs from identical source stacks and retain signed manifests, settings, hashes, metrics, and blinded reviews.
+  - Calibrate a Z9 camera-to-XYZ/working-space profile from RAW chart captures, implement chromatic adaptation and ICC/DNG-tagged linear export, and gate DeltaE 2000.
+  - Add per-bracket local motion alignment, a confidence/deghost mask, reference-frame fallback, user-selectable deghost strength, and an overlay/retouch workflow.
+  - Add automatic method selection and expert controls spanning weighted contrast, depth-map, and multiscale-pyramid behavior; protect hair, thin crossing structures, depth discontinuities, and smooth surfaces.
+  - Replace or route preview-grade `capture/hdr.rs` and `capture/focus_stack.rs` through the shared linear high-quality core; fail closed on mismatched dimensions and unsupported inputs.
+  - Calibrate per-channel/ISO noise, lens shading, defect pixels, and highlight headroom; add burst-aware temporal outlier rejection.
+  - Add 16/32-bit floating TIFF or EXR plus profiled DNG where valid; never label untagged camera RGB as ProPhoto/sRGB.
+  - Benchmark deterministic release builds on supported Apple Silicon for quality, wall p50/p95, peak RSS, thermals, energy, and bytes read/written.
+- Acceptance criteria:
+  - Synthetic focus PSNR remains at least 40 dB and depth accuracy at least 98%; current baseline is 44.127 dB/100%.
+  - Static valid RAW radiance error remains below 0.2%; a corrupted 3-shot bracket improves by at least 5x with deghosting and finishes below 0.2%.
+  - Profiled chart output meets a preregistered DeltaE 2000 target and opens consistently in ColorSync, Lightroom, Photoshop, and Preview.
+  - TrueShot beats the best competitor output on the preregistered primary metric for at least 80% of scenes without a safety-metric regression; otherwise marketing states the measured tradeoff instead of claiming superiority.
+  - Customer controls, previews, masks, retouching, exports, and Python API use the same validated fusion semantics.
+- Status: In Progress (P0 product-quality blocker, discovered 2026-07-26)
+  - Replaced mean-centered HDR rejection with bounded-stack median/MAD robust estimation and added a moving-bracket regression gate.
+  - Depth regularization now triggers CFA-safe parallel refusion whenever it changes the dominant focus plane; the count is exported for performance evidence.
+  - Added deterministic synthetic all-in-focus ground truth with a 44.127 dB PSNR and 100% depth-classification baseline.
+  - On the private 21-frame 1310x1304 Z9 crop, refusion corrected 45.27% of pixels and added 0.71 seconds (5.7%) to the paired debug fusion sweep: 13.08 seconds versus 12.37 seconds. Disabling both robust deghosting and refusion reached 11.31 seconds, quantifying the quality-protection cost rather than hiding it.
+  - Exposed validated `--deghost-strength` and `--no-depth-refusion` production CLI controls; robust deghosting and correctness refusion remain the defaults.
+  - Added the competitor protocol and corrected the feature matrix to distinguish implemented fusion from qualified superiority.
