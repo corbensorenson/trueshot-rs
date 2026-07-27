@@ -107,4 +107,12 @@ Not yet qualified:
 - Per-bracket local motion alignment and user-visible deghost overlay.
 - Hair/thin-structure halo gates, retouch workflow, and multi-method automatic
   focus strategy.
+- Per-ISO/CFA photon-transfer calibration, censored-saturation likelihood, and
+  posterior uncertainty calibration.
+- Diopter/PSF-based sub-plane depth and aperture-constrained occlusion
+  correction.
+- Deterministic uncertainty-driven exposure and focus acquisition scheduling.
 - Release-mode Apple Silicon timing, memory, thermal, and energy baselines.
+
+The implementation-grade literature mapping and rejection policy for
+generative recovery are recorded in `docs/HDR_FOCUS_RESEARCH_2026.md`.

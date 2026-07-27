@@ -2233,3 +2233,30 @@ Scope: local-first product architecture + monetization operations reconciliation
   - On the private 21-frame 1310x1304 Z9 crop, refusion corrected 45.27% of pixels and added 0.71 seconds (5.7%) to the paired debug fusion sweep: 13.08 seconds versus 12.37 seconds. Disabling both robust deghosting and refusion reached 11.31 seconds, quantifying the quality-protection cost rather than hiding it.
   - Exposed validated `--deghost-strength` and `--no-depth-refusion` production CLI controls; robust deghosting and correctness refusion remain the defaults.
   - Added the competitor protocol and corrected the feature matrix to distinguish implemented fusion from qualified superiority.
+
+158. Native HDR/focus fusion needs a calibrated physical inference model
+- Evidence:
+  - `trueshot-core/src/native_fusion.rs` uses one fixed `read_noise_dn`, an approximate shot-noise term, highlight tapering, and a single local focus scale.
+  - Production depth is a uniformly spaced frame index even though `trueshot-core/src/nef/parser.rs` already parses focus distance, focal length, and aperture.
+  - One scale/translation is shared by all brackets in a focus plane; there is no selective local bracket alignment, disocclusion model, or source-contribution/deghost overlay.
+  - Selection-map smoothing does not enforce aperture/PSF visibility constraints at foreground-background boundaries.
+  - `docs/HDR_FOCUS_RESEARCH_2026.md` maps current primary research and 2025-2026 benchmarks to these concrete gaps.
+- Risk: heuristic noise weighting wastes usable shadow/highlight information; nonuniform focus steps bias depth; ordinary smoothing creates halos; local motion creates ghosts; and users cannot distinguish measured, rejected, fallback, or uncertain pixels.
+- Upgrade actions:
+  - Calibrate per-ISO/per-CFA Poisson-Gaussian noise, black drift, conversion gain, saturation headroom, lens shading, and defect behavior; replace heuristic HDR weights with a bounded censored-likelihood estimator that exports posterior uncertainty.
+  - Promote physical focus metadata through manifests and fusion; fit multiscale noise-whitened focus response in diopter/sensor-distance coordinates for sub-plane depth and calibrated confidence.
+  - Calibrate lens breathing and PSF/circle-of-confusion behavior by aperture, focal length, distance, and image radius.
+  - Enforce aperture-derived visibility/slope constraints at occlusions and use a boundary trimap for hair, fur, transparency, and thin crossing structures before CFA-safe refusion.
+  - Add exposure-aware global alignment followed by selective bounded tile flow, disocclusion detection, traceable reference fallback, and a user-visible source/deghost overlay.
+  - Implement deterministic uncertainty-driven shutter/ISO/focus scheduling and independent HDR/focus stopping rules under time, motion, thermal, and lens-travel budgets.
+  - Add glare-aware sharpness rejection plus low-frequency illumination/color and high-frequency detail fusion.
+  - Build native-resolution CFA/PSF/occlusion/motion fixtures and Apple Silicon release gates; optionally evaluate an independently implemented compact LUT accelerator only after deterministic parity.
+- Acceptance criteria:
+  - Sensor photon-transfer calibration predicts held-out variance within 10% for every supported ISO/CFA site, and normalized residuals pass preregistered calibration tests.
+  - Static HDR estimates are unbiased within 0.2%, clipped observations never pull radiance downward as ordinary values, and uncertainty intervals achieve 90-95% empirical coverage at their declared confidence.
+  - Metric/diopter depth and uncertainty outperform frame-index selection on held-out stacks; missing or nonmonotonic focus metadata fail closed or use an explicitly reported fallback.
+  - Foreground/background halo energy improves by at least 50% without an MTF50 or color-regression failure on the occlusion corpus.
+  - Dynamic brackets identify moving/disoccluded regions, expose every fallback source, and beat the current median/MAD path on radiance error and ghost residual.
+  - The adaptive planner reaches the same quality target with at least 20% less capture time or improves quality at equal time on the preregistered corpus.
+  - Full-resolution Z9 fusion remains memory bounded and meets declared Apple Silicon p50/p95, RSS, energy, thermal, and determinism gates.
+- Status: Open (P0 image-quality moat, researched 2026-07-26)
