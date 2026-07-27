@@ -56,7 +56,7 @@ This checklist is the minimum bar for a production deployment. It assumes `TRUES
 - Keep `TRUESHOT_NEF_ACCESS_MODE` unset for sidecar-free one-pass ingestion.
 - Use `TRUESHOT_RESUME_VERIFY=sampled` for normal operation and `full` for validation or regulated workflows.
 - Run `capture_manifest_scale_benchmark`, `nef_group_benchmark --verify-full`, and `nef_corruption_runner` on release hardware before advertising a camera/storage combination.
-- Run `demosaic_benchmark` in release mode at the advertised ROI tiers and retain its adapter/CPU, throughput, PSNR, and checksum evidence.
+- Keep `scripts/run_apple_metal_ahd_qualification.sh` passing on dedicated Apple Silicon release runners. The retained M1 record gates adapter/backend, alternating p50/p95 speedup, exact measured CFA values, reconstructed-channel tolerance, bounded scratch, checksums, and a mandatory 6.25x HDR case with exact power-of-two normalization; real chart/corpus and every supported Apple generation remain required.
 - Treat `docs/NEF_SUPPORT_MATRIX.md` as the authoritative advertised camera/layout boundary.
 - Do not advertise Nikon bodies, firmware, compression modes or bit depths until item 148 in `upgrade_list.md` is satisfied for that combination.
 

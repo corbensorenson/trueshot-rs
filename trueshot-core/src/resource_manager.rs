@@ -151,6 +151,7 @@ pub struct NativeSequenceMemoryEstimate {
     pub input_arena_bytes: u64,
     pub fusion_output_bytes: u64,
     pub worker_scratch_bytes: u64,
+    pub demosaic_scratch_bytes: u64,
     pub peak_memory_bytes: u64,
 }
 
@@ -165,6 +166,7 @@ impl NativeSequenceMemoryEstimate {
         glare_radius_pixels: usize,
         local_alignment_cell_size: usize,
         analysis_max_dimension: usize,
+        demosaic_scratch_bytes: u64,
     ) -> Result<Self> {
         let pixels = u64::try_from(
             width
@@ -240,12 +242,14 @@ impl NativeSequenceMemoryEstimate {
         let postprocess_peak = pixels
             .checked_mul(12 + 12 + 3 + 21 + 2 + 3)
             .and_then(|value| value.checked_add(12 * 1024 * 1024))
+            .and_then(|value| value.checked_add(demosaic_scratch_bytes))
             .context("Native postprocess peak estimate overflow")?;
         let peak_memory_bytes = fusion_peak.max(postprocess_peak);
         Ok(Self {
             input_arena_bytes,
             fusion_output_bytes,
             worker_scratch_bytes,
+            demosaic_scratch_bytes,
             // Reserve 15% for allocator fragmentation and library internals.
             peak_memory_bytes: peak_memory_bytes + peak_memory_bytes / 7,
         })
@@ -745,13 +749,40 @@ mod tests {
     #[test]
     fn native_estimate_matches_bounded_group_architecture() {
         let estimate =
-            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512).unwrap();
+            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512, 0)
+                .unwrap();
         let peak_mib = estimate.peak_memory_bytes as f64 / (1024.0 * 1024.0);
         assert!(
             (245.1..246.1).contains(&peak_mib),
             "peak was {peak_mib:.1} MiB"
         );
         assert_eq!(estimate.input_arena_bytes, 21 * 1310 * 1304 * 2);
+    }
+
+    #[test]
+    fn native_estimate_admits_unified_memory_demosaic_scratch() {
+        let without_gpu =
+            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512, 0)
+                .unwrap();
+        let scratch_bytes = 256 * 1024 * 1024;
+        let with_gpu = NativeSequenceMemoryEstimate::estimate(
+            21,
+            1310,
+            1304,
+            8,
+            256,
+            4,
+            20,
+            24,
+            512,
+            scratch_bytes,
+        )
+        .unwrap();
+        assert_eq!(with_gpu.demosaic_scratch_bytes, scratch_bytes);
+        assert!(
+            with_gpu.peak_memory_bytes > without_gpu.peak_memory_bytes,
+            "scratch exceeding the fusion stage must raise admission"
+        );
     }
 
     #[test]

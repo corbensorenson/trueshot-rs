@@ -35,6 +35,7 @@ use trueshot_core::export::{
     save_u8_map_png_with_digest, PlyExportOptions,
 };
 use trueshot_core::gaussian_splatting::{Camera as GsCamera, GaussianSplatTrainer, TrainingConfig};
+use trueshot_core::gpu::{get_gpu_context, GpuAhdEngine};
 use trueshot_core::intrinsics::{
     estimate_intrinsics_with_report, IntrinsicsReport, IntrinsicsSource,
 };
@@ -1994,6 +1995,22 @@ fn run_burst_pipeline(
         sensor_correction_profile,
         ..native_fusion_config(quality)
     };
+    let gpu_ahd = if no_gpu {
+        None
+    } else {
+        get_gpu_context().and_then(|context| match GpuAhdEngine::new(context) {
+            Ok(engine) => engine,
+            Err(error) => {
+                tracing::warn!("Metal AHD initialization failed; using CPU: {error:#}");
+                None
+            }
+        })
+    };
+    if gpu_ahd.is_some() {
+        println!("  Demosaic: bounded CFA-exact, parity-gated Metal AHD");
+    } else {
+        println!("  Demosaic: deterministic CPU AHD");
+    }
     let mut native_arena = NativeGroupArena::default();
     let resources = SystemResources::query();
     let memory_budget_bytes = configured_memory_budget(resources.available_memory)?;
@@ -2097,6 +2114,12 @@ fn run_burst_pipeline(
             let (x0, y0, x1, y1) = rect.to_bounds();
             let width = x1.checked_sub(x0).context("Burst crop width underflow")?;
             let height = y1.checked_sub(y0).context("Burst crop height underflow")?;
+            let demosaic_scratch_bytes = gpu_ahd
+                .as_ref()
+                .map(|engine| engine.scratch_bytes(width, height))
+                .transpose()?
+                .flatten()
+                .unwrap_or(0);
             let estimate = NativeSequenceMemoryEstimate::estimate(
                 sequence.len(),
                 width,
@@ -2107,6 +2130,7 @@ fn run_burst_pipeline(
                 fusion_config.glare_fallback_radius_pixels,
                 fusion_config.local_alignment_cell_size,
                 fusion_config.analysis_max_dimension,
+                demosaic_scratch_bytes,
             )?;
             let memory_permit =
                 memory_credits.acquire(estimate.peak_memory_bytes, &cancellation)?;
@@ -2178,7 +2202,50 @@ fn run_burst_pipeline(
                 [0.0, 1.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0, 0.0],
             ];
-            let linear_rgb = ahd_demosaic_f32_owned(bayer, &rgb_cam)?;
+            let (linear_rgb, demosaic_backend, demosaic_bands, demosaic_adapter, demosaic_fallback) =
+                if let Some(engine) = gpu_ahd.as_ref() {
+                    match engine.demosaic(&bayer, &rgb_cam) {
+                        Ok(Some(output)) => (
+                            output.image,
+                            "metal_ahd",
+                            output.bands,
+                            Some(output.adapter),
+                            None,
+                        ),
+                        Ok(None) => (
+                            ahd_demosaic_f32_owned(bayer, &rgb_cam)?,
+                            "cpu_ahd",
+                            0,
+                            None,
+                            Some("workload_below_metal_threshold".to_string()),
+                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                "Metal AHD failed for {}; using deterministic CPU: {error:#}",
+                                sequence.meta.bone_id
+                            );
+                            (
+                                ahd_demosaic_f32_owned(bayer, &rgb_cam)?,
+                                "cpu_ahd",
+                                0,
+                                None,
+                                Some(format!("metal_runtime_error: {error:#}")),
+                            )
+                        }
+                    }
+                } else {
+                    (
+                        ahd_demosaic_f32_owned(bayer, &rgb_cam)?,
+                        "cpu_ahd",
+                        0,
+                        None,
+                        Some(if no_gpu {
+                            "operator_disabled_gpu".to_string()
+                        } else {
+                            "qualified_metal_unavailable".to_string()
+                        }),
+                    )
+                };
             let display_rgb = postprocess_f32(&linear_rgb)?;
             ensure_not_cancelled(&cancellation)?;
             step_pb.inc(1);
@@ -2274,6 +2341,15 @@ fn run_burst_pipeline(
                 "glare_affected_pixels": glare_affected_pixels,
                 "glare_policy": "focus_evidence_suppression_only_measured_radiance_unchanged",
                 "focus_kernel": focus_kernel,
+                "demosaic": {
+                    "backend": demosaic_backend,
+                    "bands": demosaic_bands,
+                    "adapter": demosaic_adapter,
+                    "fallback": demosaic_fallback,
+                    "scratch_bytes_admitted": demosaic_scratch_bytes,
+                    "measured_cfa_policy": "exact",
+                    "generative_reconstruction": false
+                },
                 "local_aligned_cells": local_aligned_cells,
                 "disoccluded_cells": disoccluded_cells,
                 "frame_alignments": frame_alignments,

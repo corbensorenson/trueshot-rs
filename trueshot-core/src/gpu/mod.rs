@@ -1,6 +1,7 @@
 //! GPU acceleration module using wgpu
 //!
 //! Provides GPU-accelerated implementations of compute-intensive operations:
+//! - Bounded multi-pass AHD demosaicing on qualified Metal adapters
 //! - Mertens weight computation (contrast, saturation, exposedness)
 //! - Weighted pixel collapse (hierarchical grading)
 //! - VNG demosaicing
@@ -10,6 +11,9 @@
 
 #[cfg(feature = "gpu")]
 pub mod gpu_context;
+
+#[cfg(feature = "gpu")]
+pub mod gpu_ahd;
 
 #[cfg(feature = "gpu")]
 pub mod gpu_collapse;
@@ -26,6 +30,12 @@ pub mod gpu_postprocess;
 // Re-export main types
 #[cfg(feature = "gpu")]
 pub use gpu_context::{get_gpu_context, GpuContext};
+
+#[cfg(feature = "gpu")]
+pub use gpu_ahd::{
+    GpuAhdEngine, GpuAhdOutput, METAL_AHD_NORMALIZED_PARITY_TOLERANCE,
+    METAL_AHD_RELEASE_QUALIFICATION_TOLERANCE,
+};
 
 #[cfg(feature = "gpu")]
 pub use gpu_collapse::gpu_collapse_pixels;

@@ -170,6 +170,41 @@ source-hashed record is retained in
 enforces conservative 1.5x/1.3x speedup and 2e-5 parity floors. This is a
 focus-kernel result, not an end-to-end NEF, energy, thermal, or Metal AHD claim.
 
+The deferred demosaic now has a separate, bounded Apple Metal implementation.
+Four compute stages reproduce directional green interpolation, red/blue
+reconstruction plus the CPU's exact integer Lab LUT, homogeneity voting, and
+3x3 direction selection. Six-row halos make every emitted row independent of
+band boundaries, adapter limits cap the 512-row ceiling, and production admits
+the exact unified-memory scratch before decoding. A robust one-count
+homogeneity margin averages numerically unstable near-ties on both backends;
+this removes discrete CPU/Metal direction flips and improves the synthetic
+red/blue PSNR baseline rather than weakening quality. HDR-linear inputs use a
+shared power-of-two normalization scale, so division and rescaling retain every
+measured `f32` CFA value exactly. One reusable haloed host band performs HDR
+normalization, eliminating the previous full-frame temporary and making its
+memory part of the admitted scratch bound.
+
+The retained Apple M1 release record is
+`docs/benchmarks/apple_metal_ahd_qualification_2026-07-27.json`. At 1310x1304,
+three bands use 77.14 MB admitted scratch and Metal measures 31.42/32.66 ms
+p50/p95 versus CPU 40.72/41.60 ms, a 1.30x/1.27x speedup. Measured CFA values are exact, reconstructed output
+has 123.96 dB CPU parity and 5.29e-4 maximum normalized error, and no value
+exceeds the strict 1e-3 release contract. A mandatory 6.25x HDR stress case
+uses an exact 8x normalization scale, retains measured samples exactly, reaches
+127.54 dB parity with 5.63e-5 maximum normalized error, and remains
+1.30x/1.30x faster with 90.41 MB admitted scratch. Both nominal and HDR p50/p95
+must exceed the fail-closed 1.10x floor. The broader pathological cross-backend fixture retains a
+separate 2e-3 bound. This is an isolated demosaic result, not an end-to-end
+NEF, energy, thermal, or cross-generation claim.
+
+The production dispatch was also exercised on the private 21-frame Nikon Z9
+stack. The existing group-amortized loader used one embedded preview and one
+1310x1304 crop, Metal used three bands with exactly 77,143,488 admitted scratch
+bytes, and the atomic export report recorded the Apple M1 adapter, no fallback,
+exact measured-CFA policy, and no generative reconstruction. This proves the
+real integration path, but the private stack is not a substitute for a
+redistributable chart corpus or release-mode end-to-end qualification.
+
 ### 5. Exposure-aware local alignment and frequency-separated deghosting
 
 The NTIRE 2025 RAW challenge uses nine noisy, misaligned RAW frames with

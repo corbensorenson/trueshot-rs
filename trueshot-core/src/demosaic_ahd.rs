@@ -12,6 +12,7 @@ const TS: usize = 160;
 const TILE_OVERLAP: usize = 6;
 const TILE_STEP: usize = TS - TILE_OVERLAP;
 const OUTPUT_BORDER: usize = 5;
+const HOMOGENEITY_DECISION_MARGIN: u32 = 1;
 
 #[inline]
 fn tile_rgb_index(direction: usize, row: usize, col: usize, channel: usize) -> usize {
@@ -103,20 +104,12 @@ impl CieLabConverter {
 
     fn convert(&self, rgb: &[f32; 3]) -> [i16; 3] {
         let mut xyz = [0.0f32; 3];
-
-        // Convert RGB to XYZ (rgb values are in 0.0-1.0 range)
-        for c in 0..3 {
-            xyz[0] += self.xyz_cam[0][c] * rgb[c];
-            xyz[1] += self.xyz_cam[1][c] * rgb[c];
-            xyz[2] += self.xyz_cam[2][c] * rgb[c];
+        for channel in 0..3 {
+            xyz[0] += self.xyz_cam[0][channel] * rgb[channel];
+            xyz[1] += self.xyz_cam[1][channel] * rgb[channel];
+            xyz[2] += self.xyz_cam[2][channel] * rgb[channel];
         }
-
-        // Apply cube root with clipping using lookup table
-        let xyz_idx = [
-            (clip(xyz[0]) * 65535.0) as usize,
-            (clip(xyz[1]) * 65535.0) as usize,
-            (clip(xyz[2]) * 65535.0) as usize,
-        ];
+        let xyz_idx = xyz.map(|value| (clip(value) * 65_535.0) as usize);
 
         let xyz_cbrt = [
             self.cbrt[xyz_idx[0]] as f32 / 32767.0,
@@ -216,7 +209,7 @@ pub fn ahd_demosaic_f32_owned(
     {
         anyhow::bail!("AHD input must contain finite, non-negative linear sensor values");
     }
-    let range_scale = image_f32.iter().copied().fold(1.0f32, f32::max);
+    let range_scale = ahd_normalization_scale(image_f32.iter().copied().fold(1.0f32, f32::max))?;
     if range_scale != 1.0 {
         image_f32.mapv_inplace(|value| value / range_scale);
     }
@@ -300,6 +293,24 @@ pub fn ahd_demosaic_f32_owned(
     }
     tracing::info!("AHD demosaicing complete");
     Ok(output)
+}
+
+/// Return the exact power-of-two scale used to normalize HDR-linear AHD input.
+///
+/// Power-of-two division and multiplication preserve measured `f32` samples
+/// exactly while keeping the direction classifier in its calibrated range.
+pub fn ahd_normalization_scale(maximum: f32) -> Result<f32> {
+    if !maximum.is_finite() || maximum < 0.0 {
+        anyhow::bail!("AHD normalization maximum must be finite and non-negative");
+    }
+    if maximum <= 1.0 {
+        return Ok(1.0);
+    }
+    let scale = 2.0f32.powi(maximum.log2().ceil() as i32);
+    if !scale.is_finite() {
+        anyhow::bail!("AHD input dynamic range exceeds finite normalization support");
+    }
+    Ok(scale)
 }
 
 struct AhdScratch {
@@ -746,7 +757,7 @@ fn combine_homogenous(
             }
 
             // Choose direction or average
-            if hm[0] != hm[1] {
+            if hm[0].abs_diff(hm[1]) > HOMOGENEITY_DECISION_MARGIN {
                 let best_d = if hm[1] > hm[0] { 1 } else { 0 };
                 for c in 0..3 {
                     let output_index = ((row - output_y0) * _width + col) * 3 + c;
