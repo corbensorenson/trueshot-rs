@@ -99,6 +99,11 @@ Implemented:
   variance and residual-coverage gates, immutable source SHA-256 evidence, and
   fail-closed profile publication. Synthetic photon-transfer recovery and an
   end-to-end nominal-95% posterior gate are passing.
+- Canonical adaptive shutter/ISO/focus candidate construction, explicit
+  per-candidate rejection/utility records, independent posterior quality-target
+  stopping, validated termination reasons, and streaming capture-manifest
+  provenance. The synthetic closed loop reaches equal declared variance targets
+  in 178 ms versus 1,027 ms for a fixed 21-shot grid.
 - Exposure-normalized per-bracket global translation, selective compact
   gradient-cell refinement, forward/backward disocclusion rejection, and
   measured-reference fallback.
@@ -133,7 +138,8 @@ Not yet qualified:
   lens-breathing calibration, measured halo-energy/MTF gates, and mixed-pixel
   trimaps. Native fusion exports unquantized metric depth and per-pixel
   visibility-correction provenance when complete verified geometry is valid.
-- Camera-loop integration and real efficiency qualification for the implemented
+- Live posterior extraction, calibrated lens-drive/readback, production server
+  camera-adapter integration, and real efficiency qualification for the
   deterministic uncertainty-driven exposure/focus planner.
 - Release-mode Apple Silicon timing, memory, thermal, and energy baselines.
 

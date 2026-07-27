@@ -4,6 +4,7 @@
 //! focus/HDR group per line. Readers retain only the current line and group,
 //! making memory independent of collection size.
 
+use crate::capture::AdaptiveCaptureProvenance;
 use crate::smart_loader::SequenceCropPlan;
 use crate::types::Sequence;
 use anyhow::{Context, Result};
@@ -34,6 +35,8 @@ pub struct CaptureGroup {
     #[serde(default)]
     pub frame_order: Vec<CaptureFrameOrder>,
     pub crop_plan: Option<SequenceCropPlan>,
+    #[serde(default)]
+    pub adaptive_capture: Option<AdaptiveCaptureProvenance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +57,7 @@ impl CaptureGroup {
             sequence,
             frame_order,
             crop_plan: None,
+            adaptive_capture: None,
         }
     }
 }
@@ -62,7 +66,7 @@ impl CaptureGroup {
 #[serde(tag = "record_type", rename_all = "snake_case")]
 enum ManifestRecord {
     Header(CaptureManifestHeader),
-    Group(CaptureGroup),
+    Group(Box<CaptureGroup>),
 }
 
 pub struct CaptureManifestReader {
@@ -165,12 +169,13 @@ impl CaptureManifestReader {
         }
 
         let parsed = (|| -> Result<CaptureGroup> {
-            let ManifestRecord::Group(mut group) =
+            let ManifestRecord::Group(group) =
                 serde_json::from_slice(trim_line_ending(&self.line_buffer))
                     .with_context(|| format!("Parse manifest line {}", self.line_number))?
             else {
                 anyhow::bail!("Unexpected header at manifest line {}", self.line_number);
             };
+            let mut group = *group;
             if group.frame_order.is_empty() {
                 group.frame_order = derive_frame_order(&group.sequence);
             }
@@ -386,7 +391,7 @@ impl CaptureManifestWriter {
             .writer
             .as_mut()
             .context("Capture manifest writer is already finished")?;
-        serde_json::to_writer(&mut *writer, &ManifestRecord::Group(group))?;
+        serde_json::to_writer(&mut *writer, &ManifestRecord::Group(Box::new(group)))?;
         writer.write_all(b"\n")?;
         self.written_groups += 1;
         Ok(())
@@ -502,6 +507,9 @@ fn validate_group(group: &CaptureGroup) -> Result<()> {
             anyhow::bail!("Capture group crop reference is outside the frame list");
         }
     }
+    if let Some(provenance) = &group.adaptive_capture {
+        provenance.validate(group.sequence.paths.len())?;
+    }
     Ok(())
 }
 
@@ -596,6 +604,13 @@ fn lexical_relative_path(from: &Path, to: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::{
+        plan_next_capture, AdaptiveCaptureProvenance, AdaptiveCaptureTermination,
+        AdaptivePlannerConfig, CaptureCandidate, CapturePosterior, FocusProbe, RadianceProbe,
+    };
+    use crate::sensor_noise::{
+        IsoNoiseModel, SensorNoiseModel, SensorNoiseProfile, SENSOR_NOISE_PROFILE_SCHEMA,
+    };
     use crate::types::{Meta, Rect};
 
     fn sequence(root: &Path, index: usize) -> Sequence {
@@ -622,6 +637,63 @@ mod tests {
         }
     }
 
+    fn adaptive_trace() -> AdaptiveCaptureProvenance {
+        let profile = SensorNoiseProfile {
+            schema: SENSOR_NOISE_PROFILE_SCHEMA.to_string(),
+            camera_make: "Nikon".to_string(),
+            camera_model: "Z9".to_string(),
+            bits_per_sample: 14,
+            calibration_id: "sha256:manifest-planner-test".to_string(),
+            iso_models: vec![IsoNoiseModel {
+                iso: 100,
+                model: SensorNoiseModel {
+                    read_noise_dn: [2.0; 4],
+                    electrons_per_dn: [0.8; 4],
+                    black_drift_dn: [0.25; 4],
+                    saturation_margin_dn: 16.0,
+                    calibrated: true,
+                },
+            }],
+        };
+        let candidate = CaptureCandidate {
+            shutter_seconds: 0.01,
+            iso: 100,
+            focus_diopters: 2.0,
+            readout_ms: 20.0,
+            settle_ms: 5.0,
+        };
+        let mut posterior = CapturePosterior {
+            radiance: vec![RadianceProbe {
+                mean: 0.2,
+                variance: 0.2,
+                weight: 1.0,
+                cfa_site: 1,
+            }],
+            focus: vec![FocusProbe {
+                mean_diopters: 2.0,
+                variance_diopters2: 0.2,
+                weight: 1.0,
+            }],
+            radiance_anchor_exposure: 0.01 / 64.0,
+            current_focus_diopters: 1.0,
+            motion_pixels_per_second: 0.0,
+            elapsed_ms: 0.0,
+            thermal_load: 0.0,
+        };
+        let config = AdaptivePlannerConfig::default();
+        let mut trace = AdaptiveCaptureProvenance::new(&profile).unwrap();
+        let decision = plan_next_capture(&posterior, &[candidate], &profile, config).unwrap();
+        trace.record(posterior.clone(), decision, Some(0)).unwrap();
+        posterior.radiance[0].variance = 0.0;
+        posterior.focus[0].variance_diopters2 = 0.0;
+        let decision = plan_next_capture(&posterior, &[candidate], &profile, config).unwrap();
+        trace.record(posterior, decision, None).unwrap();
+        trace
+            .finish(AdaptiveCaptureTermination::QualityTargetsReached)
+            .unwrap();
+        trace
+    }
+
     #[test]
     fn manifest_round_trip_streams_groups_and_crop_plan() {
         let directory = tempfile::tempdir().unwrap();
@@ -635,6 +707,7 @@ mod tests {
                     reference_index: 1,
                     rect: Some(Rect::new(10.0, 20.0, 100.0, 80.0)),
                 });
+                group.adaptive_capture = Some(adaptive_trace());
                 group
             })
             .collect();
@@ -649,6 +722,12 @@ mod tests {
             source.canonicalize().unwrap().join("group-0/f0e0.nef")
         );
         assert_eq!(first.crop_plan.unwrap().reference_index, 1);
+        let adaptive = first.adaptive_capture.unwrap();
+        assert_eq!(adaptive.iterations.len(), 2);
+        assert_eq!(
+            adaptive.termination,
+            Some(AdaptiveCaptureTermination::QualityTargetsReached)
+        );
         assert_eq!(reader.count(), 2);
     }
 

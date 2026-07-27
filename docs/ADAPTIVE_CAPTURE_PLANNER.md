@@ -30,8 +30,50 @@ Candidates are rejected before ranking when they exceed:
 
 Capture cost includes exposure, readout, settling, and lens travel. HDR and
 focus have independent stopping thresholds, so completion of one objective
-does not force redundant captures for the other. Ties are deterministic and
-prefer lower ISO, shorter shutter, then lower focus coordinate.
+does not force redundant captures for the other. Each objective also has an
+explicit maximum posterior-variance target, preventing low-value overcapture
+after the requested quality has already been reached. Ties are deterministic
+and prefer lower ISO, shorter shutter, then lower focus coordinate.
+
+## Camera Candidate Contract
+
+`build_camera_candidates` converts camera-declared shutter and ISO strings plus
+verified focus diopters into a bounded canonical grid. It accepts numeric
+seconds and fractions such as `0.5s` and `1/125`, accepts `100` and `ISO 100`,
+deduplicates exact values, and reports rejected options such as `Auto`, `Bulb`,
+or malformed strings. It never guesses a numeric setting.
+
+The grid is limited to 100,000 entries and every candidate is validated before
+planning. Duplicate candidate records are rejected.
+
+## Decision And Manifest Provenance
+
+Every decision contains a canonically ordered evaluation for every supplied
+candidate:
+
+- eligible candidates retain HDR information, focus information, full capture
+  cost, and utility per millisecond;
+- rejected candidates retain the exact reason: missing exact-ISO calibration,
+  time budget, thermal budget, or motion blur;
+- aggregate counters are validated against the detailed evaluations;
+- the selected action must exactly match an eligible evaluation.
+
+The compact `trueshot.adaptive-capture.v1` trace records each posterior,
+decision, and retained frame index. A completed capture group must declare a
+validated termination reason: quality targets reached, marginal information
+exhausted, resource budget exhausted, operator stop, or hardware failure.
+Duplicate/out-of-range frame attribution and false termination claims fail
+manifest validation. The trace is optional for legacy groups and remains
+bounded by the streaming manifest record limit.
+
+## Synthetic Closed-Loop Gate
+
+The deterministic hardware-loop simulation compares adaptive selection against
+a conventional fixed grid of three HDR exposures at seven focus positions.
+Both paths must reach radiance and focus variance targets of 0.005. The current
+baseline reaches them in 178 ms of modeled exposure/readout/settle/lens travel
+versus 1,027 ms for the fixed 21-shot grid, an 82.7% reduction. This is a
+synthetic regression gate, not a real-camera performance claim.
 
 ## Archival Policy
 
@@ -43,11 +85,10 @@ archival output.
 
 - Build compact radiance/focus posterior probes from preview and completed RAW
   captures.
-- Parse camera-supported shutter and ISO choices into exact numeric
-  candidates and map selected diopters to calibrated lens drive commands.
+- Map selected diopters to calibrated lens-drive commands and verify achieved
+  focus from captured RAW metadata; unsupported lenses must fail closed.
 - Feed measured motion, readout/settle latency, thermals, and lens travel time
   back into the posterior after each capture.
-- Persist every candidate set, rejection reason, utility, selected action, and
-  independent stopping decision in the capture manifest.
+- Wire the planner/trace contract into the production server camera adapter.
 - Validate at least 20% capture-time reduction at equal quality, or higher
   quality at equal time, on the preregistered real stack corpus.
