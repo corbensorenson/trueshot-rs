@@ -22,7 +22,7 @@ jobs:
           - os: ubuntu-latest
             install_deps: |
               sudo apt-get update
-              sudo apt-get install -y libudev-dev libssl-dev pkg-config libasound2-dev cmake
+              sudo apt-get install -y libudev-dev libdbus-1-dev libssl-dev pkg-config libasound2-dev cmake
           - os: macos-latest
             install_deps: |
               brew install cmake openssl pkg-config
@@ -123,7 +123,7 @@ jobs:
     - name: Install System Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libudev-dev libssl-dev pkg-config libasound2-dev cmake
+        sudo apt-get install -y libudev-dev libdbus-1-dev libssl-dev pkg-config libasound2-dev cmake
 
     - name: Test Redis cache, reconnect, relay, and offline behavior
       run: |
@@ -283,7 +283,7 @@ jobs:
     - name: Install System Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libudev-dev libssl-dev pkg-config libasound2-dev cmake
+        sudo apt-get install -y libudev-dev libdbus-1-dev libssl-dev pkg-config libasound2-dev cmake
     
     - name: Check Benchmark Targets
       run: cargo check -p trueshot-benches --all-targets

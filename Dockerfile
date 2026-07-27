@@ -4,13 +4,15 @@
 # ============================================================================
 # Stage 1: Rust builder
 # ============================================================================
-FROM rust:1.75-bookworm AS rust-builder
+FROM rust:1.90-bookworm AS rust-builder
 
 WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     libudev-dev \
+    libdbus-1-dev \
+    libasound2-dev \
     libssl-dev \
     pkg-config \
     cmake \
@@ -46,7 +48,7 @@ RUN cargo build --release -p trueshot-server
 # ============================================================================
 # Stage 2: Node.js frontend builder
 # ============================================================================
-FROM node:20-bookworm AS frontend-builder
+FROM node:24-bookworm AS frontend-builder
 
 WORKDIR /app/trueshot-dashboard
 
@@ -66,6 +68,8 @@ WORKDIR /app
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    libasound2 \
+    libdbus-1-3 \
     libssl3 \
     curl \
     && rm -rf /var/lib/apt/lists/*
