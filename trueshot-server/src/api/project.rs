@@ -1,7 +1,7 @@
 use crate::at_rest::{
     clear_project_encrypted, decrypt_file_in_place, decrypt_file_to_bytes, decrypt_project_scopes,
     encrypt_file_in_place, encrypt_project_scopes, mark_project_encrypted, policy_for_project,
-    require_master_key, ProjectKeyStore,
+    require_master_key, write_encrypted_bytes_atomic, ProjectKeyStore,
 };
 use crate::audit::AuditEvent;
 use crate::auth::require_admin;
@@ -13,13 +13,18 @@ use crate::licensing::require_license_feature;
 use crate::state::AppState;
 use actix_files::NamedFile;
 use actix_web::{delete, get, post, put, web, HttpMessage, HttpRequest, HttpResponse, Responder};
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use trueshot_core::fusion_edit::{
+    FusionEditDocument, FusionEditOperation, FUSION_EDIT_SCHEMA, MAX_FUSION_EDIT_BYTES,
+};
 use trueshot_core::licensing::Feature;
 use utoipa::ToSchema;
 use walkdir::WalkDir;
@@ -58,6 +63,7 @@ pub struct FusionReportInventory {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FusionReportSummary {
     pub report_path: String,
+    pub report_sha256: String,
     pub label: String,
     pub modified_at: Option<String>,
     pub schema: String,
@@ -75,6 +81,12 @@ pub struct FusionReportSummary {
     pub calibration: FusionCalibrationSummary,
     pub demosaic: FusionDemosaicSummary,
     pub performance: FusionPerformanceSummary,
+    pub capture_group_id: Option<String>,
+    pub revision_group_id: Option<String>,
+    pub frame_count: Option<u16>,
+    pub crop_origin_x: Option<u32>,
+    pub crop_origin_y: Option<u32>,
+    pub editable_base: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -129,6 +141,12 @@ pub struct FusionPerformanceSummary {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct FusionReportQuery {
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateFusionEditRequest {
+    pub report_path: String,
+    pub operations: Vec<FusionEditOperation>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Default)]
@@ -434,7 +452,6 @@ pub async fn open_project_fs(
 
 use actix_multipart::Multipart;
 use futures::{StreamExt, TryStreamExt};
-use sha2::{Digest, Sha256};
 
 #[utoipa::path(
     post,
@@ -930,7 +947,14 @@ pub async fn list_fusion_reports(
                 continue;
             }
         };
-        match parse_fusion_report_summary(&value, &logical_path, modified_at, &output_root) {
+        let report_sha256 = hex::encode(Sha256::digest(&bytes));
+        match parse_fusion_report_summary(
+            &value,
+            &logical_path,
+            &report_sha256,
+            modified_at,
+            &output_root,
+        ) {
             Ok(report) => reports.push(report),
             Err(_) => rejected_reports = rejected_reports.saturating_add(1),
         }
@@ -1029,6 +1053,236 @@ pub async fn download_fusion_artifact(
         .insert_header(("Cache-Control", "private, no-store"))
         .insert_header(("X-Content-Type-Options", "nosniff"))
         .body(bytes)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/projects/{id}/fusion-edits",
+    tag = "project",
+    params(("id" = String, Path, description = "Project id")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Immutable measured-source edit document", body = serde_json::Value),
+        (status = 400, description = "Invalid or unsafe edit"),
+        (status = 401, description = "Unauthorized"),
+        (status = 402, description = "Advanced Capture add-on required"),
+        (status = 404, description = "Base report not found"),
+        (status = 409, description = "Base report lacks revision binding")
+    )
+)]
+#[post("/api/projects/{id}/fusion-edits")]
+pub async fn create_fusion_edit(
+    req: HttpRequest,
+    path: web::Path<String>,
+    json: web::Json<CreateFusionEditRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    if let Err(resp) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "fusion_inspector",
+    ) {
+        return resp;
+    }
+
+    let id = path.into_inner();
+    if !json.report_path.ends_with("_fusion_report.json") {
+        return HttpResponse::BadRequest().body("Invalid fusion report path");
+    }
+    let output_root = match resolve_project_child(&state.config.paths.projects_dir, &id, "output") {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+    let report_path = match resolve_project_child_file(
+        &state.config.paths.projects_dir,
+        &id,
+        "output",
+        &json.report_path,
+    ) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+    let report_bytes =
+        match read_project_file_bytes_bounded(&state, &id, &report_path, MAX_FUSION_REPORT_BYTES)
+            .await
+        {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return HttpResponse::NotFound().body("Base fusion report not found"),
+            Err(resp) => return resp,
+        };
+    let report_value: serde_json::Value = match serde_json::from_slice(&report_bytes) {
+        Ok(value) => value,
+        Err(_) => return HttpResponse::BadRequest().body("Base fusion report is malformed"),
+    };
+    let report_sha256 = hex::encode(Sha256::digest(&report_bytes));
+    let report_summary = match parse_fusion_report_summary(
+        &report_value,
+        &json.report_path,
+        &report_sha256,
+        None,
+        &output_root,
+    ) {
+        Ok(summary) => summary,
+        Err(_) => {
+            return HttpResponse::BadRequest().body("Base fusion report is not archival-safe")
+        }
+    };
+    if report_value.get("fusion_edit").is_some() {
+        return HttpResponse::Conflict()
+            .body("Edit chaining is disabled; create revisions from the immutable base report");
+    }
+    if !report_summary.editable_base {
+        return HttpResponse::Conflict().body("Selected report is not an immutable base revision");
+    }
+
+    let Some((capture_group_id, width, height, crop_origin_x, crop_origin_y, frame_count)) =
+        fusion_edit_binding_from_report(&report_value)
+    else {
+        return HttpResponse::Conflict().body(
+            "Base report predates revision binding; rerun native fusion before creating edits",
+        );
+    };
+    let document = FusionEditDocument {
+        schema: FUSION_EDIT_SCHEMA.to_string(),
+        capture_group_id,
+        base_report_sha256: report_sha256,
+        width,
+        height,
+        crop_origin_x,
+        crop_origin_y,
+        frame_count,
+        operations: json.operations.clone(),
+    };
+    if let Err(error) = document.validate() {
+        return HttpResponse::BadRequest().body(error.to_string());
+    }
+    let digest = match document.digest() {
+        Ok(digest) => digest,
+        Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
+    };
+    let payload = match serde_json::to_vec_pretty(&document) {
+        Ok(payload) if payload.len() as u64 <= MAX_FUSION_EDIT_BYTES => payload,
+        Ok(_) => return HttpResponse::PayloadTooLarge().body("Fusion edit document is too large"),
+        Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
+    };
+
+    let edit_directory =
+        match ensure_bounded_subdirectory(&output_root, &[".trueshot", "fusion_edits"]) {
+            Ok(path) => path,
+            Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
+        };
+    let edit_filename = format!("{}_{}.json", document.capture_group_id, digest);
+    let logical_path = edit_directory.join(&edit_filename);
+    if !logical_path.starts_with(&edit_directory) {
+        return HttpResponse::BadRequest().body("Invalid fusion edit path");
+    };
+    let relative_path = match logical_path.strip_prefix(&output_root) {
+        Ok(path) => path.to_string_lossy().replace('\\', "/"),
+        Err(_) => return HttpResponse::BadRequest().body("Invalid fusion edit path"),
+    };
+    let encrypt_output =
+        policy_for_project(&state.config.paths.projects_dir, &id, &state.config.privacy)
+            .is_some_and(|policy| policy.scopes.iter().any(|scope| scope == "output"));
+    let existing = match read_project_file_bytes_bounded(
+        &state,
+        &id,
+        &logical_path,
+        MAX_FUSION_EDIT_BYTES as usize,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    if let Some(existing) = existing {
+        if existing != payload {
+            return HttpResponse::Conflict().body("Fusion edit digest collision");
+        }
+    } else {
+        let write_payload = payload.clone();
+        let write_result = if encrypt_output {
+            let key_store = match project_key_store(&state) {
+                Ok(store) => store,
+                Err(resp) => return resp,
+            };
+            let key = match key_store.load_or_create(&id) {
+                Ok(key) => key,
+                Err(error) => {
+                    return HttpResponse::InternalServerError().body(error.to_string());
+                }
+            };
+            let encrypted_path = PathBuf::from(format!("{}.enc", logical_path.display()));
+            tokio::task::spawn_blocking(move || {
+                write_encrypted_bytes_atomic(&encrypted_path, &key, &write_payload)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.map_err(|error| error.to_string()))
+        } else {
+            let clear_path = logical_path.clone();
+            tokio::task::spawn_blocking(move || {
+                write_bytes_atomic_no_replace(&clear_path, &write_payload)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.map_err(|error| error.to_string()))
+        };
+        if let Err(error) = write_result {
+            match read_project_file_bytes_bounded(
+                &state,
+                &id,
+                &logical_path,
+                MAX_FUSION_EDIT_BYTES as usize,
+            )
+            .await
+            {
+                Ok(Some(existing)) if existing == payload => {}
+                Ok(Some(_)) => {
+                    return HttpResponse::Conflict().body("Fusion edit digest collision")
+                }
+                _ => return HttpResponse::InternalServerError().body(error),
+            }
+        }
+    }
+
+    log_audit(
+        &req,
+        &state,
+        AuditEvent::new(
+            audit_actor(&req).0,
+            audit_actor(&req).1,
+            "project.fusion_edit.create",
+            id,
+            "success",
+            audit_actor(&req).2,
+            serde_json::json!({
+                "report_path": json.report_path,
+                "edit_path": relative_path,
+                "digest": digest,
+                "operations": document.operations.len(),
+                "edited_pixels": document.edited_pixel_count(),
+                "encrypted": encrypt_output
+            }),
+        ),
+    );
+    let cli_argument =
+        (!encrypt_output).then(|| format!("--fusion-edits {}", logical_path.display()));
+    HttpResponse::Ok().json(serde_json::json!({
+        "schema": document.schema,
+        "capture_group_id": document.capture_group_id,
+        "base_report_sha256": document.base_report_sha256,
+        "digest": digest,
+        "path": relative_path,
+        "operations": document.operations.len(),
+        "edited_pixels": document.edited_pixel_count(),
+        "encrypted": encrypt_output,
+        "download_filename": edit_filename,
+        "cli_argument": cli_argument,
+        "document": document
+    }))
 }
 
 #[utoipa::path(
@@ -1557,6 +1811,7 @@ pub async fn decrypt_project(
 fn parse_fusion_report_summary(
     value: &serde_json::Value,
     logical_path: &str,
+    report_sha256: &str,
     modified_at: Option<String>,
     output_root: &Path,
 ) -> Result<FusionReportSummary, &'static str> {
@@ -1636,6 +1891,37 @@ fn parse_fusion_report_summary(
             },
         );
     }
+    if let Some(edit_filename) = object
+        .get("fusion_edit")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|edit| bounded_string(edit.get("map"), 255))
+    {
+        if !is_portable_png_filename(&edit_filename) {
+            return Err("Fusion edit artifact must be a portable PNG filename");
+        }
+        let relative = report_directory.join(edit_filename);
+        let absolute = output_root.join(&relative);
+        let encrypted = PathBuf::from(format!("{}.enc", absolute.display()));
+        let present_path = safe_existing_file(output_root, &absolute)
+            .or_else(|| safe_existing_file(output_root, &encrypted));
+        let present = present_path.is_some();
+        let bytes = present_path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len());
+        let portable_path = relative.to_string_lossy().replace('\\', "/");
+        if !present {
+            warnings.push(format!("Missing edit artifact: {portable_path}"));
+        }
+        artifacts.insert(
+            "edit".to_string(),
+            FusionArtifactRef {
+                path: portable_path,
+                present,
+                bytes,
+            },
+        );
+    }
     let integrity_complete = artifacts.values().all(|artifact| artifact.present);
 
     let noise_model_calibrated = bool_field(object, "noise_model_calibrated");
@@ -1699,9 +1985,36 @@ fn parse_fusion_report_summary(
         .and_then(|name| name.strip_suffix("_fusion_report.json"))
         .unwrap_or("Fusion result")
         .to_string();
+    let capture_group_id = bounded_string(object.get("capture_group_id"), 64)
+        .filter(|value| valid_lower_sha256(value));
+    let revision_group_id = bounded_string(object.get("revision_group_id"), 64)
+        .filter(|value| valid_lower_sha256(value));
+    let frame_count = object
+        .get("frame_count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value > 0);
+    let crop_origin = object
+        .get("crop_origin")
+        .and_then(serde_json::Value::as_object);
+    let crop_origin_x = crop_origin
+        .and_then(|origin| origin.get("x"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let crop_origin_y = crop_origin
+        .and_then(|origin| origin.get("y"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let editable_base = capture_group_id.is_some()
+        && capture_group_id == revision_group_id
+        && frame_count.is_some()
+        && crop_origin_x.is_some()
+        && crop_origin_y.is_some()
+        && object.get("fusion_edit").is_none();
 
     Ok(FusionReportSummary {
         report_path: logical_path.to_string(),
+        report_sha256: report_sha256.to_string(),
         label,
         modified_at,
         schema,
@@ -1739,7 +2052,47 @@ fn parse_fusion_report_summary(
             generative_reconstruction,
         },
         performance,
+        capture_group_id,
+        revision_group_id,
+        frame_count,
+        crop_origin_x,
+        crop_origin_y,
+        editable_base,
     })
+}
+
+fn fusion_edit_binding_from_report(
+    value: &serde_json::Value,
+) -> Option<(String, u32, u32, u32, u32, u16)> {
+    let object = value.as_object()?;
+    let capture_group_id = object.get("capture_group_id")?.as_str()?.to_string();
+    if !valid_lower_sha256(&capture_group_id) {
+        return None;
+    }
+    let width = bounded_dimension(object.get("width"))?;
+    let height = bounded_dimension(object.get("height"))?;
+    let frame_count = u16::try_from(object.get("frame_count")?.as_u64()?).ok()?;
+    if frame_count == 0 {
+        return None;
+    }
+    let crop = object.get("crop_origin")?.as_object()?;
+    let crop_origin_x = u32::try_from(crop.get("x")?.as_u64()?).ok()?;
+    let crop_origin_y = u32::try_from(crop.get("y")?.as_u64()?).ok()?;
+    Some((
+        capture_group_id,
+        width,
+        height,
+        crop_origin_x,
+        crop_origin_y,
+        frame_count,
+    ))
+}
+
+fn valid_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn bounded_string(value: Option<&serde_json::Value>, max_len: usize) -> Option<String> {
@@ -1829,9 +2182,11 @@ fn is_allowed_fusion_artifact(path: &str) -> bool {
         "_fusion_flags.png",
         "_frequency_flags.png",
         "_sensor_correction_map.png",
+        "_sensor_correction.png",
         "_glare_map.png",
         "_boundary_trimap.png",
         "_fusion_overlay.png",
+        "_fusion_edit_map.png",
     ]
     .iter()
     .any(|suffix| lower.ends_with(suffix))
@@ -1990,6 +2345,72 @@ fn safe_existing_file(allowed_root: &Path, candidate: &Path) -> Option<PathBuf> 
     (candidate.starts_with(root) && candidate.is_file()).then_some(candidate)
 }
 
+fn write_bytes_atomic_no_replace(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().context("Target has no parent directory")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Target filename is not UTF-8")?;
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.part",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let result = (|| -> anyhow::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::hard_link(&temporary, path)?;
+        std::fs::remove_file(&temporary)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn ensure_bounded_subdirectory(root: &Path, components: &[&str]) -> anyhow::Result<PathBuf> {
+    let canonical_root = root
+        .canonicalize()
+        .with_context(|| format!("Resolve bounded directory root {}", root.display()))?;
+    let mut current = canonical_root.clone();
+    for component in components {
+        if component.is_empty()
+            || component.contains(['/', '\\'])
+            || matches!(*component, "." | "..")
+        {
+            anyhow::bail!("Invalid bounded directory component");
+        }
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                anyhow::bail!("Bounded directory component is not a real directory")
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)
+                    .with_context(|| format!("Create bounded directory {}", current.display()))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let canonical = current
+            .canonicalize()
+            .with_context(|| format!("Resolve bounded directory {}", current.display()))?;
+        if !canonical.starts_with(&canonical_root) {
+            anyhow::bail!("Bounded directory escaped project output");
+        }
+        current = canonical;
+    }
+    Ok(current)
+}
+
 fn vector_norm(values: [f64; 3]) -> f64 {
     (values[0] * values[0] + values[1] * values[1] + values[2] * values[2]).sqrt()
 }
@@ -2080,8 +2501,12 @@ mod tests {
     fn valid_fusion_report() -> serde_json::Value {
         serde_json::json!({
             "schema": "trueshot.fusion.provenance.v2",
+            "capture_group_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "revision_group_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "width": 64,
             "height": 48,
+            "frame_count": 6,
+            "crop_origin": {"x": 12, "y": 20},
             "source_map": "capture_source_map.png",
             "detail_source_map": "capture_detail_source_map.png",
             "fusion_flags": "capture_fusion_flags.png",
@@ -2140,12 +2565,14 @@ mod tests {
         let summary = parse_fusion_report_summary(
             &valid_fusion_report(),
             "capture_fusion_report.json",
+            &"e".repeat(64),
             Some("2026-07-27T00:00:00Z".to_string()),
             directory.path(),
         )
         .unwrap();
 
         assert_eq!(summary.schema, "trueshot.fusion.provenance.v2");
+        assert_eq!(summary.report_sha256, "e".repeat(64));
         assert_eq!(summary.width, 64);
         assert_eq!(summary.height, 48);
         assert!(summary.integrity_complete);
@@ -2157,6 +2584,7 @@ mod tests {
         );
         assert_eq!(summary.performance.fusion_seconds, Some(1.2));
         assert!(!summary.demosaic.generative_reconstruction);
+        assert!(summary.editable_base);
     }
 
     #[test]
@@ -2168,6 +2596,7 @@ mod tests {
         let result = parse_fusion_report_summary(
             &report,
             "capture_fusion_report.json",
+            &"e".repeat(64),
             None,
             directory.path(),
         );
@@ -2184,6 +2613,7 @@ mod tests {
         let result = parse_fusion_report_summary(
             &report,
             "capture_fusion_report.json",
+            &"e".repeat(64),
             None,
             directory.path(),
         );
@@ -2197,8 +2627,96 @@ mod tests {
             "nested/capture_fusion_overlay.png"
         ));
         assert!(is_allowed_fusion_artifact("capture_source_map.png"));
+        assert!(is_allowed_fusion_artifact(
+            "capture_edit_deadbeef_fusion_edit_map.png"
+        ));
+        assert!(is_allowed_fusion_artifact("capture_sensor_correction.png"));
         assert!(!is_allowed_fusion_artifact("capture_fusion_report.json"));
         assert!(!is_allowed_fusion_artifact("capture.tiff"));
+    }
+
+    #[test]
+    fn fusion_report_parser_exposes_immutable_revision_map() {
+        let directory = tempfile::tempdir().unwrap();
+        write_fusion_artifacts(directory.path());
+        std::fs::write(directory.path().join("capture_fusion_edit_map.png"), b"png").unwrap();
+        let mut report = valid_fusion_report();
+        report["revision_group_id"] = serde_json::json!("b".repeat(64));
+        report["fusion_edit"] = serde_json::json!({
+            "schema": "trueshot.fusion.edits.v1",
+            "digest": "c".repeat(64),
+            "base_report_sha256": "d".repeat(64),
+            "map": "capture_fusion_edit_map.png",
+            "operations": 1,
+            "edited_pixels": 12
+        });
+
+        let summary = parse_fusion_report_summary(
+            &report,
+            "capture_edit_fusion_report.json",
+            &"e".repeat(64),
+            None,
+            directory.path(),
+        )
+        .unwrap();
+
+        assert!(!summary.editable_base);
+        assert_eq!(summary.capture_group_id, Some("a".repeat(64)));
+        assert_eq!(summary.revision_group_id, Some("b".repeat(64)));
+        assert_eq!(
+            summary.artifacts["edit"].path,
+            "capture_fusion_edit_map.png"
+        );
+        assert!(summary.artifacts["edit"].present);
+        assert!(summary.integrity_complete);
+    }
+
+    #[test]
+    fn fusion_edit_binding_requires_complete_modern_identity() {
+        let report = valid_fusion_report();
+        assert_eq!(
+            fusion_edit_binding_from_report(&report),
+            Some(("a".repeat(64), 64, 48, 12, 20, 6))
+        );
+
+        let mut malformed = report;
+        malformed["capture_group_id"] = serde_json::json!("A".repeat(64));
+        assert!(fusion_edit_binding_from_report(&malformed).is_none());
+    }
+
+    #[test]
+    fn fusion_report_parser_rejects_revision_identity_as_editable_base() {
+        let directory = tempfile::tempdir().unwrap();
+        write_fusion_artifacts(directory.path());
+        let mut report = valid_fusion_report();
+        report["revision_group_id"] = serde_json::json!("b".repeat(64));
+
+        let summary = parse_fusion_report_summary(
+            &report,
+            "capture_fusion_report.json",
+            &"e".repeat(64),
+            None,
+            directory.path(),
+        )
+        .unwrap();
+
+        assert!(!summary.editable_base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_edit_directory_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join(".trueshot")).unwrap();
+
+        let error =
+            ensure_bounded_subdirectory(root.path(), &[".trueshot", "fusion_edits"]).unwrap_err();
+
+        assert!(error.to_string().contains("not a real directory"));
+        assert!(!outside.path().join("fusion_edits").exists());
     }
 
     #[cfg(unix)]
@@ -2221,6 +2739,7 @@ mod tests {
         let summary = parse_fusion_report_summary(
             &valid_fusion_report(),
             "capture_fusion_report.json",
+            &"e".repeat(64),
             None,
             directory.path(),
         )

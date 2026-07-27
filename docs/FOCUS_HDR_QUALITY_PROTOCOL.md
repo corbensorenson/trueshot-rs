@@ -113,6 +113,23 @@ Implemented:
   source/deghost/frequency/glare/aperture-boundary/sensor-correction evidence,
   exposes calibration and fallback status, and downloads exact archival maps.
   Encrypted report and PNG reads are bounded and decrypted only in memory.
+- The Inspector authors bounded, non-overlapping measured-source operations
+  against the exact base-report SHA-256, capture-group identity, crop, frame
+  count, and dimensions. The server publishes an immutable
+  `trueshot.fusion.edits.v1` document without overwrite and encrypts it directly
+  when the project output scope is encrypted.
+- Native refusion applies each operation from the selected aligned RAW frame,
+  rejects clipped or disoccluded samples atomically, preserves the base output,
+  and emits a separately named deterministic revision, an exact operator map,
+  and edit provenance in the schema-v2 report. It does not paint, interpolate,
+  or generate missing measurements.
+- A private 21-frame Z9 integration run created a one-pixel measured-source
+  revision from the current dominant uncensored/non-disoccluded frame. The base
+  report remained byte-identical, the revision identity and output family were
+  distinct, and the exact operator map contained `255` at the selected pixel
+  and `0` at its neighbor. This proves real-NEF binding/publication behavior,
+  not correction quality or calibrated uncertainty. Redacted evidence is in
+  `docs/benchmarks/measured_fusion_revision_qualification_2026-07-27.json`.
 - Confidence- and edge-aware depth regularization with dominant-plane refusion.
 - Synthetic focus, radiance invariance, deghost, tile-boundary, and fail-closed
   gates.
@@ -144,9 +161,10 @@ Not yet qualified:
 - Direct Helicon/Lightroom corpus results.
 - Z9 camera-to-standard color matrix, ICC/DNG profile tagging, and DeltaE 2000
   release gate.
-- Interactive source/glare/trimap edit documents and deterministic
-  measured-source refusion in the dashboard. Read-only inspection is
-  implemented.
+- One-click server-side execution of saved edit documents and physically
+  constrained manual glare/trimap controls. Measured-source authoring and
+  deterministic CLI refusion are implemented; unrestricted masks remain
+  intentionally unsupported because they could weaken archival constraints.
 - Hair/thin-structure halo gates and multi-method automatic focus strategy.
 - Retained real per-ISO Z9 dark/flat calibration and real-sensor posterior
   uncertainty coverage. The capture/fit CLI, independent holdout gates,

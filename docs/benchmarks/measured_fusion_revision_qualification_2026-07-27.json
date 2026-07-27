@@ -1,0 +1,61 @@
+{
+  "schema": "trueshot.benchmark.measured-fusion-revision.v1",
+  "date": "2026-07-27",
+  "platform": {
+    "os": "macOS 15.0",
+    "architecture": "arm64",
+    "build_profile": "unoptimized development",
+    "license_mode": "explicit local development bypass"
+  },
+  "fixture": {
+    "distribution": "private",
+    "camera": "Nikon Z 9",
+    "frames": 21,
+    "input_bytes": 994391434,
+    "roi": {
+      "x": 2890,
+      "y": 3088,
+      "width": 1310,
+      "height": 1304
+    },
+    "sensor_profile": "uncalibrated"
+  },
+  "base": {
+    "capture_group_id": "ca2712c57fcf0037edff8ec8f5c0c622f429b6cf9b3dfa13a462352191ac7cdf",
+    "revision_group_id": "ca2712c57fcf0037edff8ec8f5c0c622f429b6cf9b3dfa13a462352191ac7cdf",
+    "report_sha256": "4d04894dd401814ef37d6925795f06ae5bde92c84eb073e18bd48e3b3aeab9b1",
+    "tiff_sha256": "caa4fca07b95e93823fc5099f08349e0bc08918f51d4f12ce45b24efd03b4ec8"
+  },
+  "edit": {
+    "schema": "trueshot.fusion.edits.v1",
+    "digest": "4f8acc06c531a0197630b985a19e749e97a5dad2d7fb4354d4e59e7fb5ef3fe6",
+    "source_frame": 6,
+    "rect": {
+      "x": 982,
+      "y": 326,
+      "width": 1,
+      "height": 1
+    },
+    "source_selection": "existing dominant source with no censor/disocclusion flag"
+  },
+  "result": {
+    "status": "pass",
+    "revision_group_id": "d638b24d081c4d18a3cac58e28f98321ba2cac1f215340031adb0033951548fb",
+    "base_report_unchanged": true,
+    "distinct_revision_identity": true,
+    "edited_pixels": 1,
+    "operator_map_selected_value": 255,
+    "operator_map_neighbor_value": 0,
+    "operator_map_sha256": "81c7348ed54dcdee8ba26018bb8bdfdba208a010ba74545860af6f03479033b7",
+    "revision_report_sha256": "74f7214c011e0d1ce335dfcc6811ee35e4a5605493737768b82e1b260cec1342",
+    "revision_tiff_sha256": "21955a9e889e963e791d0021326d845c56508ec9371f04a189c8a21c5b793d7c",
+    "archival_policy": "measured_sources_only_no_generative_reconstruction",
+    "edit_policy": "aligned_uncensored_measured_frame_only_atomic_fail_closed"
+  },
+  "limitations": [
+    "This is a private-fixture integration and provenance result, not a redistributable CI gate.",
+    "The source selected an already dominant frame and does not measure subjective correction quality.",
+    "The fixture has no exact sensor-noise profile, so this does not qualify posterior uncertainty.",
+    "Development-profile timings are intentionally excluded from performance claims."
+  ]
+}

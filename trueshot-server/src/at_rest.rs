@@ -541,6 +541,75 @@ pub fn decrypt_file_to_bytes(
     Ok(output)
 }
 
+/// Atomically publish encrypted bytes without ever writing a plaintext sibling.
+/// A same-directory hard link provides create-if-absent publication, so a
+/// concurrent writer cannot replace an immutable target.
+pub fn write_encrypted_bytes_atomic(path: &Path, key: &[u8; 32], bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("Encrypted target has no parent directory")?;
+    let parent_metadata = std::fs::symlink_metadata(parent)
+        .with_context(|| format!("Inspect encrypted target directory {}", parent.display()))?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        anyhow::bail!("Encrypted target parent is not a real directory");
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Encrypted target filename is not UTF-8")?;
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.part",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let result = (|| -> Result<()> {
+        let mut nonce_prefix = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut nonce_prefix);
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+        let mut out = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .with_context(|| format!("Create encrypted temporary {}", temporary.display()))?;
+        out.write_all(MAGIC)?;
+        out.write_all(&[VERSION])?;
+        out.write_all(&(DEFAULT_CHUNK_SIZE as u32).to_le_bytes())?;
+        out.write_all(&nonce_prefix)?;
+        for (chunk_index, chunk) in bytes.chunks(DEFAULT_CHUNK_SIZE).enumerate() {
+            let chunk_index =
+                u32::try_from(chunk_index).context("Encrypted payload contains too many chunks")?;
+            let nonce = build_nonce(&nonce_prefix, chunk_index);
+            let ciphertext = cipher
+                .encrypt(Nonce::from_slice(&nonce), chunk)
+                .context("Encrypt in-memory project artifact")?;
+            out.write_all(&(ciphertext.len() as u32).to_le_bytes())?;
+            out.write_all(&ciphertext)?;
+        }
+        out.sync_all()?;
+        std::fs::hard_link(&temporary, path)
+            .with_context(|| format!("Publish encrypted artifact {}", path.display()))?;
+        std::fs::remove_file(&temporary)
+            .with_context(|| format!("Remove encrypted temporary {}", temporary.display()))?;
+        sync_parent_directory(path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    File::open(path.parent().unwrap_or_else(|| Path::new(".")))?
+        .sync_all()
+        .context("Sync encrypted artifact directory")
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn encrypt_tree(
     root: &Path,
     key: &[u8; 32],
@@ -778,5 +847,49 @@ mod tests {
         let error = decrypt_file_to_bytes(&encrypted_path, &key, 31).unwrap_err();
 
         assert!(error.to_string().contains("exceeds 31 byte read limit"));
+    }
+
+    #[test]
+    fn encrypted_atomic_write_never_materializes_plaintext() {
+        let directory = tempfile::tempdir().unwrap();
+        let encrypted_path = directory.path().join("revision.json.enc");
+        let plaintext_path = directory.path().join("revision.json");
+        let payload = br#"{"schema":"trueshot.fusion.edits.v1"}"#;
+        let key = [0x71u8; 32];
+
+        write_encrypted_bytes_atomic(&encrypted_path, &key, payload).unwrap();
+
+        assert!(!plaintext_path.exists());
+        assert_eq!(
+            decrypt_file_to_bytes(&encrypted_path, &key, payload.len()).unwrap(),
+            payload
+        );
+        assert!(write_encrypted_bytes_atomic(&encrypted_path, &key, payload).is_err());
+    }
+
+    #[test]
+    fn concurrent_encrypted_publication_never_replaces_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let encrypted_path = directory.path().join("revision.json.enc");
+        let key = [0x42u8; 32];
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for payload in [b"first".as_slice(), b"second".as_slice()] {
+            let path = encrypted_path.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                write_encrypted_bytes_atomic(&path, &key, payload)
+            }));
+        }
+        barrier.wait();
+        let successes = workers
+            .into_iter()
+            .map(|worker| usize::from(worker.join().unwrap().is_ok()))
+            .sum::<usize>();
+        let decoded = decrypt_file_to_bytes(&encrypted_path, &key, 16).unwrap();
+
+        assert_eq!(successes, 1);
+        assert!(decoded == b"first" || decoded == b"second");
     }
 }

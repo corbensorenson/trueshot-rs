@@ -34,6 +34,7 @@ use trueshot_core::export::{
     save_png_preview_with_digest, save_tiff16_from_f32_with_digest, save_u16_map_png_with_digest,
     save_u8_map_png_with_digest, PlyExportOptions,
 };
+use trueshot_core::fusion_edit::FusionEditDocument;
 use trueshot_core::gaussian_splatting::{Camera as GsCamera, GaussianSplatTrainer, TrainingConfig};
 use trueshot_core::gpu::{get_gpu_context, GpuAhdEngine};
 use trueshot_core::intrinsics::{
@@ -46,12 +47,12 @@ use trueshot_core::lens_psf::{
 use trueshot_core::lens_psf_extract::{extract_lens_psf_measurements, LensPsfExtractionPlan};
 use trueshot_core::licensing::{Feature, LicenseError, LicenseManager};
 use trueshot_core::native_fusion::{
-    fuse_native_group, fusion_provenance_preview_with_frequency, NativeFusionConfig,
+    fuse_native_group_with_id, fusion_provenance_preview_with_frequency, NativeFusionConfig,
     NativeFusionResult, FREQUENCY_FLAG_DETAIL_REFERENCE, FREQUENCY_FLAG_DETAIL_SINGLE_SOURCE,
     FREQUENCY_FLAG_MEASUREMENT_CLAMPED, FREQUENCY_FLAG_SEPARATED, FREQUENCY_FLAG_SPLIT_SOURCES,
-    FUSION_FLAG_BRACKET_ALIGNED, FUSION_FLAG_CENSORED, FUSION_FLAG_CENSOR_CONFLICT,
-    FUSION_FLAG_DISOCCLUDED, FUSION_FLAG_OUTLIER_REJECTED, FUSION_FLAG_SOURCE_FALLBACK,
-    FUSION_FLAG_UNCALIBRATED_NOISE, FUSION_FLAG_VISIBILITY_CORRECTED,
+    FUSION_EDIT_MEASURED_SOURCE, FUSION_FLAG_BRACKET_ALIGNED, FUSION_FLAG_CENSORED,
+    FUSION_FLAG_CENSOR_CONFLICT, FUSION_FLAG_DISOCCLUDED, FUSION_FLAG_OUTLIER_REJECTED,
+    FUSION_FLAG_SOURCE_FALLBACK, FUSION_FLAG_UNCALIBRATED_NOISE, FUSION_FLAG_VISIBILITY_CORRECTED,
     SENSOR_CORRECTION_DEFECT_REPAIRED, SENSOR_CORRECTION_FLAT_FIELD,
 };
 use trueshot_core::performance_telemetry::{ProcessTelemetrySnapshot, ProcessTelemetryWindow};
@@ -253,6 +254,10 @@ enum Commands {
         /// Measured lens breathing/pupil/field-PSF profile for native burst fusion
         #[arg(long)]
         lens_psf_profile: Option<PathBuf>,
+
+        /// Source-bound measured-frame edit document for one immutable burst revision
+        #[arg(long)]
+        fusion_edits: Option<PathBuf>,
 
         /// Skip the second CFA-safe pass when depth regularization changes a focus plane
         #[arg(long)]
@@ -655,6 +660,7 @@ fn main() -> Result<()> {
             sensor_noise_profile,
             sensor_correction_profile,
             lens_psf_profile,
+            fusion_edits,
             no_depth_refusion,
             trial,
             trial_days,
@@ -676,6 +682,7 @@ fn main() -> Result<()> {
             sensor_noise_profile,
             sensor_correction_profile,
             lens_psf_profile,
+            fusion_edits,
             no_depth_refusion,
             trial,
             trial_days,
@@ -794,6 +801,7 @@ fn cmd_process(
     sensor_noise_profile: Option<PathBuf>,
     sensor_correction_profile: Option<PathBuf>,
     lens_psf_profile: Option<PathBuf>,
+    fusion_edits: Option<PathBuf>,
     no_depth_refusion: bool,
     trial: bool,
     trial_days: Option<i64>,
@@ -809,7 +817,8 @@ fn cmd_process(
     }
     if (sensor_noise_profile.is_some()
         || sensor_correction_profile.is_some()
-        || lens_psf_profile.is_some())
+        || lens_psf_profile.is_some()
+        || fusion_edits.is_some())
         && mode != Mode::Burst
     {
         anyhow::bail!("Sensor calibration profiles currently apply only to --mode burst");
@@ -864,6 +873,7 @@ fn cmd_process(
             sensor_noise_profile.as_deref(),
             sensor_correction_profile.as_deref(),
             lens_psf_profile.as_deref(),
+            fusion_edits.as_deref(),
             !no_depth_refusion,
             Some(&inventory_ctx),
             Some(&mut run_state),
@@ -2179,6 +2189,7 @@ fn run_burst_pipeline(
     sensor_noise_profile_path: Option<&Path>,
     sensor_correction_profile_path: Option<&Path>,
     lens_psf_profile_path: Option<&Path>,
+    fusion_edits_path: Option<&Path>,
     depth_consistent_refusion: bool,
     _inventory_ctx: Option<&InventoryContext>,
     mut run_state: Option<&mut RunStateManager>,
@@ -2255,6 +2266,22 @@ fn run_burst_pipeline(
             profile.calibration_id
         );
     }
+    let fusion_edit = fusion_edits_path
+        .map(FusionEditDocument::load_json)
+        .transpose()
+        .context("Load measured-source fusion edit document")?;
+    let fusion_edit_digest = fusion_edit
+        .as_ref()
+        .map(FusionEditDocument::digest)
+        .transpose()?;
+    if let (Some(edit), Some(digest)) = (&fusion_edit, &fusion_edit_digest) {
+        println!(
+            "  Fusion revision: {} operations / {} pixels, edit {}",
+            edit.operations.len(),
+            edit.edited_pixel_count(),
+            &digest[..12]
+        );
+    }
     let fusion_config = NativeFusionConfig {
         deghost_strength,
         frequency_separated_deghosting,
@@ -2264,6 +2291,7 @@ fn run_burst_pipeline(
         sensor_noise_profile,
         sensor_correction_profile,
         lens_psf_profile,
+        fusion_edit: None,
         ..native_fusion_config(quality)
     };
     let gpu_ahd = if no_gpu {
@@ -2311,6 +2339,7 @@ fn run_burst_pipeline(
         memory_budget_bytes as f64 / (1024.0 * 1024.0)
     );
     let mut failures = Vec::new();
+    let mut fusion_edit_target_seen = false;
 
     let mp = MultiProgress::new();
     let seq_pb = mp.add(ProgressBar::new(group_count));
@@ -2329,24 +2358,53 @@ fn run_burst_pipeline(
         }
         let capture_group = capture_group?;
         let sequence = &capture_group.sequence;
-        if let Some(entry) = journal.get(&capture_group.group_id)? {
+        let group_edit = fusion_edit
+            .as_ref()
+            .filter(|edit| edit.capture_group_id == capture_group.group_id);
+        if group_edit.is_some() {
+            fusion_edit_target_seen = true;
+        }
+        let group_edit_digest = group_edit.map(FusionEditDocument::digest).transpose()?;
+        let processing_group_id = group_edit_digest.as_ref().map_or_else(
+            || capture_group.group_id.clone(),
+            |digest| fusion_revision_group_id(&capture_group.group_id, digest),
+        );
+        if let Some(edit) = group_edit {
+            let base_output =
+                burst_group_output_path(output, sequence, &capture_group.group_id, None);
+            let base_report = fusion_report_path_for_output(&base_output);
+            let actual_report_sha256 = sha256_file(&base_report).with_context(|| {
+                format!(
+                    "Verify immutable base fusion report for edit {}",
+                    edit.capture_group_id
+                )
+            })?;
+            if actual_report_sha256 != edit.base_report_sha256 {
+                anyhow::bail!(
+                    "Fusion edit base report digest mismatch: expected {}, observed {}",
+                    edit.base_report_sha256,
+                    actual_report_sha256
+                );
+            }
+        }
+        if let Some(entry) = journal.get(&processing_group_id)? {
             if entry.status == GroupProcessingStatus::Committed {
                 if journal.verify_committed_with(
-                    &capture_group.group_id,
+                    &processing_group_id,
                     output,
-                    resume_verification_policy(&capture_group.group_id)?,
+                    resume_verification_policy(&processing_group_id)?,
                 )? {
                     seq_pb.set_message(format!("Skipped committed {}", sequence.meta.bone_id));
                     seq_pb.inc(1);
                     continue;
                 }
                 journal.invalidate_committed(
-                    &capture_group.group_id,
+                    &processing_group_id,
                     "Committed artifact verification failed; scheduling deterministic rebuild",
                 )?;
             }
         }
-        match journal.claim(&capture_group.group_id, retry_limit)? {
+        match journal.claim(&processing_group_id, retry_limit)? {
             ClaimDecision::Process { .. } => {}
             ClaimDecision::AlreadyCommitted => {
                 seq_pb.inc(1);
@@ -2373,6 +2431,8 @@ fn run_burst_pipeline(
 
         let mut timer = HierarchicalTimer::new(&sequence.meta.bone_id);
         let group_started = std::time::Instant::now();
+        let mut group_fusion_config = fusion_config.clone();
+        group_fusion_config.fusion_edit = group_edit.cloned();
         let process_result = (|| -> Result<BurstExportTask> {
             let crop_plan = loader.resolved_sequence_crop_plan(
                 sequence,
@@ -2402,6 +2462,7 @@ fn run_burst_pipeline(
                 fusion_config.local_alignment_cell_size,
                 fusion_config.analysis_max_dimension,
                 demosaic_scratch_bytes,
+                group_edit.is_some(),
             )?;
             let memory_permit =
                 memory_credits.acquire(estimate.peak_memory_bytes, &cancellation)?;
@@ -2426,7 +2487,12 @@ fn run_burst_pipeline(
 
             step_pb.set_message("Fusing HDR and focus planes");
             let fusion_started = std::time::Instant::now();
-            let fused = fuse_native_group(&group, &sequence.meta, &fusion_config)?;
+            let fused = fuse_native_group_with_id(
+                &group,
+                &sequence.meta,
+                &group_fusion_config,
+                Some(&capture_group.group_id),
+            )?;
             let fusion_seconds = fusion_started.elapsed().as_secs_f64();
             drop(group);
             ensure_not_cancelled(&cancellation)?;
@@ -2449,6 +2515,7 @@ fn run_burst_pipeline(
                 sensor_correction_map,
                 glare_map,
                 boundary_trimap,
+                fusion_edit_map,
                 foreground_mask,
                 transforms,
                 frame_alignments,
@@ -2471,6 +2538,9 @@ fn run_burst_pipeline(
                 frequency_separated_pixels,
                 detail_single_source_pixels,
                 detail_reference_pixels,
+                operator_override_pixels,
+                fusion_edit_digest,
+                fusion_edit_base_report_sha256,
                 focus_kernel,
             } = fused;
             let (fusion_overlay_rgb, fusion_overlay_alpha) =
@@ -2535,7 +2605,12 @@ fn run_burst_pipeline(
             ensure_not_cancelled(&cancellation)?;
             step_pb.inc(1);
 
-            let output_path = burst_group_output_path(output, sequence, &capture_group.group_id);
+            let output_path = burst_group_output_path(
+                output,
+                sequence,
+                &capture_group.group_id,
+                group_edit_digest.as_deref(),
+            );
             let preview_path = output_path.with_extension("png");
             let output_stem = output_path
                 .file_stem()
@@ -2557,6 +2632,8 @@ fn run_burst_pipeline(
                 output_path.with_file_name(format!("{output_stem}_sensor_correction.png"));
             let boundary_trimap_path =
                 output_path.with_file_name(format!("{output_stem}_boundary_trimap.png"));
+            let fusion_edit_map_path =
+                output_path.with_file_name(format!("{output_stem}_fusion_edit_map.png"));
             let fusion_overlay_path =
                 output_path.with_file_name(format!("{output_stem}_fusion_overlay.png"));
             let fusion_report_path =
@@ -2568,6 +2645,10 @@ fn run_burst_pipeline(
             let glare_map_name = portable_asset_filename(&glare_map_path)?;
             let sensor_correction_map_name = portable_asset_filename(&sensor_correction_map_path)?;
             let boundary_trimap_name = portable_asset_filename(&boundary_trimap_path)?;
+            let fusion_edit_map_name = fusion_edit_map
+                .as_ref()
+                .map(|_| portable_asset_filename(&fusion_edit_map_path))
+                .transpose()?;
             let fusion_overlay_name = portable_asset_filename(&fusion_overlay_path)?;
             let accepted_transforms = transforms
                 .iter()
@@ -2677,6 +2758,19 @@ fn run_burst_pipeline(
                 .as_object_mut()
                 .expect("fusion report literal is an object");
             report.insert(
+                "capture_group_id".to_string(),
+                serde_json::json!(capture_group.group_id),
+            );
+            report.insert(
+                "revision_group_id".to_string(),
+                serde_json::json!(processing_group_id),
+            );
+            report.insert("frame_count".to_string(), serde_json::json!(sequence.len()));
+            report.insert(
+                "crop_origin".to_string(),
+                serde_json::json!({"x": x0, "y": y0}),
+            );
+            report.insert(
                 "detail_source_map".to_string(),
                 serde_json::json!(detail_source_map_name),
             );
@@ -2703,6 +2797,28 @@ fn run_burst_pipeline(
                     "same_cfa_sparse_low_detail_measured_sources_only_envelope_clamped"
                 ),
             );
+            if let (Some(edit), Some(edit_digest), Some(edit_map_name)) = (
+                group_edit,
+                fusion_edit_digest.as_ref(),
+                fusion_edit_map_name.as_ref(),
+            ) {
+                report.insert(
+                    "fusion_edit".to_string(),
+                    serde_json::json!({
+                        "schema": edit.schema,
+                        "digest": edit_digest,
+                        "base_report_sha256": fusion_edit_base_report_sha256,
+                        "map": edit_map_name,
+                        "map_legend": {
+                            "measured_source_override": FUSION_EDIT_MEASURED_SOURCE
+                        },
+                        "operation_count": edit.operations.len(),
+                        "edited_pixels": operator_override_pixels,
+                        "operations": edit.operations,
+                        "policy": "aligned_uncensored_measured_frame_only_atomic_fail_closed"
+                    }),
+                );
+            }
             report.insert(
                 "performance".to_string(),
                 serde_json::json!({
@@ -2719,7 +2835,7 @@ fn run_burst_pipeline(
             );
             let fusion_report = serde_json::to_vec_pretty(&fusion_report_value)?;
             let output_root = output.to_path_buf();
-            let group_id = capture_group.group_id.clone();
+            let group_id = processing_group_id.clone();
             let label = sequence.meta.bone_id.clone();
             let depth = export_depth.then_some(depth);
             let metric_depth_m = export_depth.then_some(metric_depth_m).flatten();
@@ -2824,6 +2940,16 @@ fn run_burst_pipeline(
                         trimap_digest.size_bytes,
                         trimap_digest.sha256,
                     )?);
+                    if let Some(edit_map) = fusion_edit_map {
+                        let edit_digest =
+                            save_u8_map_png_with_digest(&edit_map, &fusion_edit_map_path)?;
+                        artifacts.push(artifact_digest_from_parts(
+                            &fusion_edit_map_path,
+                            &output_root,
+                            edit_digest.size_bytes,
+                            edit_digest.sha256,
+                        )?);
+                    }
                     let overlay_digest = save_png_preview_with_digest(
                         &fusion_overlay_rgb,
                         &fusion_overlay_alpha,
@@ -2923,11 +3049,11 @@ fn run_burst_pipeline(
                 failure_pb.abandon_with_message(format!("Sequence failed: {error:#}"));
                 if cancellation.is_cancelled() {
                     journal.mark_interrupted(
-                        &capture_group.group_id,
+                        &processing_group_id,
                         "Operator cancellation; safe to resume",
                     )?;
                 } else {
-                    journal.mark_failed(&capture_group.group_id, &error)?;
+                    journal.mark_failed(&processing_group_id, &error)?;
                 }
                 failures.push(format!("{}: {error:#}", sequence.meta.bone_id));
             }
@@ -2953,6 +3079,9 @@ fn run_burst_pipeline(
     seq_pb.finish_with_message("All sequences complete");
     if cancellation.is_cancelled() {
         anyhow::bail!("Burst processing cancelled; completed groups are safe to resume");
+    }
+    if fusion_edit.is_some() && !fusion_edit_target_seen {
+        anyhow::bail!("Fusion edit capture group was not present in the input collection");
     }
     if !failures.is_empty() {
         anyhow::bail!(
@@ -3159,6 +3288,7 @@ fn burst_group_output_path(
     output: &Path,
     sequence: &trueshot_core::types::Sequence,
     group_id: &str,
+    edit_digest: Option<&str>,
 ) -> PathBuf {
     let sanitize = |value: &str| {
         value
@@ -3172,13 +3302,33 @@ fn burst_group_output_path(
             })
             .collect::<String>()
     };
+    let revision =
+        edit_digest.map_or_else(String::new, |digest| format!("_edit_{}", &digest[..12]));
     output.join(format!(
-        "{}_{}_{:03}deg_{}.tiff",
+        "{}_{}_{:03}deg_{}{}.tiff",
         sanitize(&sequence.meta.bone_id),
         sanitize(&sequence.meta.vantage),
         sequence.meta.rot_deg as u32,
         &group_id[..12],
+        revision,
     ))
+}
+
+fn fusion_report_path_for_output(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("trueshot-burst");
+    output_path.with_file_name(format!("{stem}_fusion_report.json"))
+}
+
+fn fusion_revision_group_id(capture_group_id: &str, edit_digest: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"trueshot-fusion-revision-v1\0");
+    digest.update(capture_group_id.as_bytes());
+    digest.update([0]);
+    digest.update(edit_digest.as_bytes());
+    hex::encode(digest.finalize())
 }
 
 fn native_fusion_config(quality: Quality) -> NativeFusionConfig {
@@ -5251,12 +5401,15 @@ mod burst_pipeline_tests {
             "z9-correction.json",
             "--lens-psf-profile",
             "z105-f4-psf.json",
+            "--fusion-edits",
+            "revision.json",
         ])
         .unwrap();
         let Commands::Process {
             sensor_noise_profile,
             sensor_correction_profile,
             lens_psf_profile,
+            fusion_edits,
             ..
         } = cli.command
         else {
@@ -5268,6 +5421,49 @@ mod burst_pipeline_tests {
             Some(PathBuf::from("z9-correction.json"))
         );
         assert_eq!(lens_psf_profile, Some(PathBuf::from("z105-f4-psf.json")));
+        assert_eq!(fusion_edits, Some(PathBuf::from("revision.json")));
+    }
+
+    #[test]
+    fn fusion_revision_identity_and_output_are_stable_and_non_destructive() {
+        let sequence = trueshot_core::types::Sequence {
+            paths: vec![PathBuf::from("capture.nef")],
+            meta: trueshot_core::types::Meta {
+                focus_steps: 1,
+                exposures: vec![0.0],
+                shutter_speeds: vec![1.0],
+                ref_focus: 0,
+                ref_exp: 0.0,
+                burst_factor: 1,
+                bone_id: "hero/asset".to_string(),
+                vantage: "front left".to_string(),
+                rot_deg: 15.0,
+                cam_mul: [1.0; 4],
+            },
+        };
+        let group_id = "a".repeat(64);
+        let edit_digest = "b".repeat(64);
+        let base = burst_group_output_path(Path::new("/tmp/out"), &sequence, &group_id, None);
+        let edited = burst_group_output_path(
+            Path::new("/tmp/out"),
+            &sequence,
+            &group_id,
+            Some(&edit_digest),
+        );
+
+        assert_eq!(
+            base.file_name().and_then(|name| name.to_str()),
+            Some("hero_asset_front_left_015deg_aaaaaaaaaaaa.tiff")
+        );
+        assert_eq!(
+            edited.file_name().and_then(|name| name.to_str()),
+            Some("hero_asset_front_left_015deg_aaaaaaaaaaaa_edit_bbbbbbbbbbbb.tiff")
+        );
+        assert_ne!(fusion_revision_group_id(&group_id, &edit_digest), group_id);
+        assert_eq!(
+            fusion_revision_group_id(&group_id, &edit_digest),
+            fusion_revision_group_id(&group_id, &edit_digest)
+        );
     }
 
     #[test]

@@ -234,6 +234,7 @@ impl NativeSequenceMemoryEstimate {
         local_alignment_cell_size: usize,
         analysis_max_dimension: usize,
         demosaic_scratch_bytes: u64,
+        fusion_edit_map: bool,
     ) -> Result<Self> {
         let pixels = u64::try_from(
             width
@@ -248,8 +249,9 @@ impl NativeSequenceMemoryEstimate {
         // low/detail source maps, provenance/frequency flags,
         // spatial-correction map, glare map, physical boundary trimap, and
         // foreground mask.
+        let edit_bytes_per_pixel = u64::from(fusion_edit_map);
         let fusion_output_bytes = pixels
-            .checked_mul(30)
+            .checked_mul(30 + edit_bytes_per_pixel)
             .context("Native fusion output estimate overflow")?;
         let focus_halo = focus_coarse_stride
             .max(1)
@@ -308,7 +310,7 @@ impl NativeSequenceMemoryEstimate {
         // Linear/display RGB, u8 preview, all retained fusion diagnostics, and
         // PNG's temporary conversions for the exact source/diagnostic maps.
         let postprocess_peak = pixels
-            .checked_mul(12 + 12 + 3 + 24 + 2 + 3)
+            .checked_mul(12 + 12 + 3 + 24 + 2 + 3 + edit_bytes_per_pixel)
             .and_then(|value| value.checked_add(12 * 1024 * 1024))
             .and_then(|value| value.checked_add(demosaic_scratch_bytes))
             .context("Native postprocess peak estimate overflow")?;
@@ -816,9 +818,10 @@ mod tests {
 
     #[test]
     fn native_estimate_matches_bounded_group_architecture() {
-        let estimate =
-            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512, 0)
-                .unwrap();
+        let estimate = NativeSequenceMemoryEstimate::estimate(
+            21, 1310, 1304, 8, 256, 4, 20, 24, 512, 0, false,
+        )
+        .unwrap();
         let peak_mib = estimate.peak_memory_bytes as f64 / (1024.0 * 1024.0);
         assert!(
             (256.4..257.4).contains(&peak_mib),
@@ -830,9 +833,10 @@ mod tests {
 
     #[test]
     fn native_estimate_admits_unified_memory_demosaic_scratch() {
-        let without_gpu =
-            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512, 0)
-                .unwrap();
+        let without_gpu = NativeSequenceMemoryEstimate::estimate(
+            21, 1310, 1304, 8, 256, 4, 20, 24, 512, 0, false,
+        )
+        .unwrap();
         let scratch_bytes = 256 * 1024 * 1024;
         let with_gpu = NativeSequenceMemoryEstimate::estimate(
             21,
@@ -845,6 +849,7 @@ mod tests {
             24,
             512,
             scratch_bytes,
+            false,
         )
         .unwrap();
         assert_eq!(with_gpu.demosaic_scratch_bytes, scratch_bytes);
@@ -852,6 +857,23 @@ mod tests {
             with_gpu.peak_memory_bytes > without_gpu.peak_memory_bytes,
             "scratch exceeding the fusion stage must raise admission"
         );
+    }
+
+    #[test]
+    fn native_estimate_accounts_for_operator_edit_provenance() {
+        let base = NativeSequenceMemoryEstimate::estimate(
+            21, 1310, 1304, 8, 256, 4, 20, 24, 512, 0, false,
+        )
+        .unwrap();
+        let edited =
+            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512, 0, true)
+                .unwrap();
+        let pixels = 1310 * 1304;
+        assert_eq!(
+            edited.fusion_output_bytes - base.fusion_output_bytes,
+            pixels
+        );
+        assert!(edited.peak_memory_bytes > base.peak_memory_bytes);
     }
 
     #[test]

@@ -702,6 +702,7 @@ async fn main() -> std::io::Result<()> {
             .service(api::project::download_raw_file)
             .service(api::project::download_output_file)
             .service(api::project::download_fusion_artifact)
+            .service(api::project::create_fusion_edit)
             .service(api::project::download_processed_file)
             .service(api::project::get_imu_diagnostics)
             .service(api::project::get_project_license)

@@ -12,6 +12,7 @@ use crate::focus_evidence::{
 };
 #[cfg(test)]
 use crate::focus_evidence::{compute_focus_metric_scalar, sorted_trimmed_focus_mean_at};
+use crate::fusion_edit::{FusionEditBinding, FusionEditDocument};
 use crate::lens_psf::LensPsfProfile;
 use crate::sensor_correction::SensorCorrectionProfile;
 use crate::sensor_noise::{SensorNoiseModel, SensorNoiseProfile};
@@ -46,6 +47,7 @@ pub const FREQUENCY_FLAG_MEASUREMENT_CLAMPED: u8 = 1 << 4;
 pub const BOUNDARY_TRIMAP_INTERIOR: u8 = 0;
 pub const BOUNDARY_TRIMAP_PSF_SUPPORT: u8 = 128;
 pub const BOUNDARY_TRIMAP_CROSSING_CORE: u8 = 255;
+pub const FUSION_EDIT_MEASURED_SOURCE: u8 = 255;
 
 #[derive(Debug, Clone)]
 pub struct NativeFusionConfig {
@@ -128,6 +130,9 @@ pub struct NativeFusionConfig {
     /// Minimum median absolute deviation, in aggregate noise sigma, before the
     /// sparse frequency-separated path is allowed to alter a pixel.
     pub frequency_separation_trigger_sigma: f32,
+    /// Optional source-bound operator revision. Every edited pixel is sampled
+    /// from one aligned, uncensored measured frame after automatic fusion.
+    pub fusion_edit: Option<FusionEditDocument>,
 }
 
 impl Default for NativeFusionConfig {
@@ -167,6 +172,7 @@ impl Default for NativeFusionConfig {
             deghost_strength: 1.0,
             frequency_separated_deghosting: true,
             frequency_separation_trigger_sigma: 6.0,
+            fusion_edit: None,
         }
     }
 }
@@ -435,6 +441,9 @@ pub struct NativeFusionResult {
     /// Physical mixed-pixel boundary state: 0 interior, 128 PSF support, and
     /// 255 at a measured depth crossing.
     pub boundary_trimap: Array2<u8>,
+    /// Exact operator edit provenance. Present only for an edited revision;
+    /// 255 means the final CFA value came from the document's measured frame.
+    pub fusion_edit_map: Option<Array2<u8>>,
     /// Conservative object mask inferred from the shared crop border.
     pub foreground_mask: Array2<u8>,
     /// One transform per focus plane, shared by all bracketed exposures.
@@ -482,6 +491,12 @@ pub struct NativeFusionResult {
     pub detail_single_source_pixels: usize,
     /// Frequency-separated pixels whose detail fell back to the reference.
     pub detail_reference_pixels: usize,
+    /// Number of pixels replaced by a validated measured-source edit.
+    pub operator_override_pixels: usize,
+    /// Deterministic identity of the applied edit document.
+    pub fusion_edit_digest: Option<String>,
+    /// Base fusion report to which this immutable revision is bound.
+    pub fusion_edit_base_report_sha256: Option<String>,
     /// Focus evidence kernel selected for this run.
     pub focus_kernel: &'static str,
 }
@@ -504,6 +519,7 @@ impl NativeFusionResult {
             + self.sensor_correction_map.len()
             + self.glare_map.len()
             + self.boundary_trimap.len()
+            + self.fusion_edit_map.as_ref().map_or(0, |map| map.len())
             + self.foreground_mask.len()
             + self.transforms.len() * std::mem::size_of::<PlaneTransform>()
             + self.frame_alignments.len() * std::mem::size_of::<FrameAlignmentSummary>()
@@ -907,6 +923,17 @@ pub fn fuse_native_group(
     meta: &Meta,
     config: &NativeFusionConfig,
 ) -> Result<NativeFusionResult> {
+    fuse_native_group_with_id(group, meta, config, None)
+}
+
+/// Fuse a capture group with its stable content identity. A bound identity is
+/// mandatory when a measured-source edit document is present.
+pub fn fuse_native_group_with_id(
+    group: &NativeFrameGroup<'_>,
+    meta: &Meta,
+    config: &NativeFusionConfig,
+    capture_group_id: Option<&str>,
+) -> Result<NativeFusionResult> {
     validate_group(group, meta, config)?;
 
     let focus_steps = usize::from(meta.focus_steps).max(1);
@@ -940,6 +967,19 @@ pub fn fuse_native_group(
 
     let width = group.width;
     let height = group.height;
+    if let Some(edit) = &config.fusion_edit {
+        let capture_group_id =
+            capture_group_id.context("Fusion edits require a bound capture-group identity")?;
+        let (crop_origin_x, crop_origin_y, _, _) = group.rect.to_bounds();
+        edit.validate_binding(FusionEditBinding {
+            capture_group_id,
+            width,
+            height,
+            crop_origin_x,
+            crop_origin_y,
+            frame_count: group.len(),
+        })?;
+    }
     let pixel_count = width
         .checked_mul(height)
         .context("Native fusion dimensions overflow")?;
@@ -1116,6 +1156,31 @@ pub fn fuse_native_group(
                 }
             });
     }
+    let (fusion_edit_map, operator_override_pixels) = if let Some(edit) = &config.fusion_edit {
+        let mut edit_map = vec![0u8; pixel_count];
+        let edited = apply_measured_source_edits(
+            edit,
+            group,
+            &calibrations,
+            &frame_warps,
+            exposures_per_focus,
+            radiance_anchor,
+            config,
+            &mut bayer,
+            &mut depth,
+            &mut confidence,
+            &mut radiance_uncertainty,
+            &mut source_map,
+            &mut detail_source_map,
+            &mut fusion_flags,
+            &mut frequency_flags,
+            &mut sensor_correction_map,
+            &mut edit_map,
+        )?;
+        (Some(edit_map), edited)
+    } else {
+        (None, 0)
+    };
     let foreground_mask = infer_foreground_mask(&bayer, width, height);
     let glare_affected_pixels = glare_map.iter().filter(|value| **value != 0).count();
     let frequency_separated_pixels = frequency_flags
@@ -1177,6 +1242,12 @@ pub fn fuse_native_group(
             .context("Unable to shape glare diagnostic output")?,
         boundary_trimap: Array2::from_shape_vec((height, width), boundary_trimap)
             .context("Unable to shape physical boundary trimap output")?,
+        fusion_edit_map: fusion_edit_map
+            .map(|map| {
+                Array2::from_shape_vec((height, width), map)
+                    .context("Unable to shape fusion edit provenance")
+            })
+            .transpose()?,
         foreground_mask: Array2::from_shape_vec((height, width), foreground_mask)
             .context("Unable to shape fused foreground mask")?,
         transforms,
@@ -1210,8 +1281,105 @@ pub fn fuse_native_group(
         frequency_separated_pixels,
         detail_single_source_pixels,
         detail_reference_pixels,
+        operator_override_pixels,
+        fusion_edit_digest: config
+            .fusion_edit
+            .as_ref()
+            .map(FusionEditDocument::digest)
+            .transpose()?,
+        fusion_edit_base_report_sha256: config
+            .fusion_edit
+            .as_ref()
+            .map(|edit| edit.base_report_sha256.clone()),
         focus_kernel: active_focus_kernel(config.apple_simd_focus),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_measured_source_edits(
+    edit: &FusionEditDocument,
+    group: &NativeFrameGroup<'_>,
+    calibrations: &[FrameCalibration],
+    frame_warps: &[FrameWarp],
+    exposures_per_focus: usize,
+    radiance_anchor: f32,
+    config: &NativeFusionConfig,
+    bayer: &mut [f32],
+    depth: &mut [f32],
+    confidence: &mut [f32],
+    uncertainty: &mut [f32],
+    source_map: &mut [u16],
+    detail_source_map: &mut [u16],
+    fusion_flags: &mut [u8],
+    frequency_flags: &mut [u8],
+    sensor_correction_map: &mut [u8],
+    edit_map: &mut [u8],
+) -> Result<usize> {
+    let width = group.width;
+    let focus_steps = group.len() / exposures_per_focus;
+    let depth_denominator = focus_steps.saturating_sub(1).max(1) as f32;
+    let mut edited = 0usize;
+
+    for operation in &edit.operations {
+        let frame_index = usize::from(operation.source_frame);
+        let focus_plane = frame_index / exposures_per_focus;
+        let frame_start = focus_plane * exposures_per_focus;
+        let x1 = usize::try_from(operation.rect.x + operation.rect.width)?;
+        let y1 = usize::try_from(operation.rect.y + operation.rect.height)?;
+        for y in usize::try_from(operation.rect.y)?..y1 {
+            for x in usize::try_from(operation.rect.x)?..x1 {
+                let observation = sample_hdr_frame(
+                    group,
+                    calibrations,
+                    frame_warps,
+                    frame_start,
+                    frame_index,
+                    x,
+                    y,
+                    radiance_anchor,
+                    config,
+                );
+                let sample = observation.sample.with_context(|| {
+                    format!(
+                        "Fusion edit {} source frame {} is unavailable or disoccluded at ({}, {})",
+                        operation.id, frame_index, x, y
+                    )
+                })?;
+                if sample.censored {
+                    anyhow::bail!(
+                        "Fusion edit {} source frame {} is clipped at ({}, {}); archival edits cannot invent highlight radiance",
+                        operation.id,
+                        frame_index,
+                        x,
+                        y
+                    );
+                }
+                let index = y * width + x;
+                bayer[index] = sample.radiance;
+                depth[index] = focus_plane as f32 / depth_denominator;
+                // Algorithmic focus confidence no longer describes this
+                // operator-selected measurement.
+                confidence[index] = 0.0;
+                uncertainty[index] = sample.variance.sqrt();
+                source_map[index] = operation.source_frame;
+                detail_source_map[index] = operation.source_frame;
+                fusion_flags[index] = if observation.aligned {
+                    FUSION_FLAG_BRACKET_ALIGNED
+                } else {
+                    0
+                } | if calibrations[frame_index].noise_model.calibrated {
+                    0
+                } else {
+                    FUSION_FLAG_UNCALIBRATED_NOISE
+                };
+                frequency_flags[index] = 0;
+                sensor_correction_map[index] = sample.correction_flags;
+                edit_map[index] = FUSION_EDIT_MEASURED_SOURCE;
+                edited += 1;
+            }
+        }
+    }
+    Ok(edited)
 }
 
 fn validate_group(
@@ -4652,6 +4820,10 @@ fn bilinear_f64(image: &Array2<f64>, x: f64, y: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fusion_edit::{
+        FusionEditDocument, FusionEditOperation, FusionEditReason, FusionEditRect,
+        FUSION_EDIT_SCHEMA,
+    };
     use crate::lens_psf::{LensPsfFocusKnot, LensPsfProfile, LENS_PSF_PROFILE_SCHEMA};
     use crate::nef::parser::{SensorGeometry, SensorLevels, Z9Metadata};
     use crate::sensor_correction::{
@@ -6628,6 +6800,125 @@ mod tests {
         );
         assert!(result.radiance_uncertainty[[y, x]].is_finite());
         assert!(result.noise_model_calibrated);
+    }
+
+    #[test]
+    fn measured_source_edits_are_exact_bound_and_deterministic() {
+        let width = 16;
+        let height = 16;
+        let white = 16_383.0;
+        let mut pixels = vec![(0.2 * white) as u16; width * height];
+        pixels.extend(std::iter::repeat_n((0.8 * white) as u16, width * height));
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            2,
+            width,
+            height,
+            Rect::new(12.0, 20.0, width as f64, height as f64),
+            vec![metadata(1.0), metadata(2.0)],
+        )
+        .unwrap();
+        let edit = FusionEditDocument {
+            schema: FUSION_EDIT_SCHEMA.to_string(),
+            capture_group_id: "a".repeat(64),
+            base_report_sha256: "b".repeat(64),
+            width: width as u32,
+            height: height as u32,
+            crop_origin_x: 12,
+            crop_origin_y: 20,
+            frame_count: 2,
+            operations: vec![FusionEditOperation {
+                id: "moving-highlight".to_string(),
+                rect: FusionEditRect {
+                    x: 4,
+                    y: 5,
+                    width: 3,
+                    height: 2,
+                },
+                source_frame: 1,
+                reason: FusionEditReason::Motion,
+                note: None,
+            }],
+        };
+        let config = NativeFusionConfig {
+            black_level: Some(0.0),
+            white_level: Some(white),
+            regularize_depth: false,
+            fusion_edit: Some(edit.clone()),
+            ..NativeFusionConfig::default()
+        };
+
+        let first =
+            fuse_native_group_with_id(&group, &meta(1, 2), &config, Some(&"a".repeat(64))).unwrap();
+        let second =
+            fuse_native_group_with_id(&group, &meta(1, 2), &config, Some(&"a".repeat(64))).unwrap();
+
+        assert_eq!(first.operator_override_pixels, 6);
+        assert_eq!(first.fusion_edit_digest, Some(edit.digest().unwrap()));
+        assert_eq!(
+            first.fusion_edit_base_report_sha256.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        let map = first.fusion_edit_map.as_ref().unwrap();
+        assert_eq!(map.iter().filter(|value| **value != 0).count(), 6);
+        assert_eq!(map[[5, 4]], FUSION_EDIT_MEASURED_SOURCE);
+        assert_eq!(first.source_map[[5, 4]], 1);
+        assert_eq!(first.detail_source_map[[5, 4]], 1);
+        assert!((first.bayer[[5, 4, 0]] - 0.4).abs() < 2e-4);
+        assert_eq!(first.bayer, second.bayer);
+        assert_eq!(first.source_map, second.source_map);
+        assert_eq!(first.fusion_edit_map, second.fusion_edit_map);
+    }
+
+    #[test]
+    fn measured_source_edits_reject_clipped_sources_atomically() {
+        let width = 16;
+        let height = 16;
+        let white = 16_383u16;
+        let pixels = vec![white; width * height];
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            1,
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            vec![metadata(1.0)],
+        )
+        .unwrap();
+        let config = NativeFusionConfig {
+            black_level: Some(0.0),
+            white_level: Some(f32::from(white)),
+            fusion_edit: Some(FusionEditDocument {
+                schema: FUSION_EDIT_SCHEMA.to_string(),
+                capture_group_id: "c".repeat(64),
+                base_report_sha256: "d".repeat(64),
+                width: width as u32,
+                height: height as u32,
+                crop_origin_x: 0,
+                crop_origin_y: 0,
+                frame_count: 1,
+                operations: vec![FusionEditOperation {
+                    id: "invalid-highlight".to_string(),
+                    rect: FusionEditRect {
+                        x: 8,
+                        y: 8,
+                        width: 1,
+                        height: 1,
+                    },
+                    source_frame: 0,
+                    reason: FusionEditReason::Glare,
+                    note: None,
+                }],
+            }),
+            ..NativeFusionConfig::default()
+        };
+
+        let error = fuse_native_group_with_id(&group, &meta(1, 1), &config, Some(&"c".repeat(64)))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot invent highlight radiance"));
     }
 
     #[test]

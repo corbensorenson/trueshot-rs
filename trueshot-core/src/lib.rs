@@ -18,6 +18,7 @@ pub mod exif_parser;
 pub mod export;
 mod focus_evidence;
 pub mod focus_grouping;
+pub mod fusion_edit;
 pub mod fusion_engine;
 #[cfg(feature = "gpu")]
 pub mod gpu;

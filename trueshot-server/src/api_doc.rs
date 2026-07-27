@@ -73,6 +73,7 @@ use utoipa::OpenApi;
         crate::api::project::import_model,
         crate::api::project::download_output_file,
         crate::api::project::download_fusion_artifact,
+        crate::api::project::create_fusion_edit,
         crate::api::project::list_project_assets,
         crate::api::project::list_fusion_reports,
         crate::api::project::download_processed_file,

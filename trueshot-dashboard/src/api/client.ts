@@ -619,6 +619,7 @@ export interface FusionFlagSummary {
 
 export interface FusionReportSummary {
     report_path: string;
+    report_sha256: string;
     label: string;
     modified_at?: string | null;
     schema: string;
@@ -660,6 +661,12 @@ export interface FusionReportSummary {
         admitted_peak_memory_bytes?: number | null;
         major_page_faults?: number | null;
     };
+    capture_group_id?: string | null;
+    revision_group_id?: string | null;
+    frame_count?: number | null;
+    crop_origin_x?: number | null;
+    crop_origin_y?: number | null;
+    editable_base: boolean;
 }
 
 export interface FusionReportInventory {
@@ -690,6 +697,57 @@ export const fetchFusionArtifact = async (projectId: string, artifactPath: strin
     );
     if (!res.ok) throw new Error(await res.text());
     return res.blob();
+};
+
+export type FusionEditReason = 'motion' | 'disocclusion' | 'focus' | 'glare' | 'boundary' | 'other';
+
+export interface FusionEditOperation {
+    id: string;
+    rect: { x: number; y: number; width: number; height: number };
+    source_frame: number;
+    reason: FusionEditReason;
+    note?: string;
+}
+
+export interface FusionEditReceipt {
+    schema: string;
+    capture_group_id: string;
+    base_report_sha256: string;
+    digest: string;
+    path: string;
+    operations: number;
+    edited_pixels: number;
+    encrypted: boolean;
+    download_filename: string;
+    cli_argument: string | null;
+    document: {
+        schema: string;
+        capture_group_id: string;
+        base_report_sha256: string;
+        width: number;
+        height: number;
+        crop_origin_x: number;
+        crop_origin_y: number;
+        frame_count: number;
+        operations: FusionEditOperation[];
+    };
+}
+
+export const createFusionEdit = async (
+    projectId: string,
+    reportPath: string,
+    operations: FusionEditOperation[],
+): Promise<FusionEditReceipt> => {
+    const res = await fetchAuthed(
+        `${API_Base}/projects/${encodeURIComponent(projectId)}/fusion-edits`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ report_path: reportPath, operations }),
+        },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
 };
 
 export type MeshEditOp =
