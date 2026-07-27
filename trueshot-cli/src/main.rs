@@ -52,6 +52,7 @@ use trueshot_core::resource_manager::{
     AdaptiveDecodeController, CancellationToken, MemoryCreditPool, NativeSequenceMemoryEstimate,
     PipelinePressureSample, SystemResources,
 };
+use trueshot_core::sensor_noise::SensorNoiseProfile;
 use trueshot_core::smart_loader::{NativeGroupArena, SmartLoader};
 use trueshot_core::timing::HierarchicalTimer;
 use trueshot_core::types::ProcessingOptions;
@@ -202,6 +203,10 @@ enum Commands {
         /// Robust HDR motion rejection (0 disables, 1 standard, 2 strongest)
         #[arg(long, default_value_t = 1.0)]
         deghost_strength: f32,
+
+        /// Measured exact-ISO sensor noise profile JSON for native burst fusion
+        #[arg(long)]
+        sensor_noise_profile: Option<PathBuf>,
 
         /// Skip the second CFA-safe pass when depth regularization changes a focus plane
         #[arg(long)]
@@ -527,6 +532,7 @@ fn main() -> Result<()> {
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            sensor_noise_profile,
             no_depth_refusion,
             trial,
             trial_days,
@@ -542,6 +548,7 @@ fn main() -> Result<()> {
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            sensor_noise_profile,
             no_depth_refusion,
             trial,
             trial_days,
@@ -623,6 +630,7 @@ fn cmd_process(
     full_resolution_preview: bool,
     preview_max_dimension: usize,
     deghost_strength: f32,
+    sensor_noise_profile: Option<PathBuf>,
     no_depth_refusion: bool,
     trial: bool,
     trial_days: Option<i64>,
@@ -632,6 +640,9 @@ fn cmd_process(
     }
     if !deghost_strength.is_finite() || !(0.0..=2.0).contains(&deghost_strength) {
         anyhow::bail!("Deghost strength must be between 0 and 2");
+    }
+    if sensor_noise_profile.is_some() && mode != Mode::Burst {
+        anyhow::bail!("Sensor noise profiles currently apply only to --mode burst");
     }
     let mut license_manager = init_license_manager()?;
     let required = process_required_features(mode);
@@ -676,6 +687,7 @@ fn cmd_process(
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            sensor_noise_profile.as_deref(),
             !no_depth_refusion,
             Some(&inventory_ctx),
             Some(&mut run_state),
@@ -1162,6 +1174,7 @@ fn run_burst_pipeline(
     full_resolution_preview: bool,
     preview_max_dimension: usize,
     deghost_strength: f32,
+    sensor_noise_profile_path: Option<&Path>,
     depth_consistent_refusion: bool,
     _inventory_ctx: Option<&InventoryContext>,
     mut run_state: Option<&mut RunStateManager>,
@@ -1195,9 +1208,24 @@ fn run_burst_pipeline(
         state.mark_step_completed("scan_input", vec![]);
         state.mark_step_started("sfm");
     }
+    let sensor_noise_profile = sensor_noise_profile_path
+        .map(SensorNoiseProfile::load_json)
+        .transpose()
+        .context("Load sensor noise calibration profile")?;
+    if let Some(profile) = &sensor_noise_profile {
+        println!(
+            "  Sensor noise: {} {} {}-bit, {} ISO models ({})",
+            profile.camera_make,
+            profile.camera_model,
+            profile.bits_per_sample,
+            profile.iso_models.len(),
+            profile.calibration_id
+        );
+    }
     let fusion_config = NativeFusionConfig {
         deghost_strength,
         depth_consistent_refusion,
+        sensor_noise_profile,
         ..native_fusion_config(quality)
     };
     let mut native_arena = NativeGroupArena::default();
@@ -3770,6 +3798,31 @@ fn run_with_tray(port: u16) -> Result<()> {
 #[cfg(test)]
 mod burst_pipeline_tests {
     use super::*;
+
+    #[test]
+    fn process_cli_accepts_a_sensor_noise_profile() {
+        let cli = Cli::try_parse_from([
+            "trueshot",
+            "process",
+            "--input",
+            "capture",
+            "--output",
+            "out",
+            "--mode",
+            "burst",
+            "--sensor-noise-profile",
+            "z9-noise.json",
+        ])
+        .unwrap();
+        let Commands::Process {
+            sensor_noise_profile,
+            ..
+        } = cli.command
+        else {
+            panic!("expected process command");
+        };
+        assert_eq!(sensor_noise_profile, Some(PathBuf::from("z9-noise.json")));
+    }
 
     #[test]
     fn export_worker_isolates_job_panics_and_continues() {

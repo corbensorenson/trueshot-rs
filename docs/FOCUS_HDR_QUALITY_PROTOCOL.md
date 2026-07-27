@@ -110,8 +110,9 @@ Not yet qualified:
 - Per-bracket local motion alignment and user-visible deghost overlay.
 - Hair/thin-structure halo gates, retouch workflow, and multi-method automatic
   focus strategy.
-- Per-ISO/CFA photon-transfer calibration capture/profile persistence and
-  empirical posterior uncertainty calibration.
+- Per-ISO/CFA photon-transfer calibration capture/fit and empirical posterior
+  uncertainty calibration. Validated profile persistence and production loading
+  are implemented.
 - Diopter/PSF-based sub-plane depth and aperture-constrained occlusion
   correction.
 - Deterministic uncertainty-driven exposure and focus acquisition scheduling.

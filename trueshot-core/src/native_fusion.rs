@@ -1490,7 +1490,9 @@ fn bilinear_f64(image: &Array2<f64>, x: f64, y: f64) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::nef::parser::{SensorLevels, Z9Metadata};
-    use crate::sensor_noise::{IsoNoiseModel, SensorNoiseModel, SensorNoiseProfile};
+    use crate::sensor_noise::{
+        IsoNoiseModel, SensorNoiseModel, SensorNoiseProfile, SENSOR_NOISE_PROFILE_SCHEMA,
+    };
     use crate::smart_loader::NativeFrameGroup;
     use crate::types::Rect;
 
@@ -1892,6 +1894,7 @@ mod tests {
 
     fn calibrated_noise_profile(iso: u32) -> SensorNoiseProfile {
         SensorNoiseProfile {
+            schema: SENSOR_NOISE_PROFILE_SCHEMA.to_string(),
             camera_make: "Nikon".to_string(),
             camera_model: "Z9".to_string(),
             bits_per_sample: 14,

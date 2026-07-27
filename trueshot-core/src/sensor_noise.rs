@@ -6,9 +6,17 @@
 //! gain for a camera, ISO, and CFA site.
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+
+pub const SENSOR_NOISE_PROFILE_SCHEMA: &str = "trueshot.sensor-noise.v1";
+pub const MAX_SENSOR_NOISE_PROFILE_BYTES: u64 = 1024 * 1024;
 
 /// Per-CFA-site sensor model in local RGGB order: R, G1, G2, B.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SensorNoiseModel {
     /// Signal-independent temporal read noise, in DN standard deviation.
     pub read_noise_dn: [f32; 4],
@@ -78,25 +86,81 @@ impl SensorNoiseModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct IsoNoiseModel {
     pub iso: u32,
     pub model: SensorNoiseModel,
 }
 
 /// Auditable camera profile containing exact per-ISO noise calibrations.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SensorNoiseProfile {
+    pub schema: String,
     pub camera_make: String,
     pub camera_model: String,
     pub bits_per_sample: u16,
     /// Stable identifier or digest of the retained calibration artifact.
+    #[serde(skip)]
     pub calibration_id: String,
     pub iso_models: Vec<IsoNoiseModel>,
 }
 
 impl SensorNoiseProfile {
+    pub fn load_json(path: &Path) -> Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        if metadata.len() > MAX_SENSOR_NOISE_PROFILE_BYTES {
+            anyhow::bail!(
+                "Sensor noise profile {} is {} bytes; limit is {}",
+                path.display(),
+                metadata.len(),
+                MAX_SENSOR_NOISE_PROFILE_BYTES
+            );
+        }
+        let bytes = std::fs::read(path)?;
+        let mut profile: Self = serde_json::from_slice(&bytes)?;
+        profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    /// Persist a profile atomically. Its runtime `calibration_id` is always
+    /// recomputed from the completed artifact when loaded.
+    pub fn save_json(&self, path: &Path) -> Result<()> {
+        self.validate()?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let bytes = serde_json::to_vec_pretty(self)?;
+        if bytes.len() as u64 > MAX_SENSOR_NOISE_PROFILE_BYTES {
+            anyhow::bail!("Serialized sensor noise profile exceeds the size limit");
+        }
+        let partial = path.with_extension(format!("partial-{}", std::process::id()));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&partial)?;
+        let write_result = (|| -> Result<()> {
+            file.write_all(&bytes)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&partial, path)?;
+            File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        write_result
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if self.schema != SENSOR_NOISE_PROFILE_SCHEMA {
+            anyhow::bail!(
+                "Unsupported sensor noise profile schema {}; expected {}",
+                self.schema,
+                SENSOR_NOISE_PROFILE_SCHEMA
+            );
+        }
         if self.camera_make.trim().is_empty()
             || self.camera_model.trim().is_empty()
             || self.calibration_id.trim().is_empty()
@@ -151,7 +215,8 @@ fn normalized_camera_name(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{IsoNoiseModel, SensorNoiseModel, SensorNoiseProfile};
+    use super::{IsoNoiseModel, SensorNoiseModel, SensorNoiseProfile, SENSOR_NOISE_PROFILE_SCHEMA};
+    use tempfile::tempdir;
 
     #[test]
     fn normalized_variance_matches_dn_model() {
@@ -181,6 +246,7 @@ mod tests {
     #[test]
     fn camera_profiles_require_exact_iso_and_identity() {
         let profile = SensorNoiseProfile {
+            schema: SENSOR_NOISE_PROFILE_SCHEMA.to_string(),
             camera_make: "NIKON CORPORATION".to_string(),
             camera_model: "NIKON Z 9".to_string(),
             bits_per_sample: 14,
@@ -197,5 +263,42 @@ mod tests {
         assert!(profile.matches("Nikon Corporation", "Nikon Z9", 14));
         assert!(profile.model_for_iso(64).is_some());
         assert!(profile.model_for_iso(100).is_none());
+    }
+
+    #[test]
+    fn profile_round_trip_uses_artifact_digest_identity() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("z9-noise.json");
+        let profile = SensorNoiseProfile {
+            schema: SENSOR_NOISE_PROFILE_SCHEMA.to_string(),
+            camera_make: "Nikon".to_string(),
+            camera_model: "Z9".to_string(),
+            bits_per_sample: 14,
+            calibration_id: "unsaved-profile".to_string(),
+            iso_models: vec![IsoNoiseModel {
+                iso: 100,
+                model: SensorNoiseModel {
+                    calibrated: true,
+                    ..SensorNoiseModel::conservative(2.0)
+                },
+            }],
+        };
+        profile.save_json(&path).unwrap();
+        let loaded = SensorNoiseProfile::load_json(&path).unwrap();
+        assert!(loaded.calibration_id.starts_with("sha256:"));
+        assert_eq!(loaded.iso_models, profile.iso_models);
+        assert_eq!(loaded.schema, SENSOR_NOISE_PROFILE_SCHEMA);
+    }
+
+    #[test]
+    fn unknown_profile_schema_fails_closed() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("future.json");
+        std::fs::write(
+            &path,
+            r#"{"schema":"future","camera_make":"Nikon","camera_model":"Z9","bits_per_sample":14,"iso_models":[]}"#,
+        )
+        .unwrap();
+        assert!(SensorNoiseProfile::load_json(&path).is_err());
     }
 }
