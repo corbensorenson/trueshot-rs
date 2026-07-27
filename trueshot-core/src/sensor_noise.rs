@@ -5,7 +5,7 @@
 //! accuracy until photon-transfer measurements have established conversion
 //! gain for a camera, ISO, and CFA site.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
@@ -107,6 +107,19 @@ pub struct SensorNoiseProfile {
 
 impl SensorNoiseProfile {
     pub fn load_json(path: &Path) -> Result<Self> {
+        Self::load_json_with_key(path, None)
+    }
+
+    pub fn load_json_with_key(path: &Path, encrypted_key: Option<&[u8; 32]>) -> Result<Self> {
+        if path.extension().and_then(|value| value.to_str()) == Some("enc") {
+            let key = encrypted_key.context("Encrypted sensor noise profile requires a key")?;
+            let bytes = trueshot_storage::encrypted::decrypt_to_vec(
+                path,
+                key,
+                MAX_SENSOR_NOISE_PROFILE_BYTES as usize,
+            )?;
+            return Self::from_json_bytes(&bytes);
+        }
         let metadata = std::fs::metadata(path)?;
         if metadata.len() > MAX_SENSOR_NOISE_PROFILE_BYTES {
             anyhow::bail!(
@@ -117,8 +130,15 @@ impl SensorNoiseProfile {
             );
         }
         let bytes = std::fs::read(path)?;
-        let mut profile: Self = serde_json::from_slice(&bytes)?;
-        profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        Self::from_json_bytes(&bytes)
+    }
+
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > MAX_SENSOR_NOISE_PROFILE_BYTES {
+            anyhow::bail!("Sensor noise profile exceeds the size limit");
+        }
+        let mut profile: Self = serde_json::from_slice(bytes)?;
+        profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         profile.validate()?;
         Ok(profile)
     }
@@ -288,6 +308,37 @@ mod tests {
         assert!(loaded.calibration_id.starts_with("sha256:"));
         assert_eq!(loaded.iso_models, profile.iso_models);
         assert_eq!(loaded.schema, SENSOR_NOISE_PROFILE_SCHEMA);
+    }
+
+    #[test]
+    fn encrypted_profile_preserves_plaintext_digest_identity_without_staging() {
+        let directory = tempdir().unwrap();
+        let clear = directory.path().join("z9-noise.json");
+        let encrypted = directory.path().join("z9-noise.json.enc");
+        let key = [0x3du8; 32];
+        let profile = SensorNoiseProfile {
+            schema: SENSOR_NOISE_PROFILE_SCHEMA.to_string(),
+            camera_make: "Nikon".to_string(),
+            camera_model: "Z9".to_string(),
+            bits_per_sample: 14,
+            calibration_id: "unsaved-profile".to_string(),
+            iso_models: vec![IsoNoiseModel {
+                iso: 100,
+                model: SensorNoiseModel {
+                    calibrated: true,
+                    ..SensorNoiseModel::conservative(2.0)
+                },
+            }],
+        };
+        profile.save_json(&clear).unwrap();
+        let expected = SensorNoiseProfile::load_json(&clear).unwrap();
+        trueshot_storage::encrypted::encrypt_file(&clear, &encrypted, &key, 64 * 1024).unwrap();
+        std::fs::remove_file(&clear).unwrap();
+
+        let observed = SensorNoiseProfile::load_json_with_key(&encrypted, Some(&key)).unwrap();
+
+        assert_eq!(observed, expected);
+        assert!(!clear.exists());
     }
 
     #[test]

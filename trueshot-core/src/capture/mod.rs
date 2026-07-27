@@ -22,7 +22,8 @@ pub use adaptive_session::{
 pub use focus_stack::{FocusStackConfig, FocusStacker, StackAlgorithm, StackDirection};
 pub use hdr::{calculate_bracket_evs, HdrAlgorithm, HdrConfig, HdrMerger};
 pub use raw_observation::{
-    observe_nef_reference, observe_nef_roi, observe_raw_roi, verify_observation_candidate,
+    observe_nef_reference, observe_nef_reference_with_key, observe_nef_roi,
+    observe_nef_roi_with_key, observe_raw_roi, verify_observation_candidate,
     FocusResponseObservation, RadianceObservation, RawAssimilationReport, RawCaptureObservation,
     RawObservationConfig, RawPosteriorAccumulator,
 };

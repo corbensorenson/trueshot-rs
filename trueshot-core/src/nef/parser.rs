@@ -5,8 +5,9 @@ use anyhow::{Context, Result};
 use memmap2::MmapOptions;
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 use super::huffman::{clamp_bits, create_huffman_table, BitPumpMSB, LjpegHeader, LookupTable};
 use super::nikon_compression::{
@@ -24,7 +25,7 @@ use super::{
 };
 
 /// EXIF data structure for metadata extraction
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct ExifData {
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     exposure_time: Option<f64>,
@@ -114,12 +115,22 @@ fn verified_sensor_profile(make: &str, model: &str, bits_per_sample: u16) -> Opt
 
 pub struct Z9NefParser {
     file_path: String,
+    source: NefSource,
     metadata: Option<Z9Metadata>,
     tiff_parser: TiffParser,
     preview_extractor: PreviewExtractor,
     makernote_offset: Option<u64>,
     makernote_size: Option<u64>,
+    exif_data: Option<ExifData>,
 }
+
+enum NefSource {
+    Plaintext,
+    TSE2(Zeroizing<[u8; 32]>),
+}
+
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
 
 trait RawOutput {
     fn width(&self) -> u32;
@@ -179,20 +190,64 @@ impl Z9NefParser {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             file_path: path.as_ref().to_string_lossy().to_string(),
+            source: NefSource::Plaintext,
             metadata: None,
             tiff_parser: TiffParser::new(),
             preview_extractor: PreviewExtractor::new(),
             makernote_offset: None,
             makernote_size: None,
+            exif_data: None,
         }
+    }
+
+    /// Open an authenticated TSE2 NEF without materializing plaintext.
+    pub fn new_encrypted<P: AsRef<Path>>(path: P, key: [u8; 32]) -> Self {
+        Self {
+            file_path: path.as_ref().to_string_lossy().to_string(),
+            source: NefSource::TSE2(Zeroizing::new(key)),
+            metadata: None,
+            tiff_parser: TiffParser::new(),
+            preview_extractor: PreviewExtractor::new(),
+            makernote_offset: None,
+            makernote_size: None,
+            exif_data: None,
+        }
+    }
+
+    pub fn for_path(path: &Path, encrypted_key: Option<&[u8; 32]>) -> Result<Self> {
+        if path.extension().and_then(|value| value.to_str()) == Some("enc") {
+            let key = encrypted_key
+                .context("Authenticated TSE2 NEF requires an in-memory project decryption key")?;
+            Ok(Self::new_encrypted(path, *key))
+        } else {
+            Ok(Self::new(path))
+        }
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        matches!(self.source, NefSource::TSE2(_))
+    }
+
+    fn open_reader(&self) -> Result<BufReader<Box<dyn ReadSeek>>> {
+        let reader: Box<dyn ReadSeek> = match &self.source {
+            NefSource::Plaintext => Box::new(
+                File::open(&self.file_path)
+                    .with_context(|| format!("Failed to open NEF file: {}", self.file_path))?,
+            ),
+            NefSource::TSE2(key) => Box::new(
+                trueshot_storage::encrypted::SeekableEncryptedFile::open(
+                    Path::new(&self.file_path),
+                    key,
+                )
+                .with_context(|| format!("Failed to open authenticated NEF: {}", self.file_path))?,
+            ),
+        };
+        Ok(BufReader::with_capacity(256 * 1024, reader))
     }
 
     /// Parse the NEF file and extract metadata
     pub fn parse(&mut self) -> Result<()> {
-        let mut file = File::open(&self.file_path)
-            .with_context(|| format!("Failed to open NEF file: {}", self.file_path))?;
-
-        let mut reader = BufReader::new(&mut file);
+        let mut reader = self.open_reader()?;
 
         // Read TIFF header
         let header = self.tiff_parser.read_header(&mut reader)?;
@@ -256,6 +311,12 @@ impl Z9NefParser {
                         .read_ifd(&mut reader, exif_entry.value_offset as u64)
                     {
                         tracing::info!("EXIF IFD contains {} entries", exif_ifd.len());
+                        match self.extract_direct_exif(&mut reader, &ifd, &exif_ifd) {
+                            Ok(exif) => self.exif_data = Some(exif),
+                            Err(error) => {
+                                tracing::warn!("Direct bounded EXIF parse failed: {error}")
+                            }
+                        }
 
                         // Look for MakerNote in EXIF IFD
                         if let Some(makernote_entry) = exif_ifd.get(&37500) {
@@ -447,7 +508,10 @@ impl Z9NefParser {
 
     /// Extract preview JPEG efficiently
     pub fn extract_preview_jpeg(&mut self) -> Result<Vec<u8>> {
-        self.preview_extractor.extract_preview_jpeg(&self.file_path)
+        let allow_full_scan = !self.is_encrypted();
+        let mut reader = self.open_reader()?;
+        self.preview_extractor
+            .extract_preview_jpeg_from_reader(&mut reader, allow_full_scan)
     }
 
     /// Load full RAW image
@@ -541,9 +605,9 @@ impl Z9NefParser {
 
     // Private implementation methods
 
-    fn extract_metadata(
+    fn extract_metadata<R: BufRead + Seek>(
         &mut self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         ifd: &std::collections::HashMap<u16, super::tiff::IfdEntry>,
         makernote_offset: Option<u64>,
         makernote_size: Option<u64>,
@@ -679,8 +743,16 @@ impl Z9NefParser {
             [1.0, 1.0, 1.0, 1.0]
         };
 
-        // Extract EXIF metadata for grouping analysis
-        let exif_data = self.extract_exif_metadata(reader)?;
+        // Direct TIFF tags avoid broad container scans for authenticated
+        // sources. Plaintext keeps the generic fallback for unusual files.
+        let exif_data = match self.exif_data.clone() {
+            Some(exif) => exif,
+            None if !self.is_encrypted() => self.extract_exif_metadata(reader)?,
+            None => {
+                tracing::warn!("Encrypted NEF has no bounded EXIF directory; using empty metadata");
+                ExifData::default()
+            }
+        };
 
         Ok(Z9Metadata {
             width,
@@ -707,9 +779,9 @@ impl Z9NefParser {
     }
 
     /// Extract white balance multipliers from EXIF/MakerNote
-    fn extract_white_balance_from_makernote(
+    fn extract_white_balance_from_makernote<R: Read + Seek>(
         &self,
-        _reader: &mut BufReader<&mut File>,
+        _reader: &mut R,
     ) -> Result<[f32; 4]> {
         // Try to extract WB from MakerNote
         match self.parse_makernote_white_balance() {
@@ -756,15 +828,15 @@ impl Z9NefParser {
     }
 
     /// Extract EXIF metadata for grouping analysis
-    fn extract_exif_metadata(&self, _reader: &mut BufReader<&mut File>) -> Result<ExifData> {
+    fn extract_exif_metadata<R: BufRead + Seek>(&self, reader: &mut R) -> Result<ExifData> {
         let mut exif_data = ExifData::default();
 
-        // Use exif crate to extract metadata
-        let file = std::fs::File::open(&self.file_path)?;
-        let mut bufreader = std::io::BufReader::new(&file);
+        // Use the same seekable source so encrypted metadata never needs a
+        // plaintext sibling or a complete in-memory decryption.
+        reader.seek(SeekFrom::Start(0))?;
         let exifreader = exif::Reader::new();
 
-        let exif = match exifreader.read_from_container(&mut bufreader) {
+        let exif = match exifreader.read_from_container(reader) {
             Ok(exif) => exif,
             Err(e) => {
                 tracing::warn!("Failed to read EXIF: {}", e);
@@ -858,17 +930,80 @@ impl Z9NefParser {
         Ok(exif_data)
     }
 
+    fn extract_direct_exif<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        ifd0: &std::collections::HashMap<u16, super::tiff::IfdEntry>,
+        exif_ifd: &std::collections::HashMap<u16, super::tiff::IfdEntry>,
+    ) -> Result<ExifData> {
+        const DATE_TIME: u16 = 306;
+        const DATE_TIME_ORIGINAL: u16 = 36867;
+        const EXPOSURE_TIME: u16 = 33434;
+        const F_NUMBER: u16 = 33437;
+        const ISO_SPEED: u16 = 34855;
+        const SUBJECT_DISTANCE: u16 = 37382;
+        const FOCAL_LENGTH: u16 = 37386;
+        const LENS_MODEL: u16 = 42036;
+
+        let mut output = ExifData::default();
+        let timestamp = exif_ifd
+            .get(&DATE_TIME_ORIGINAL)
+            .or_else(|| ifd0.get(&DATE_TIME))
+            .and_then(|entry| self.tiff_parser.read_ascii(reader, entry).ok());
+        if let Some(timestamp) = timestamp {
+            if let Ok(value) =
+                chrono::NaiveDateTime::parse_from_str(&timestamp, "%Y:%m:%d %H:%M:%S")
+            {
+                output.timestamp = Some(chrono::DateTime::from_naive_utc_and_offset(
+                    value,
+                    chrono::Utc,
+                ));
+            }
+        }
+        output.exposure_time = exif_ifd
+            .get(&EXPOSURE_TIME)
+            .and_then(|entry| self.tiff_parser.read_rational(reader, entry).ok())
+            .filter(|value| value.is_finite() && *value > 0.0);
+        output.aperture = exif_ifd
+            .get(&F_NUMBER)
+            .and_then(|entry| self.tiff_parser.read_rational(reader, entry).ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value as f32);
+        output.iso = exif_ifd
+            .get(&ISO_SPEED)
+            .and_then(|entry| self.tiff_parser.read_unsigned_scalar(reader, entry).ok());
+        output.focal_length = exif_ifd
+            .get(&FOCAL_LENGTH)
+            .and_then(|entry| self.tiff_parser.read_rational(reader, entry).ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value as f32);
+        output.focus_distance = exif_ifd
+            .get(&SUBJECT_DISTANCE)
+            .and_then(|entry| self.tiff_parser.read_rational(reader, entry).ok())
+            .filter(|value| value.is_finite() && *value > 0.0 && *value < 1_000_000.0)
+            .map(|value| value as f32);
+        output.lens_model = exif_ifd
+            .get(&LENS_MODEL)
+            .or_else(|| ifd0.get(&LENS_MODEL))
+            .and_then(|entry| self.tiff_parser.read_ascii(reader, entry).ok());
+        if output.timestamp.is_none()
+            && output.exposure_time.is_none()
+            && output.aperture.is_none()
+            && output.iso.is_none()
+            && output.focal_length.is_none()
+            && output.focus_distance.is_none()
+            && output.lens_model.is_none()
+        {
+            anyhow::bail!("EXIF IFD contains no supported bounded metadata");
+        }
+        Ok(output)
+    }
+
     fn load_raw_data_from_strips_into(&self, roi: &Roi, output: &mut dyn RawOutput) -> Result<()> {
         let metadata = self.get_metadata()?;
         if metadata.strip_offsets.is_empty() || metadata.strip_byte_counts.is_empty() {
             anyhow::bail!("NEF RAW directory does not contain strip data");
         }
-
-        let file = File::open(&self.file_path)?;
-        // SAFETY: The mapping is read-only and the file handle remains alive for
-        // the mapping's complete lifetime. Source mutation during decode is not
-        // supported and is detected by normal I/O faults or index invalidation.
-        let mapped_file = unsafe { MmapOptions::new().map(&file)? };
 
         // First, analyze all strips to understand the data layout
         tracing::info!("Total strips: {}", metadata.strip_offsets.len());
@@ -899,33 +1034,63 @@ impl Z9NefParser {
             metadata.strip_offsets.len()
         );
 
-        // Load relevant strips
-        for strip_idx in start_strip..=end_strip.min(metadata.strip_offsets.len() - 1) {
-            let strip_offset = metadata.strip_offsets[strip_idx];
-            let strip_byte_count = metadata
-                .strip_byte_counts
-                .get(strip_idx)
-                .copied()
-                .unwrap_or(0);
-            let start = strip_offset as usize;
-            let end = strip_offset
-                .saturating_add(strip_byte_count)
-                .min(mapped_file.len() as u64) as usize;
-            if start >= end || start >= mapped_file.len() {
-                anyhow::bail!(
-                    "NEF strip {} is missing or truncated at offset {}",
-                    strip_idx,
-                    strip_offset
-                );
+        let last_strip = end_strip.min(metadata.strip_offsets.len() - 1);
+        match &self.source {
+            NefSource::Plaintext => {
+                let file = File::open(&self.file_path)?;
+                // SAFETY: The mapping is read-only and the file handle remains
+                // alive for the mapping's complete lifetime.
+                let mapped_file = unsafe { MmapOptions::new().map(&file)? };
+                for strip_idx in start_strip..=last_strip {
+                    let strip_offset = metadata.strip_offsets[strip_idx];
+                    let strip_byte_count = metadata
+                        .strip_byte_counts
+                        .get(strip_idx)
+                        .copied()
+                        .unwrap_or(0);
+                    let start = usize::try_from(strip_offset)
+                        .context("NEF strip offset exceeds this platform")?;
+                    let end = strip_offset
+                        .saturating_add(strip_byte_count)
+                        .min(mapped_file.len() as u64) as usize;
+                    if start >= end || start >= mapped_file.len() {
+                        anyhow::bail!(
+                            "NEF strip {} is missing or truncated at offset {}",
+                            strip_idx,
+                            strip_offset
+                        );
+                    }
+                    self.extract_roi_from_strip(
+                        &mapped_file[start..end],
+                        strip_idx,
+                        roi,
+                        metadata,
+                        output,
+                    )?;
+                }
             }
-
-            self.extract_roi_from_strip(
-                &mapped_file[start..end],
-                strip_idx,
-                roi,
-                metadata,
-                output,
-            )?;
+            NefSource::TSE2(_) => {
+                let mut reader = self.open_reader()?;
+                for strip_idx in start_strip..=last_strip {
+                    let strip_offset = metadata.strip_offsets[strip_idx];
+                    let strip_byte_count = metadata
+                        .strip_byte_counts
+                        .get(strip_idx)
+                        .copied()
+                        .unwrap_or(0);
+                    if strip_byte_count == 0 {
+                        anyhow::bail!("NEF strip {strip_idx} has an empty byte range");
+                    }
+                    let strip_len = usize::try_from(strip_byte_count)
+                        .context("NEF strip length exceeds this platform")?;
+                    reader.seek(SeekFrom::Start(strip_offset))?;
+                    let mut strip = vec![0u8; strip_len];
+                    reader.read_exact(&mut strip).with_context(|| {
+                        format!("Read authenticated NEF strip {strip_idx} at {strip_offset}")
+                    })?;
+                    self.extract_roi_from_strip(&strip, strip_idx, roi, metadata, output)?;
+                }
+            }
         }
 
         Ok(())
@@ -1959,8 +2124,7 @@ impl Z9NefParser {
         offset: u64,
         _size: u64,
     ) -> Result<[f32; 4]> {
-        let mut file = File::open(&self.file_path)?;
-        let mut reader = BufReader::new(&mut file);
+        let mut reader = self.open_reader()?;
 
         tracing::debug!("Parsing MakerNote for WB at offset: {}", offset);
 
@@ -2202,8 +2366,7 @@ impl Z9NefParser {
         bits_per_sample: u8,
     ) -> Result<NikonCompressionMeta> {
         if let (Some(offset), Some(_size)) = (self.makernote_offset, self.makernote_size) {
-            let mut file = File::open(&self.file_path)?;
-            let mut reader = BufReader::new(&mut file);
+            let mut reader = self.open_reader()?;
 
             tracing::info!("Parsing MakerNote at offset: {}", offset);
 

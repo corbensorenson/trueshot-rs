@@ -10,10 +10,12 @@
 use crate::capture_manifest::{
     discover_capture_manifest, CaptureGroup, CaptureGroupSource, CaptureManifestReader,
 };
-use crate::exif_parser::{group_sequences, scan_nef_files};
+use crate::exif_parser::{group_sequences_with_key, scan_nef_files};
 use crate::nef::parser::{Z9Metadata, Z9NefParser};
-use crate::object_detection::detect_object_bbox;
-use crate::raw_io::{load_bayer_frame, load_nef_roi_into, selective_bayer_load};
+use crate::object_detection::detect_object_bbox_with_key;
+use crate::raw_io::{
+    load_bayer_frame_with_key, load_nef_roi_into_with_key, selective_bayer_load_with_key,
+};
 use crate::timed_scope;
 use crate::timing::HierarchicalTimer;
 use crate::types::{BayerFrame, ProcessingOptions, Rect, Sequence};
@@ -21,10 +23,13 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
+use zeroize::Zeroizing;
 
 pub struct SmartLoader {
     options: ProcessingOptions,
     decode_pool: Option<rayon::ThreadPool>,
+    encrypted_raw_key: Option<Arc<Zeroizing<[u8; 32]>>>,
 }
 
 /// One preview-derived crop shared by an entire focus/HDR capture group.
@@ -144,7 +149,17 @@ impl SmartLoader {
         Self {
             options,
             decode_pool,
+            encrypted_raw_key: None,
         }
+    }
+
+    pub fn with_encrypted_raw_key(mut self, key: [u8; 32]) -> Self {
+        self.encrypted_raw_key = Some(Arc::new(Zeroizing::new(key)));
+        self
+    }
+
+    fn encrypted_raw_key(&self) -> Option<&[u8; 32]> {
+        self.encrypted_raw_key.as_deref().map(|key| &**key)
     }
 
     /// Scan directory and group into sequences
@@ -157,7 +172,7 @@ impl SmartLoader {
         }
 
         tracing::info!("Found {} NEF files", nef_files.len());
-        let sequences = group_sequences(&nef_files)?;
+        let sequences = group_sequences_with_key(&nef_files, self.encrypted_raw_key())?;
         tracing::info!("Grouped into {} sequences", sequences.len());
 
         Ok(sequences)
@@ -219,7 +234,7 @@ impl SmartLoader {
                     "Using reference image for detection: {:?}",
                     ref_path.file_name()
                 );
-                match detect_object_bbox(ref_path) {
+                match detect_object_bbox_with_key(ref_path, self.encrypted_raw_key()) {
                     Ok(bbox) => {
                         let coverage_pixels = bbox.width * bbox.height;
                         tracing::info!(
@@ -277,7 +292,7 @@ impl SmartLoader {
         };
         if plan.rect.is_none() {
             let reference_path = &sequence.paths[plan.reference_index];
-            let mut parser = Z9NefParser::new(reference_path);
+            let mut parser = Z9NefParser::for_path(reference_path, self.encrypted_raw_key())?;
             parser.parse().with_context(|| {
                 format!(
                     "Failed to parse full-frame reference {}",
@@ -319,9 +334,9 @@ impl SmartLoader {
                     .enumerate()
                     .map(|(index, path)| {
                         let frame = if let Some(ref b) = crop_plan.rect {
-                            selective_bayer_load(path, b)
+                            selective_bayer_load_with_key(path, b, self.encrypted_raw_key())
                         } else {
-                            load_bayer_frame(path)
+                            load_bayer_frame_with_key(path, self.encrypted_raw_key())
                         };
                         frame.with_context(|| {
                             format!(
@@ -397,13 +412,14 @@ impl SmartLoader {
                     .zip(sequence.paths.par_iter())
                     .enumerate()
                     .map(|(index, (slot, path))| {
-                        load_nef_roi_into(path, rect, slot).with_context(|| {
-                            format!(
-                                "Failed to fill native sequence slot {} from {}",
-                                index,
-                                path.display()
-                            )
-                        })
+                        load_nef_roi_into_with_key(path, rect, slot, self.encrypted_raw_key())
+                            .with_context(|| {
+                                format!(
+                                    "Failed to fill native sequence slot {} from {}",
+                                    index,
+                                    path.display()
+                                )
+                            })
                     })
                     .collect()
             };

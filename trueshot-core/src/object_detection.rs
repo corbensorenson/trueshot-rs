@@ -70,8 +70,15 @@ impl BoundingBox {
 ///
 /// Returns a Rect in full-resolution coordinates for selective loading.
 pub fn detect_object_bbox(nef_path: &std::path::Path) -> Result<Rect> {
+    detect_object_bbox_with_key(nef_path, None)
+}
+
+pub fn detect_object_bbox_with_key(
+    nef_path: &std::path::Path,
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<Rect> {
     tracing::info!("Detecting object bbox from preview: {:?}", nef_path);
-    let mut parser = Z9NefParser::new(nef_path);
+    let mut parser = Z9NefParser::for_path(nef_path, encrypted_key)?;
     parser
         .parse()
         .with_context(|| format!("Failed to parse NEF file: {:?}", nef_path))?;

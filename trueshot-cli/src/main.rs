@@ -86,6 +86,9 @@ use trueshot_core::smart_loader::{NativeGroupArena, SmartLoader};
 use trueshot_core::timing::HierarchicalTimer;
 use trueshot_core::types::ProcessingOptions;
 use trueshot_core::validation::validate_photogrammetry_input;
+use zeroize::Zeroizing;
+
+const MAX_FUSION_PROCESSOR_INPUT_BYTES: usize = MAX_FUSION_REVISION_ENVELOPE_BYTES + 4096;
 use uuid::Uuid;
 
 const SENSOR_CALIBRATION_ARTIFACT_SCHEMA: &str = "trueshot.sensor-calibration.artifact.v2";
@@ -838,15 +841,30 @@ fn cmd_process(
     if fusion_edits.is_some() && fusion_revision_stdin {
         anyhow::bail!("--fusion-edits and --fusion-revision-stdin are mutually exclusive");
     }
-    let fusion_revision = if fusion_revision_stdin {
-        let mut bytes = Vec::new();
+    let (fusion_revision, encrypted_raw_key) = if fusion_revision_stdin {
+        let mut bytes = Zeroizing::new(Vec::new());
         io::stdin()
-            .take((MAX_FUSION_REVISION_ENVELOPE_BYTES + 1) as u64)
+            .take((MAX_FUSION_PROCESSOR_INPUT_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
             .context("Read bounded fusion revision envelope from stdin")?;
-        Some(FusionRevisionEnvelope::from_json_bytes(&bytes)?)
+        if bytes.len() > MAX_FUSION_PROCESSOR_INPUT_BYTES {
+            anyhow::bail!("Fusion processor input exceeds the bounded size limit");
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).context("Parse fusion processor input")?;
+        if value.get("envelope").is_some() {
+            let input: FusionProcessorInput =
+                serde_json::from_value(value).context("Validate fusion processor input")?;
+            input.envelope.validate()?;
+            (
+                Some(input.envelope),
+                input.encrypted_raw_key.map(Zeroizing::new),
+            )
+        } else {
+            (Some(FusionRevisionEnvelope::from_json_bytes(&bytes)?), None)
+        }
     } else {
-        None
+        (None, None)
     };
     let mut license_manager = init_license_manager()?;
     let required = process_required_features(mode);
@@ -901,6 +919,7 @@ fn cmd_process(
             fusion_edits.as_deref(),
             fusion_revision.as_ref(),
             !no_depth_refusion,
+            encrypted_raw_key,
             Some(&inventory_ctx),
             Some(&mut run_state),
         ),
@@ -974,6 +993,13 @@ fn cmd_process(
     println!("  Output saved to: {}", style(output.display()).green());
 
     Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FusionProcessorInput {
+    envelope: FusionRevisionEnvelope,
+    encrypted_raw_key: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -2218,6 +2244,7 @@ fn run_burst_pipeline(
     fusion_edits_path: Option<&Path>,
     fusion_revision: Option<&FusionRevisionEnvelope>,
     depth_consistent_refusion: bool,
+    encrypted_raw_key: Option<Zeroizing<[u8; 32]>>,
     _inventory_ctx: Option<&InventoryContext>,
     mut run_state: Option<&mut RunStateManager>,
 ) -> Result<()> {
@@ -2234,7 +2261,14 @@ fn run_burst_pipeline(
         .unwrap_or_else(|| num_cpus::get_physical().clamp(1, 8))
         .max(1);
     options.max_parallel_sequences = Some(initial_decode_workers);
-    let mut loader = SmartLoader::new(options.clone());
+    let build_loader = |options: ProcessingOptions| {
+        let loader = SmartLoader::new(options);
+        match encrypted_raw_key.as_deref() {
+            Some(key) => loader.with_encrypted_raw_key(*key),
+            None => loader,
+        }
+    };
+    let mut loader = build_loader(options.clone());
     let mut capture_groups = loader.open_capture_groups(input)?;
     let group_count = capture_groups.total_groups();
     println!(
@@ -2251,7 +2285,7 @@ fn run_burst_pipeline(
         state.mark_step_started("sfm");
     }
     let sensor_noise_profile = sensor_noise_profile_path
-        .map(SensorNoiseProfile::load_json)
+        .map(|path| SensorNoiseProfile::load_json_with_key(path, encrypted_raw_key.as_deref()))
         .transpose()
         .context("Load sensor noise calibration profile")?;
     if let Some(profile) = &sensor_noise_profile {
@@ -2265,7 +2299,7 @@ fn run_burst_pipeline(
         );
     }
     let sensor_correction_profile = sensor_correction_profile_path
-        .map(SensorCorrectionProfile::load_json)
+        .map(|path| SensorCorrectionProfile::load_json_with_key(path, encrypted_raw_key.as_deref()))
         .transpose()
         .context("Load sensor spatial correction profile")?;
     if let Some(profile) = &sensor_correction_profile {
@@ -2280,7 +2314,7 @@ fn run_burst_pipeline(
         );
     }
     let lens_psf_profile = lens_psf_profile_path
-        .map(LensPsfProfile::load_json)
+        .map(|path| LensPsfProfile::load_json_with_key(path, encrypted_raw_key.as_deref()))
         .transpose()
         .context("Load lens PSF calibration profile")?;
     if let Some(profile) = &lens_psf_profile {
@@ -3105,7 +3139,7 @@ fn run_burst_pipeline(
                             pressure_sample.major_page_faults,
                         );
                         options.max_parallel_sequences = Some(adjustment.workers);
-                        loader = SmartLoader::new(options.clone());
+                        loader = build_loader(options.clone());
                     }
                 }
             }

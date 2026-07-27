@@ -53,12 +53,19 @@ pub struct NativeNefRoi {
 /// Decodes the complete raw image and converts to linear f64 RGGB format.
 /// Black level is subtracted and values are normalized to [0, 1].
 pub fn load_bayer_frame(path: &Path) -> Result<BayerFrame> {
+    load_bayer_frame_with_key(path, None)
+}
+
+pub fn load_bayer_frame_with_key(
+    path: &Path,
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<BayerFrame> {
     tracing::info!("Loading full Bayer frame from {:?}", path);
 
     let start = std::time::Instant::now();
 
     // Parse NEF file
-    let mut parser = Z9NefParser::new(path);
+    let mut parser = Z9NefParser::for_path(path, encrypted_key)?;
     parser
         .parse()
         .with_context(|| format!("Failed to parse NEF file: {:?}", path))?;
@@ -93,12 +100,20 @@ pub fn load_bayer_frame(path: &Path) -> Result<BayerFrame> {
 /// Uses Z9NefParser to emit only the specified rectangle and stop entropy
 /// decoding after its final row.
 pub fn selective_bayer_load(path: &Path, rect: &Rect) -> Result<BayerFrame> {
+    selective_bayer_load_with_key(path, rect, None)
+}
+
+pub fn selective_bayer_load_with_key(
+    path: &Path,
+    rect: &Rect,
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<BayerFrame> {
     tracing::info!("Selective load from {:?}, rect: {:?}", path, rect);
 
     let start = std::time::Instant::now();
 
     // Parse NEF file
-    let mut parser = Z9NefParser::new(path);
+    let mut parser = Z9NefParser::for_path(path, encrypted_key)?;
     parser
         .parse()
         .with_context(|| format!("Failed to parse NEF file: {:?}", path))?;
@@ -331,7 +346,15 @@ pub fn load_detected_nef_roi(path: &Path) -> Result<NativeNefRoi> {
 /// Use this for every frame in an HDR/focus group after deriving one crop from
 /// the group's `SequenceCropPlan`.
 pub fn load_nef_roi_native(path: &Path, rect: Rect) -> Result<NativeNefRoi> {
-    let mut parser = Z9NefParser::new(path);
+    load_nef_roi_native_with_key(path, rect, None)
+}
+
+pub fn load_nef_roi_native_with_key(
+    path: &Path,
+    rect: Rect,
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<NativeNefRoi> {
+    let mut parser = Z9NefParser::for_path(path, encrypted_key)?;
     parser
         .parse()
         .with_context(|| format!("Failed to parse NEF file: {:?}", path))?;
@@ -343,7 +366,16 @@ pub fn load_nef_roi_native(path: &Path, rect: Rect) -> Result<NativeNefRoi> {
 /// Returns the parsed metadata while avoiding the `RawBuffer` allocation used
 /// by standalone image loads.
 pub fn load_nef_roi_into(path: &Path, rect: Rect, destination: &mut [u16]) -> Result<Z9Metadata> {
-    let mut parser = Z9NefParser::new(path);
+    load_nef_roi_into_with_key(path, rect, destination, None)
+}
+
+pub fn load_nef_roi_into_with_key(
+    path: &Path,
+    rect: Rect,
+    destination: &mut [u16],
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<Z9Metadata> {
+    let mut parser = Z9NefParser::for_path(path, encrypted_key)?;
     parser
         .parse()
         .with_context(|| format!("Failed to parse NEF file: {:?}", path))?;

@@ -1,5 +1,6 @@
 use crate::at_rest::{
-    encrypt_file_in_place, policy_for_project, require_master_key, ProjectKeyStore,
+    decrypt_file_to_bytes, encrypt_file_in_place, policy_for_project, require_master_key,
+    ProjectKeyStore,
 };
 use crate::auth::require_admin;
 use crate::fs_safety::ensure_project_id;
@@ -19,11 +20,11 @@ use std::sync::{
 };
 use std::time::Instant;
 use trueshot_core::capture::{
-    build_camera_candidates, observe_nef_reference, observe_nef_roi,
-    resolve_camera_candidate_options, AdaptiveCaptureTermination, AdaptivePlannerConfig,
-    AdaptiveSessionStatus, CameraOptionSelection, CaptureCandidate, CaptureRuntimeTelemetry,
-    MeasuredAdaptiveSession, MeasuredAdaptiveSessionSnapshot, RawAssimilationReport,
-    RawObservationConfig,
+    build_camera_candidates, observe_nef_reference_with_key, observe_nef_roi,
+    observe_nef_roi_with_key, resolve_camera_candidate_options, AdaptiveCaptureTermination,
+    AdaptivePlannerConfig, AdaptiveSessionStatus, CameraOptionSelection, CaptureCandidate,
+    CaptureRuntimeTelemetry, MeasuredAdaptiveSession, MeasuredAdaptiveSessionSnapshot,
+    RawAssimilationReport, RawObservationConfig,
 };
 use trueshot_core::licensing::Feature;
 use trueshot_core::nef::raw_data::Roi;
@@ -592,27 +593,61 @@ pub async fn start_adaptive_capture(
         Ok(path) => path,
         Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
     };
-    if reference_path.extension().and_then(|value| value.to_str()) == Some("enc")
+    let encrypted_assets = reference_path.extension().and_then(|value| value.to_str())
+        == Some("enc")
         || sensor_profile_path
             .extension()
             .and_then(|value| value.to_str())
-            == Some("enc")
-    {
-        return HttpResponse::BadRequest().body(
-            "Adaptive capture currently requires seekable plaintext project assets; decrypt this project scope before starting",
-        );
-    }
+            == Some("enc");
+    let encrypted_key = if encrypted_assets {
+        let master =
+            match require_master_key(&state.config.privacy, &state.config.paths.projects_dir) {
+                Ok(master) => master,
+                Err(error) => {
+                    return HttpResponse::InternalServerError()
+                        .body(format!("Adaptive project key unavailable: {error}"))
+                }
+            };
+        match ProjectKeyStore::new(&state.config.paths.projects_dir, master)
+            .load_or_create(&json.project_id)
+        {
+            Ok(key) => Some(key),
+            Err(error) => {
+                return HttpResponse::InternalServerError()
+                    .body(format!("Adaptive project key unavailable: {error}"))
+            }
+        }
+    } else {
+        None
+    };
     let roi = Roi::from(json.roi);
     let decode_roi = roi.clone();
     let observation_config = json.observation;
     let (sensor_profile, reference) = match tokio::task::spawn_blocking({
         move || {
-            let sensor_profile = SensorNoiseProfile::load_json(&sensor_profile_path)?;
-            let reference = observe_nef_reference(
+            let sensor_profile = if sensor_profile_path
+                .extension()
+                .and_then(|value| value.to_str())
+                == Some("enc")
+            {
+                let key = encrypted_key
+                    .as_ref()
+                    .context("Encrypted sensor profile key is unavailable")?;
+                let bytes = decrypt_file_to_bytes(
+                    &sensor_profile_path,
+                    key,
+                    trueshot_core::sensor_noise::MAX_SENSOR_NOISE_PROFILE_BYTES as usize,
+                )?;
+                SensorNoiseProfile::from_json_bytes(&bytes)?
+            } else {
+                SensorNoiseProfile::load_json(&sensor_profile_path)?
+            };
+            let reference = observe_nef_reference_with_key(
                 &reference_path,
                 decode_roi,
                 &sensor_profile,
                 observation_config,
+                encrypted_key.as_ref(),
             )?;
             anyhow::Ok((sensor_profile, reference))
         }
@@ -1029,7 +1064,7 @@ pub async fn assimilate_adaptive_capture(
         return response;
     }
     let session_id = path.into_inner();
-    let (sensor_profile, anchor, roi, observation_config, expected_generation) = {
+    let (sensor_profile, anchor, roi, observation_config, expected_generation, project_id) = {
         let sessions = state.adaptive_capture.lock().await;
         if sessions
             .sessions
@@ -1048,6 +1083,7 @@ pub async fn assimilate_adaptive_capture(
             session.roi.clone(),
             session.observation_config,
             session.generation,
+            session.project_id.clone(),
         )
     };
     let capture_path =
@@ -1055,13 +1091,40 @@ pub async fn assimilate_adaptive_capture(
             Ok(path) => path,
             Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
         };
+    let encrypted_key = if capture_path.extension().and_then(|value| value.to_str()) == Some("enc")
+    {
+        let Some(project_id) = project_id else {
+            return HttpResponse::BadRequest()
+                .body("Encrypted adaptive observation has no bound project identity");
+        };
+        let master =
+            match require_master_key(&state.config.privacy, &state.config.paths.projects_dir) {
+                Ok(master) => master,
+                Err(error) => {
+                    return HttpResponse::InternalServerError()
+                        .body(format!("Adaptive project key unavailable: {error}"))
+                }
+            };
+        match ProjectKeyStore::new(&state.config.paths.projects_dir, master)
+            .load_or_create(&project_id)
+        {
+            Ok(key) => Some(key),
+            Err(error) => {
+                return HttpResponse::InternalServerError()
+                    .body(format!("Adaptive project key unavailable: {error}"))
+            }
+        }
+    } else {
+        None
+    };
     let observation = match tokio::task::spawn_blocking(move || {
-        observe_nef_roi(
+        observe_nef_roi_with_key(
             &capture_path,
             roi,
             &sensor_profile,
             anchor,
             observation_config,
+            encrypted_key.as_ref(),
         )
     })
     .await

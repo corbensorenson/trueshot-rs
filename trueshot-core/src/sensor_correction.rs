@@ -171,6 +171,20 @@ impl SensorCorrectionProfile {
     }
 
     pub fn load_json(path: &Path) -> Result<Self> {
+        Self::load_json_with_key(path, None)
+    }
+
+    pub fn load_json_with_key(path: &Path, encrypted_key: Option<&[u8; 32]>) -> Result<Self> {
+        if path.extension().and_then(|value| value.to_str()) == Some("enc") {
+            let key =
+                encrypted_key.context("Encrypted sensor correction profile requires a key")?;
+            let bytes = trueshot_storage::encrypted::decrypt_to_vec(
+                path,
+                key,
+                MAX_SENSOR_CORRECTION_PROFILE_BYTES as usize,
+            )?;
+            return Self::from_json_bytes(&bytes);
+        }
         let metadata = std::fs::metadata(path)?;
         if metadata.len() > MAX_SENSOR_CORRECTION_PROFILE_BYTES {
             anyhow::bail!(
@@ -181,8 +195,15 @@ impl SensorCorrectionProfile {
             );
         }
         let bytes = std::fs::read(path)?;
-        let mut profile: Self = serde_json::from_slice(&bytes)?;
-        profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        Self::from_json_bytes(&bytes)
+    }
+
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > MAX_SENSOR_CORRECTION_PROFILE_BYTES {
+            anyhow::bail!("Sensor correction profile exceeds the size limit");
+        }
+        let mut profile: Self = serde_json::from_slice(bytes)?;
+        profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         profile.validate()?;
         Ok(profile)
     }

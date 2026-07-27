@@ -1,4 +1,5 @@
 pub mod direct;
+pub mod encrypted;
 pub mod estimator;
 pub mod octree;
 pub mod sidecar;

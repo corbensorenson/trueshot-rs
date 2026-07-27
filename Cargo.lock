@@ -10983,6 +10983,7 @@ dependencies = [
  "trueshot-device-manager",
  "uuid",
  "winit",
+ "zeroize",
  "zstd 0.13.3",
 ]
 
@@ -11187,11 +11188,13 @@ dependencies = [
  "tracing-subscriber",
  "trueshot-core",
  "trueshot-device-manager",
+ "trueshot-storage",
  "urlencoding",
  "utoipa",
  "uuid",
  "walkdir",
  "webrtc",
+ "zeroize",
 ]
 
 [[package]]
@@ -11217,13 +11220,18 @@ dependencies = [
 name = "trueshot-storage"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
+ "hkdf",
  "image 0.25.6",
  "nalgebra 0.32.6",
+ "rand 0.8.5",
+ "sha2",
  "sysinfo 0.29.11",
  "tempfile",
  "tokio",
  "tokio-uring",
+ "zeroize",
 ]
 
 [[package]]

@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
 
-const MAGIC: &[u8; 4] = b"TSE1";
-const VERSION: u8 = 1;
-const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+const LEGACY_MAGIC: &[u8; 4] = b"TSE1";
+const LEGACY_VERSION: u8 = 1;
+const LEGACY_MAX_CHUNK_SIZE: usize = 1024 * 1024;
 const MASTER_KEY_ENV: &str = "TRUESHOT_MASTER_KEY";
 const MASTER_KEYRING_ENTRY: &str = "at_rest_master_key";
 
@@ -452,6 +452,14 @@ pub fn encrypt_file_in_place(
     }
     let enc_path = PathBuf::from(format!("{}.enc", path.display()));
     if enc_path.exists() {
+        if !encrypted_matches_plaintext(path, &enc_path, key)? {
+            anyhow::bail!(
+                "Existing encrypted destination does not match surviving plaintext {}",
+                path.display()
+            );
+        }
+        std::fs::remove_file(path)
+            .with_context(|| format!("Remove committed plaintext {}", path.display()))?;
         return Ok(Some(enc_path));
     }
     let _ = encrypt_file(path, &enc_path, key)?;
@@ -485,18 +493,32 @@ pub fn decrypt_file_to_bytes(
         .with_context(|| format!("Failed to open encrypted file: {}", path.display()))?;
     let mut header = [0u8; 4];
     file.read_exact(&mut header)?;
-    if &header != MAGIC {
+    if header == trueshot_storage::encrypted::MAGIC {
+        let mut reader = trueshot_storage::encrypted::SeekableEncryptedFile::open(path, key)?;
+        let plaintext_len = usize::try_from(reader.plaintext_len())
+            .context("Encrypted plaintext length exceeds this platform")?;
+        if plaintext_len > max_plaintext_bytes {
+            anyhow::bail!(
+                "Decrypted file exceeds {} byte read limit",
+                max_plaintext_bytes
+            );
+        }
+        let mut output = Vec::with_capacity(plaintext_len);
+        reader.read_to_end(&mut output)?;
+        return Ok(output);
+    }
+    if &header != LEGACY_MAGIC {
         anyhow::bail!("Invalid encryption header");
     }
     let mut version = [0u8; 1];
     file.read_exact(&mut version)?;
-    if version[0] != VERSION {
+    if version[0] != LEGACY_VERSION {
         anyhow::bail!("Unsupported encryption version");
     }
     let mut chunk_bytes = [0u8; 4];
     file.read_exact(&mut chunk_bytes)?;
     let chunk_size = u32::from_le_bytes(chunk_bytes) as usize;
-    if chunk_size == 0 || chunk_size > DEFAULT_CHUNK_SIZE {
+    if chunk_size == 0 || chunk_size > LEGACY_MAX_CHUNK_SIZE {
         anyhow::bail!("Invalid encrypted chunk size");
     }
     let mut nonce_prefix = [0u8; 8];
@@ -562,29 +584,12 @@ pub fn write_encrypted_bytes_atomic(path: &Path, key: &[u8; 32], bytes: &[u8]) -
         uuid::Uuid::new_v4().as_simple()
     ));
     let result = (|| -> Result<()> {
-        let mut nonce_prefix = [0u8; 8];
-        rand::thread_rng().fill_bytes(&mut nonce_prefix);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-        let mut out = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .with_context(|| format!("Create encrypted temporary {}", temporary.display()))?;
-        out.write_all(MAGIC)?;
-        out.write_all(&[VERSION])?;
-        out.write_all(&(DEFAULT_CHUNK_SIZE as u32).to_le_bytes())?;
-        out.write_all(&nonce_prefix)?;
-        for (chunk_index, chunk) in bytes.chunks(DEFAULT_CHUNK_SIZE).enumerate() {
-            let chunk_index =
-                u32::try_from(chunk_index).context("Encrypted payload contains too many chunks")?;
-            let nonce = build_nonce(&nonce_prefix, chunk_index);
-            let ciphertext = cipher
-                .encrypt(Nonce::from_slice(&nonce), chunk)
-                .context("Encrypt in-memory project artifact")?;
-            out.write_all(&(ciphertext.len() as u32).to_le_bytes())?;
-            out.write_all(&ciphertext)?;
-        }
-        out.sync_all()?;
+        trueshot_storage::encrypted::encrypt_bytes(
+            &temporary,
+            key,
+            bytes,
+            trueshot_storage::encrypted::DEFAULT_CHUNK_SIZE,
+        )?;
         std::fs::hard_link(&temporary, path)
             .with_context(|| format!("Publish encrypted artifact {}", path.display()))?;
         std::fs::remove_file(&temporary)
@@ -631,6 +636,13 @@ fn encrypt_tree(
         }
         let enc_path = PathBuf::from(format!("{}.enc", path.display()));
         if enc_path.exists() {
+            if !encrypted_matches_plaintext(path, &enc_path, key)? {
+                anyhow::bail!(
+                    "Existing encrypted destination does not match surviving plaintext {}",
+                    path.display()
+                );
+            }
+            std::fs::remove_file(path)?;
             report.skipped_files += 1;
             continue;
         }
@@ -683,45 +695,57 @@ fn decrypt_tree(root: &Path, key: &[u8; 32], report: &mut EncryptionReport) -> R
 }
 
 fn encrypt_file(input: &Path, output: &Path, key: &[u8; 32]) -> Result<(u64, u64)> {
-    let mut file =
-        File::open(input).with_context(|| format!("Failed to open file: {}", input.display()))?;
-
-    let mut nonce_prefix = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut nonce_prefix);
-
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let mut out = File::create(output)
-        .with_context(|| format!("Failed to create file: {}", output.display()))?;
-
-    out.write_all(MAGIC)?;
-    out.write_all(&[VERSION])?;
-    out.write_all(&(DEFAULT_CHUNK_SIZE as u32).to_le_bytes())?;
-    out.write_all(&nonce_prefix)?;
-
-    let mut chunk_index = 0u32;
-    let mut bytes_in = 0u64;
-    let mut bytes_out = 0u64;
-    let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];
-    loop {
-        let count = file
-            .read(&mut buf)
-            .with_context(|| format!("Failed to read file: {}", input.display()))?;
-        if count == 0 {
-            break;
-        }
-        bytes_in = bytes_in.saturating_add(count as u64);
-        let chunk = &buf[..count];
-        let nonce = build_nonce(&nonce_prefix, chunk_index);
-        let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce), chunk)
-            .with_context(|| format!("Encryption failed for {}", input.display()))?;
-        out.write_all(&(ciphertext.len() as u32).to_le_bytes())?;
-        out.write_all(&ciphertext)?;
-        bytes_out = bytes_out.saturating_add(ciphertext.len() as u64);
-        chunk_index = chunk_index.saturating_add(1);
+    let parent = output
+        .parent()
+        .context("Encrypted output has no parent directory")?;
+    let name = output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("Encrypted output filename is not UTF-8")?;
+    let temporary = parent.join(format!(".{name}.{}.part", uuid::Uuid::new_v4().as_simple()));
+    let result = (|| -> Result<(u64, u64)> {
+        let stats = trueshot_storage::encrypted::encrypt_file(
+            input,
+            &temporary,
+            key,
+            trueshot_storage::encrypted::DEFAULT_CHUNK_SIZE,
+        )?;
+        std::fs::hard_link(&temporary, output)
+            .with_context(|| format!("Publish encrypted asset {}", output.display()))?;
+        std::fs::remove_file(&temporary)?;
+        sync_parent_directory(output)?;
+        Ok((stats.plaintext_bytes, stats.encrypted_bytes))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
+    result
+}
 
-    Ok((bytes_in, bytes_out))
+fn encrypted_matches_plaintext(plaintext: &Path, encrypted: &Path, key: &[u8; 32]) -> Result<bool> {
+    let mut clear = File::open(plaintext)?;
+    let mut protected = trueshot_storage::encrypted::SeekableEncryptedFile::open(encrypted, key)
+        .with_context(|| {
+            format!(
+                "Existing encrypted destination {} is incomplete or unauthenticated",
+                encrypted.display()
+            )
+        })?;
+    if protected.plaintext_len() != clear.metadata()?.len() {
+        return Ok(false);
+    }
+    let mut clear_chunk = vec![0u8; LEGACY_MAX_CHUNK_SIZE];
+    let mut protected_chunk = vec![0u8; LEGACY_MAX_CHUNK_SIZE];
+    loop {
+        let count = clear.read(&mut clear_chunk)?;
+        if count == 0 {
+            return Ok(true);
+        }
+        protected.read_exact(&mut protected_chunk[..count])?;
+        if clear_chunk[..count] != protected_chunk[..count] {
+            return Ok(false);
+        }
+    }
 }
 
 fn decrypt_file(input: &Path, output: &Path, key: &[u8; 32]) -> Result<(u64, u64)> {
@@ -729,12 +753,16 @@ fn decrypt_file(input: &Path, output: &Path, key: &[u8; 32]) -> Result<(u64, u64
         .with_context(|| format!("Failed to open encrypted file: {}", input.display()))?;
     let mut header = [0u8; 4];
     file.read_exact(&mut header)?;
-    if &header != MAGIC {
+    if header == trueshot_storage::encrypted::MAGIC {
+        let stats = trueshot_storage::encrypted::decrypt_file(input, output, key)?;
+        return Ok((stats.encrypted_bytes, stats.plaintext_bytes));
+    }
+    if &header != LEGACY_MAGIC {
         anyhow::bail!("Invalid encryption header");
     }
     let mut version = [0u8; 1];
     file.read_exact(&mut version)?;
-    if version[0] != VERSION {
+    if version[0] != LEGACY_VERSION {
         anyhow::bail!("Unsupported encryption version");
     }
     let mut chunk_bytes = [0u8; 4];
@@ -817,6 +845,30 @@ fn set_key_permissions(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn write_legacy_tse1(path: &Path, key: &[u8; 32], payload: &[u8]) {
+        let nonce_prefix = [0x19u8; 8];
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+        let mut output = File::create(path).unwrap();
+        output.write_all(LEGACY_MAGIC).unwrap();
+        output.write_all(&[LEGACY_VERSION]).unwrap();
+        output
+            .write_all(&(LEGACY_MAX_CHUNK_SIZE as u32).to_le_bytes())
+            .unwrap();
+        output.write_all(&nonce_prefix).unwrap();
+        for (index, chunk) in payload.chunks(LEGACY_MAX_CHUNK_SIZE).enumerate() {
+            let ciphertext = cipher
+                .encrypt(
+                    Nonce::from_slice(&build_nonce(&nonce_prefix, index as u32)),
+                    chunk,
+                )
+                .unwrap();
+            output
+                .write_all(&(ciphertext.len() as u32).to_le_bytes())
+                .unwrap();
+            output.write_all(&ciphertext).unwrap();
+        }
+    }
+
     #[test]
     fn bounded_decryption_does_not_materialize_plaintext() {
         let directory = tempfile::tempdir().unwrap();
@@ -891,5 +943,56 @@ mod tests {
 
         assert_eq!(successes, 1);
         assert!(decoded == b"first" || decoded == b"second");
+    }
+
+    #[test]
+    fn legacy_tse1_remains_bounded_read_compatible() {
+        let directory = tempfile::tempdir().unwrap();
+        let encrypted = directory.path().join("legacy.json.enc");
+        let payload = br#"{"legacy":true}"#;
+        let key = [0x28u8; 32];
+        write_legacy_tse1(&encrypted, &key, payload);
+
+        assert_eq!(
+            decrypt_file_to_bytes(&encrypted, &key, payload.len()).unwrap(),
+            payload
+        );
+        assert!(
+            trueshot_storage::encrypted::SeekableEncryptedFile::open(&encrypted, &key).is_err(),
+            "legacy files must not be misrepresented as authenticated random-access TSE2"
+        );
+    }
+
+    #[test]
+    fn interrupted_in_place_commit_is_authenticated_before_plaintext_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let plaintext = directory.path().join("capture.NEF");
+        let encrypted = directory.path().join("capture.NEF.enc");
+        let payload = vec![0x44u8; 70_000];
+        let key = [0x62u8; 32];
+        std::fs::write(&plaintext, &payload).unwrap();
+        trueshot_storage::encrypted::encrypt_file(&plaintext, &encrypted, &key, 64 * 1024).unwrap();
+
+        encrypt_file_in_place(&plaintext, &key, 0).unwrap();
+        assert!(!plaintext.exists());
+
+        let mut conflicting = payload.clone();
+        conflicting[0] ^= 0xff;
+        std::fs::write(&plaintext, &conflicting).unwrap();
+        assert!(encrypt_file_in_place(&plaintext, &key, 0).is_err());
+        assert!(
+            plaintext.exists(),
+            "same-length but different ciphertext must not authorize plaintext removal"
+        );
+
+        std::fs::write(&plaintext, &payload).unwrap();
+        let mut damaged = std::fs::read(&encrypted).unwrap();
+        damaged.pop();
+        std::fs::write(&encrypted, damaged).unwrap();
+        assert!(encrypt_file_in_place(&plaintext, &key, 0).is_err());
+        assert!(
+            plaintext.exists(),
+            "unauthenticated destination must never authorize plaintext removal"
+        );
     }
 }

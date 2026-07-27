@@ -70,9 +70,12 @@ output adds `_edit_<digest-prefix>` to the filename and emits
   escape through symbolic links.
 - Encrypted report and edit artifacts are authenticated in bounded memory
   without plaintext project siblings.
-- Encrypted RAW input currently fails closed because random-access RAW decoding
-  needs an authenticated seekable reader; TrueShot does not stage decrypted RAW
-  files as a convenience workaround.
+- Encrypted RAW and digest-bound calibration profiles use authenticated
+  fixed-offset `TSE2` reads. The processor receives the project key only through
+  its anonymous stdin handoff and does not stage decrypted project files.
+- Legacy `TSE1` remains available for bounded whole-artifact reads but fails
+  closed for refusion until explicitly migrated to authenticated-seekable
+  `TSE2`.
 - Output-scope revision artifacts are encrypted immediately after the local
   processor closes them and remain covered by the background stability sweep.
 - Manual glare and boundary controls remain unavailable until their edits can

@@ -17,12 +17,19 @@ use std::path::{Path, PathBuf};
 /// 4. Detect focus steps and exposures within each group
 /// 5. Apply pattern: F1E1, F1E2, F1E3, F2E1, F2E2, F2E3, ...
 pub fn group_sequences(paths: &[PathBuf]) -> Result<Vec<Sequence>> {
+    group_sequences_with_key(paths, None)
+}
+
+pub fn group_sequences_with_key(
+    paths: &[PathBuf],
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<Vec<Sequence>> {
     tracing::info!("Grouping {} files into sequences (time-based)", paths.len());
 
     // Step 1: Extract metadata from all files using Z9NefParser (fast!)
     let mut file_metas = Vec::new();
     for path in paths {
-        match extract_z9_metadata(path) {
+        match extract_z9_metadata_with_key(path, encrypted_key) {
             Ok(meta) => file_metas.push(meta),
             Err(e) => {
                 tracing::warn!("Failed to extract metadata from {:?}: {}", path, e);
@@ -83,7 +90,14 @@ pub struct FileMeta {
 
 /// Extract metadata using Z9NefParser (fast, no image decode)
 pub fn extract_z9_metadata(path: &Path) -> Result<FileMeta> {
-    let mut parser = Z9NefParser::new(path);
+    extract_z9_metadata_with_key(path, None)
+}
+
+pub fn extract_z9_metadata_with_key(
+    path: &Path,
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<FileMeta> {
+    let mut parser = Z9NefParser::for_path(path, encrypted_key)?;
     parser
         .parse()
         .with_context(|| format!("Failed to parse NEF: {:?}", path))?;
@@ -290,10 +304,8 @@ fn scan_nef_files_recursive(dir: &Path, nef_files: &mut Vec<PathBuf>) -> Result<
         let path = entry.path();
 
         if path.is_file() {
-            if let Some(ext) = path.extension() {
-                if ext.eq_ignore_ascii_case("nef") {
-                    nef_files.push(path);
-                }
+            if is_nef_asset_path(&path) {
+                nef_files.push(path);
             }
         } else if path.is_dir() {
             // Recursively scan subdirectories
@@ -303,9 +315,33 @@ fn scan_nef_files_recursive(dir: &Path, nef_files: &mut Vec<PathBuf>) -> Result<
     Ok(())
 }
 
+pub fn is_nef_asset_path(path: &Path) -> bool {
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("nef"))
+    {
+        return true;
+    }
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("enc"))
+        && path
+            .file_stem()
+            .map(Path::new)
+            .and_then(Path::extension)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("nef"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nef_inventory_includes_authenticated_envelopes_only_with_nef_inner_extension() {
+        assert!(is_nef_asset_path(Path::new("capture.NEF")));
+        assert!(is_nef_asset_path(Path::new("capture.nef.enc")));
+        assert!(!is_nef_asset_path(Path::new("capture.tiff.enc")));
+        assert!(!is_nef_asset_path(Path::new("capture.enc")));
+    }
 
     #[test]
     fn test_parse_filename() {

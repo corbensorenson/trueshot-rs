@@ -5,8 +5,7 @@
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 // use rayon::prelude::*; // Currently unused
 
@@ -338,8 +337,8 @@ const NIKON_HUFFMAN_TREES: [&[u8]; 6] = [
 
 impl NikonCompressionMeta {
     /// Parse Nikon compression metadata from MakerNote tag 0x96
-    pub fn parse_from_makernote(
-        reader: &mut BufReader<&mut File>,
+    pub fn parse_from_makernote<R: Read + Seek>(
+        reader: &mut R,
         offset: u64,
         bits_per_sample: u8,
     ) -> Result<Self> {

@@ -379,7 +379,25 @@ pub fn observe_nef_roi(
     radiance_anchor_exposure: f32,
     config: RawObservationConfig,
 ) -> Result<RawCaptureObservation> {
-    let mut parser = Z9NefParser::new(path);
+    observe_nef_roi_with_key(
+        path,
+        roi,
+        sensor_profile,
+        radiance_anchor_exposure,
+        config,
+        None,
+    )
+}
+
+pub fn observe_nef_roi_with_key(
+    path: &Path,
+    roi: Roi,
+    sensor_profile: &SensorNoiseProfile,
+    radiance_anchor_exposure: f32,
+    config: RawObservationConfig,
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<RawCaptureObservation> {
+    let mut parser = Z9NefParser::for_path(path, encrypted_key)?;
     parser
         .parse()
         .with_context(|| format!("Parse adaptive RAW observation {}", path.display()))?;
@@ -411,7 +429,17 @@ pub fn observe_nef_reference(
     sensor_profile: &SensorNoiseProfile,
     config: RawObservationConfig,
 ) -> Result<RawCaptureObservation> {
-    let mut parser = Z9NefParser::new(path);
+    observe_nef_reference_with_key(path, roi, sensor_profile, config, None)
+}
+
+pub fn observe_nef_reference_with_key(
+    path: &Path,
+    roi: Roi,
+    sensor_profile: &SensorNoiseProfile,
+    config: RawObservationConfig,
+    encrypted_key: Option<&[u8; 32]>,
+) -> Result<RawCaptureObservation> {
+    let mut parser = Z9NefParser::for_path(path, encrypted_key)?;
     parser
         .parse()
         .with_context(|| format!("Parse adaptive RAW reference {}", path.display()))?;

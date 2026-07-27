@@ -263,12 +263,24 @@ impl LensPsfProfile {
     }
 
     pub fn load_json(path: &Path) -> Result<Self> {
-        bounded_read(path, "Lens PSF profile").and_then(|bytes| {
-            let mut profile: Self = serde_json::from_slice(&bytes)?;
-            profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
-            profile.validate()?;
-            Ok(profile)
-        })
+        Self::load_json_with_key(path, None)
+    }
+
+    pub fn load_json_with_key(path: &Path, encrypted_key: Option<&[u8; 32]>) -> Result<Self> {
+        let bytes = if path.extension().and_then(|value| value.to_str()) == Some("enc") {
+            let key = encrypted_key.context("Encrypted lens PSF profile requires a key")?;
+            trueshot_storage::encrypted::decrypt_to_vec(
+                path,
+                key,
+                MAX_LENS_PSF_ARTIFACT_BYTES as usize,
+            )?
+        } else {
+            bounded_read(path, "Lens PSF profile")?
+        };
+        let mut profile: Self = serde_json::from_slice(&bytes)?;
+        profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        profile.validate()?;
+        Ok(profile)
     }
 
     pub fn save_json(&self, path: &Path) -> Result<()> {

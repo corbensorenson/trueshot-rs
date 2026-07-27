@@ -18,6 +18,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-opentelemetry = "0.22"
 trueshot-core = { path = "../trueshot-core", features = ["wgpu", "vision", "gpu"] }
 trueshot-device-manager = { path = "../trueshot-device-manager", features = ["real_cam"] }
+trueshot-storage = { path = "../trueshot-storage" }
 config = "0.15.6"
 anyhow = "1.0"
 async-trait = "0.1"
@@ -61,6 +62,7 @@ utoipa = { version = "4.2.3", features = ["chrono", "uuid"] }
 tar = "0.4"
 flate2 = "1.0"
 redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+zeroize = "1.7"
 [lints]
 workspace = true
 

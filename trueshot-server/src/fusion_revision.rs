@@ -22,6 +22,7 @@ use trueshot_core::fusion_replay::{
 use trueshot_core::scheduler::Job;
 use uuid::Uuid;
 use walkdir::WalkDir;
+use zeroize::Zeroizing;
 
 pub const FUSION_REVISION_JOB_KIND: &str = "local_fusion_revision";
 const MAX_REVISION_INPUT_FILES: usize = 2_000_000;
@@ -216,7 +217,10 @@ impl Job for FusionRevisionJob {
             .take()
             .context("Fusion processor stderr is unavailable")?;
         let stderr_task = tokio::spawn(read_bounded_stderr(stderr));
-        let envelope_bytes = serde_json::to_vec(&prepared.envelope)?;
+        let envelope_bytes = Zeroizing::new(serde_json::to_vec(&FusionProcessorInput {
+            envelope: &prepared.envelope,
+            encrypted_raw_key: prepared.encrypted_raw_key.as_deref(),
+        })?);
         let mut stdin = child
             .stdin
             .take()
@@ -311,6 +315,13 @@ struct PreparedRevision {
     sensor_correction_profile: Option<PathBuf>,
     lens_psf_profile: Option<PathBuf>,
     encrypt_revision_outputs: bool,
+    encrypted_raw_key: Option<Zeroizing<[u8; 32]>>,
+}
+
+#[derive(Serialize)]
+struct FusionProcessorInput<'a> {
+    envelope: &'a FusionRevisionEnvelope,
+    encrypted_raw_key: Option<&'a [u8; 32]>,
 }
 
 fn prepare_revision(
@@ -332,7 +343,25 @@ fn prepare_revision(
     }
     let raw_root = canonical_real_directory(&project_root.join("raw"), &project_root)?;
     let output_root = canonical_real_directory(&project_root.join("output"), &project_root)?;
-    reject_encrypted_or_symlinked_raw(&raw_root)?;
+    let encrypted_raw_paths = inspect_raw_inputs(&raw_root)?;
+    let mut encrypted_project_key = if encrypted_raw_paths.is_empty() {
+        None
+    } else {
+        let master = require_master_key(&config.privacy, &config.paths.projects_dir)?;
+        let key = ProjectKeyStore::new(&config.paths.projects_dir, master)
+            .load_or_create(&payload.project_id)?;
+        for path in &encrypted_raw_paths {
+            trueshot_storage::encrypted::SeekableEncryptedFile::open(path, &key).with_context(
+                || {
+                    format!(
+                        "Encrypted RAW {} is not an authenticated seekable TSE2 asset",
+                        path.display()
+                    )
+                },
+            )?;
+        }
+        Some(Zeroizing::new(key))
+    };
 
     let report_path = output_root.join(&payload.report_path);
     let report_bytes = read_bounded_project_artifact(
@@ -371,11 +400,38 @@ fn prepare_revision(
     };
     envelope.validate()?;
     let replay = envelope.replay()?;
-    let sensor_noise_profile =
-        resolve_replay_profile(&project_root, replay.sensor_noise_profile.as_ref())?;
-    let sensor_correction_profile =
-        resolve_replay_profile(&project_root, replay.sensor_correction_profile.as_ref())?;
-    let lens_psf_profile = resolve_replay_profile(&project_root, replay.lens_psf_profile.as_ref())?;
+    let encrypted_profile_present = [
+        replay.sensor_noise_profile.as_ref(),
+        replay.sensor_correction_profile.as_ref(),
+        replay.lens_psf_profile.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .try_fold(false, |found, artifact| {
+        Ok::<_, anyhow::Error>(
+            found || replay_profile_uses_encrypted_file(&project_root, artifact)?,
+        )
+    })?;
+    if encrypted_profile_present && encrypted_project_key.is_none() {
+        let master = require_master_key(&config.privacy, &config.paths.projects_dir)?;
+        encrypted_project_key = Some(Zeroizing::new(
+            ProjectKeyStore::new(&config.paths.projects_dir, master)
+                .load_or_create(&payload.project_id)?,
+        ));
+    }
+    let profile_key = encrypted_project_key.as_deref();
+    let sensor_noise_profile = resolve_replay_profile(
+        &project_root,
+        replay.sensor_noise_profile.as_ref(),
+        profile_key,
+    )?;
+    let sensor_correction_profile = resolve_replay_profile(
+        &project_root,
+        replay.sensor_correction_profile.as_ref(),
+        profile_key,
+    )?;
+    let lens_psf_profile =
+        resolve_replay_profile(&project_root, replay.lens_psf_profile.as_ref(), profile_key)?;
     let encrypt_revision_outputs = policy_for_project(
         &config.paths.projects_dir,
         &payload.project_id,
@@ -392,25 +448,69 @@ fn prepare_revision(
         sensor_correction_profile,
         lens_psf_profile,
         encrypt_revision_outputs,
+        encrypted_raw_key: encrypted_project_key,
     })
+}
+
+fn replay_profile_uses_encrypted_file(
+    project_root: &Path,
+    artifact: &FusionReplayArtifact,
+) -> Result<bool> {
+    artifact.validate()?;
+    let clear = project_root.join(&artifact.project_relative_path);
+    if clear.is_file() {
+        return Ok(false);
+    }
+    Ok(PathBuf::from(format!("{}.enc", clear.display())).is_file())
 }
 
 fn resolve_replay_profile(
     project_root: &Path,
     artifact: Option<&FusionReplayArtifact>,
+    encrypted_key: Option<&[u8; 32]>,
 ) -> Result<Option<PathBuf>> {
     let Some(artifact) = artifact else {
         return Ok(None);
     };
     artifact.validate()?;
-    let path = project_root.join(&artifact.project_relative_path);
+    let clear = project_root.join(&artifact.project_relative_path);
+    let path = if clear.is_file() {
+        clear
+    } else {
+        PathBuf::from(format!("{}.enc", clear.display()))
+    };
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("Inspect replay profile {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("Fusion replay profile must be a real project file");
+    }
     let canonical = path
         .canonicalize()
         .with_context(|| format!("Resolve replay profile {}", path.display()))?;
     if !canonical.starts_with(project_root) || !canonical.is_file() {
         anyhow::bail!("Fusion replay profile escaped the project");
     }
-    let observed = sha256_file(&canonical)?;
+    let observed = if canonical.extension().and_then(|value| value.to_str()) == Some("enc") {
+        let key = encrypted_key.context("Encrypted replay profile key is unavailable")?;
+        let mut reader = trueshot_storage::encrypted::SeekableEncryptedFile::open(&canonical, key)?;
+        if reader.plaintext_len()
+            > trueshot_core::sensor_correction::MAX_SENSOR_CORRECTION_PROFILE_BYTES
+        {
+            anyhow::bail!("Encrypted replay profile exceeds the bounded size limit");
+        }
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = std::io::Read::read(&mut reader, &mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        hex::encode(digest.finalize())
+    } else {
+        sha256_file(&canonical)?
+    };
     if observed != artifact.sha256 {
         anyhow::bail!("Fusion replay profile digest changed");
     }
@@ -462,8 +562,10 @@ fn validate_candidate(root: &Path, candidate: &Path) -> Result<()> {
     Ok(())
 }
 
-fn reject_encrypted_or_symlinked_raw(raw_root: &Path) -> Result<()> {
+fn inspect_raw_inputs(raw_root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = 0usize;
+    let mut raw_files = 0usize;
+    let mut encrypted_raw_paths = Vec::new();
     for entry in WalkDir::new(raw_root).follow_links(false) {
         let entry = entry.context("Inspect fusion revision RAW input")?;
         if entry.file_type().is_symlink() {
@@ -474,17 +576,18 @@ fn reject_encrypted_or_symlinked_raw(raw_root: &Path) -> Result<()> {
             if files > MAX_REVISION_INPUT_FILES {
                 anyhow::bail!("Fusion revision RAW input exceeds the bounded file limit");
             }
-            if entry.path().extension().and_then(|value| value.to_str()) == Some("enc") {
-                anyhow::bail!(
-                    "Encrypted RAW refusion is unavailable without authenticated seekable decoding; decrypt the RAW scope explicitly"
-                );
+            if trueshot_core::exif_parser::is_nef_asset_path(entry.path()) {
+                raw_files = raw_files.saturating_add(1);
+                if entry.path().extension().and_then(|value| value.to_str()) == Some("enc") {
+                    encrypted_raw_paths.push(entry.path().to_path_buf());
+                }
             }
         }
     }
-    if files == 0 {
+    if raw_files == 0 {
         anyhow::bail!("Fusion revision RAW input is empty");
     }
-    Ok(())
+    Ok(encrypted_raw_paths)
 }
 
 fn encrypt_revision_outputs(
@@ -649,5 +752,34 @@ mod tests {
     fn cancellation_registry_is_bounded_to_active_identity() {
         let executor = FusionRevisionExecutor::default();
         assert!(!executor.cancel(Uuid::new_v4()));
+    }
+
+    #[test]
+    fn encrypted_replay_profile_is_plaintext_digest_bound_and_wrong_key_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let project_root = directory.path().canonicalize().unwrap();
+        let raw = project_root.join("raw");
+        std::fs::create_dir(&raw).unwrap();
+        let clear = raw.join("noise.json");
+        let encrypted = raw.join("noise.json.enc");
+        let payload = br#"{"schema":"trueshot.sensor-noise.v1"}"#;
+        let key = [0x51u8; 32];
+        std::fs::write(&clear, payload).unwrap();
+        trueshot_storage::encrypted::encrypt_file(&clear, &encrypted, &key, 64 * 1024).unwrap();
+        std::fs::remove_file(&clear).unwrap();
+        let artifact = FusionReplayArtifact {
+            project_relative_path: "raw/noise.json".to_string(),
+            sha256: hex::encode(Sha256::digest(payload)),
+        };
+
+        assert!(replay_profile_uses_encrypted_file(&project_root, &artifact).unwrap());
+        assert_eq!(
+            resolve_replay_profile(&project_root, Some(&artifact), Some(&key)).unwrap(),
+            Some(encrypted.canonicalize().unwrap())
+        );
+        assert!(
+            resolve_replay_profile(&project_root, Some(&artifact), Some(&[0x52u8; 32])).is_err()
+        );
+        assert!(!clear.exists());
     }
 }

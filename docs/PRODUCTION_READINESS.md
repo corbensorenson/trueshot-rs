@@ -24,6 +24,9 @@ This checklist is the minimum bar for a production deployment. It assumes `TRUES
   - `privacy.audit_anchor_url` must be set or startup will fail.
 - Set a master key for encryption-at-rest if enabled:
   - `TRUESHOT_MASTER_KEY` (base64, 32 bytes) or `privacy.encryption_master_key_path`.
+- New encrypted assets use authenticated-seekable `TSE2`. Inventory and migrate
+  legacy `TSE1` RAW before enabling measured refusion; bounded legacy report
+  reads remain supported.
 
 ### Baseline Observability
 

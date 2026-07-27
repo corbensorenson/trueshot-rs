@@ -34,14 +34,21 @@ impl PreviewExtractor {
             .with_context(|| format!("Failed to open NEF file: {}", file_path))?;
 
         let mut reader = BufReader::new(&mut file);
+        self.extract_preview_jpeg_from_reader(&mut reader, true)
+    }
 
+    pub fn extract_preview_jpeg_from_reader<R: Read + Seek>(
+        &mut self,
+        reader: &mut R,
+        allow_full_scan: bool,
+    ) -> Result<Vec<u8>> {
         // Read TIFF header
-        let header = self.parser.read_header(&mut reader)?;
+        let header = self.parser.read_header(reader)?;
 
         // Try different methods to find preview JPEG
 
         // Method 1: Look in IFD0 for JPEG Interchange Format (Z9 primary method)
-        if let Ok(jpeg_data) = self.extract_from_ifd0(&mut reader, &header) {
+        if let Ok(jpeg_data) = self.extract_from_ifd0(reader, &header) {
             if !jpeg_data.is_empty() {
                 tracing::info!(
                     "Found preview JPEG in IFD0 (size: {} bytes)",
@@ -52,7 +59,7 @@ impl PreviewExtractor {
         }
 
         // Method 2: Look in SubIFDs for additional previews
-        if let Ok(jpeg_data) = self.extract_from_subifd(&mut reader, &header) {
+        if let Ok(jpeg_data) = self.extract_from_subifd(reader, &header) {
             if !jpeg_data.is_empty() {
                 tracing::info!(
                     "Found preview JPEG in SubIFD (size: {} bytes)",
@@ -63,7 +70,7 @@ impl PreviewExtractor {
         }
 
         // Method 3: Look in IFD1 (thumbnail directory)
-        if let Ok(jpeg_data) = self.extract_from_ifd1(&mut reader, &header) {
+        if let Ok(jpeg_data) = self.extract_from_ifd1(reader, &header) {
             if !jpeg_data.is_empty() {
                 tracing::info!(
                     "Found preview JPEG in IFD1 (size: {} bytes)",
@@ -74,22 +81,24 @@ impl PreviewExtractor {
         }
 
         // Method 4: Scan for JPEG markers in the file (fallback)
-        if let Ok(jpeg_data) = self.scan_for_jpeg_markers(&mut reader) {
-            if !jpeg_data.is_empty() {
-                tracing::info!(
-                    "Found preview JPEG by scanning (size: {} bytes)",
-                    jpeg_data.len()
-                );
-                return Ok(jpeg_data);
+        if allow_full_scan {
+            if let Ok(jpeg_data) = self.scan_for_jpeg_markers(reader) {
+                if !jpeg_data.is_empty() {
+                    tracing::info!(
+                        "Found preview JPEG by scanning (size: {} bytes)",
+                        jpeg_data.len()
+                    );
+                    return Ok(jpeg_data);
+                }
             }
         }
 
         Err(anyhow::anyhow!("No preview JPEG found in NEF file"))
     }
 
-    fn extract_from_ifd1(
+    fn extract_from_ifd1<R: Read + Seek>(
         &mut self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         header: &super::tiff::TiffHeader,
     ) -> Result<Vec<u8>> {
         // Read IFD0 first
@@ -127,9 +136,9 @@ impl PreviewExtractor {
         Err(anyhow::anyhow!("No JPEG in IFD1"))
     }
 
-    fn extract_from_ifd0(
+    fn extract_from_ifd0<R: Read + Seek>(
         &mut self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         header: &super::tiff::TiffHeader,
     ) -> Result<Vec<u8>> {
         // Read IFD0
@@ -176,9 +185,9 @@ impl PreviewExtractor {
         Err(anyhow::anyhow!("No JPEG in IFD0"))
     }
 
-    fn extract_from_subifd(
+    fn extract_from_subifd<R: Read + Seek>(
         &mut self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         header: &super::tiff::TiffHeader,
     ) -> Result<Vec<u8>> {
         // Read IFD0 to find SubIFDs tag
@@ -217,7 +226,7 @@ impl PreviewExtractor {
         Err(anyhow::anyhow!("No JPEG in SubIFDs"))
     }
 
-    fn scan_for_jpeg_markers(&mut self, reader: &mut BufReader<&mut File>) -> Result<Vec<u8>> {
+    fn scan_for_jpeg_markers<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Vec<u8>> {
         // Scan the file for JPEG SOI (Start of Image) markers
         reader.seek(SeekFrom::Start(0))?;
 

@@ -9,6 +9,11 @@ anyhow = "1.0"
 sysinfo = "0.29"
 tokio = { version = "1.28", features = ["fs", "io-util", "rt"] }
 nalgebra = "0.32" # for octree point types
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = "1.7"
+hkdf = "0.12"
+sha2 = "0.10"
 
 [features]
 default = []

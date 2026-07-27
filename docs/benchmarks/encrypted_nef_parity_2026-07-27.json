@@ -1,0 +1,69 @@
+{
+  "schema": "trueshot.encrypted-nef-qualification.v1",
+  "recorded_at": "2026-07-27",
+  "platform": {
+    "os": "macOS 15.0 (24A5320a)",
+    "architecture": "arm64",
+    "build_profile": "release"
+  },
+  "fixture": {
+    "redistributable": false,
+    "camera": "Nikon Z9",
+    "plaintext_bytes": 47307464,
+    "encrypted_bytes": 47308264,
+    "encoded_overhead_bytes": 800,
+    "chunk_size_bytes": 1048576,
+    "chunks": 46,
+    "roi": {
+      "width": 512,
+      "height": 512,
+      "native_cfa_type": "u16"
+    }
+  },
+  "runs": 5,
+  "seconds": {
+    "encryption": {
+      "p50": 0.392,
+      "p95_observed_max": 0.406
+    },
+    "plaintext_parse": {
+      "p50": 0.0,
+      "p95_observed_max": 0.0
+    },
+    "plaintext_roi_decode": {
+      "p50": 0.136,
+      "p95_observed_max": 0.136
+    },
+    "encrypted_parse": {
+      "p50": 0.018,
+      "p95_observed_max": 0.019
+    },
+    "encrypted_roi_decode": {
+      "p50": 0.537,
+      "p95_observed_max": 0.538
+    },
+    "encrypted_parse_and_decode": {
+      "p50": 0.555,
+      "p95_observed_max": 0.556
+    },
+    "complete_test": {
+      "p50": 1.084,
+      "p95_observed_max": 1.098
+    }
+  },
+  "integrity": {
+    "native_bayer_exact_equal_runs": 5,
+    "plaintext_sibling_created": false,
+    "wrong_key_rejected": true,
+    "header_tamper_rejected": true,
+    "chunk_swap_rejected": true,
+    "truncation_rejected": true,
+    "append_rejected": true
+  },
+  "interpretation": {
+    "bounded_direct_exif_reduced_encrypted_parse_seconds_from": 0.425,
+    "bounded_direct_exif_reduced_encrypted_parse_seconds_to_p50": 0.018,
+    "single_large_compressed_strip_limits_roi_ciphertext_selectivity": true,
+    "claim_scope": "storage integrity, exact decode parity, and one private-fixture performance integration gate"
+  }
+}

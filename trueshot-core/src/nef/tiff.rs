@@ -3,8 +3,7 @@
 /// This module handles the low-level TIFF structure parsing.
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug, Clone)]
 pub enum ByteOrder {
@@ -54,7 +53,7 @@ impl TiffParser {
         }
     }
 
-    pub fn read_header(&mut self, reader: &mut BufReader<&mut File>) -> Result<TiffHeader> {
+    pub fn read_header<R: Read + Seek>(&mut self, reader: &mut R) -> Result<TiffHeader> {
         let mut header_bytes = [0u8; 8];
         reader
             .read_exact(&mut header_bytes)
@@ -85,9 +84,9 @@ impl TiffParser {
         })
     }
 
-    pub fn read_ifd(
+    pub fn read_ifd<R: Read + Seek>(
         &self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         offset: u64,
     ) -> Result<HashMap<u16, IfdEntry>> {
         // Seek to IFD offset
@@ -130,7 +129,7 @@ impl TiffParser {
         Ok(ifd)
     }
 
-    pub fn read_next_ifd_offset(&self, reader: &mut BufReader<&mut File>) -> Result<u64> {
+    pub fn read_next_ifd_offset<R: Read + Seek>(&self, reader: &mut R) -> Result<u64> {
         let mut offset_bytes = [0u8; 4];
         reader
             .read_exact(&mut offset_bytes)
@@ -138,9 +137,9 @@ impl TiffParser {
         Ok(self.read_u32(&offset_bytes)? as u64)
     }
 
-    pub fn read_tag_data(
+    pub fn read_tag_data<R: Read + Seek>(
         &self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         entry: &IfdEntry,
     ) -> Result<Vec<u8>> {
         let data_size = self
@@ -164,11 +163,7 @@ impl TiffParser {
         }
     }
 
-    pub fn read_ascii(
-        &self,
-        reader: &mut BufReader<&mut File>,
-        entry: &IfdEntry,
-    ) -> Result<String> {
+    pub fn read_ascii<R: Read + Seek>(&self, reader: &mut R, entry: &IfdEntry) -> Result<String> {
         if entry.data_type != TiffDataType::Ascii as u16 {
             anyhow::bail!(
                 "TIFF tag {} is type {}, expected ASCII",
@@ -197,9 +192,9 @@ impl TiffParser {
         Ok(value.to_owned())
     }
 
-    pub fn read_u32_array(
+    pub fn read_u32_array<R: Read + Seek>(
         &self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         entry: &IfdEntry,
     ) -> Result<Vec<u32>> {
         let data = self.read_tag_data(reader, entry)?;
@@ -212,9 +207,9 @@ impl TiffParser {
         Ok(result)
     }
 
-    pub fn read_u16_array(
+    pub fn read_u16_array<R: Read + Seek>(
         &self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         entry: &IfdEntry,
     ) -> Result<Vec<u16>> {
         let data = self.read_tag_data(reader, entry)?;
@@ -227,9 +222,9 @@ impl TiffParser {
         Ok(result)
     }
 
-    pub fn read_unsigned_scalar(
+    pub fn read_unsigned_scalar<R: Read + Seek>(
         &self,
-        reader: &mut BufReader<&mut File>,
+        reader: &mut R,
         entry: &IfdEntry,
     ) -> Result<u32> {
         if entry.count == 0 {
@@ -250,6 +245,23 @@ impl TiffParser {
                 other
             ),
         }
+    }
+
+    pub fn read_rational<R: Read + Seek>(&self, reader: &mut R, entry: &IfdEntry) -> Result<f64> {
+        if entry.data_type != TiffDataType::Rational as u16 || entry.count == 0 || entry.count > 16
+        {
+            anyhow::bail!("TIFF tag {} is not a non-empty rational", entry.tag);
+        }
+        let data = self.read_tag_data(reader, entry)?;
+        if data.len() < 8 {
+            anyhow::bail!("TIFF rational tag {} is truncated", entry.tag);
+        }
+        let numerator = self.read_u32(&data[..4])?;
+        let denominator = self.read_u32(&data[4..8])?;
+        if denominator == 0 {
+            anyhow::bail!("TIFF rational tag {} has a zero denominator", entry.tag);
+        }
+        Ok(f64::from(numerator) / f64::from(denominator))
     }
 
     fn read_u16(&self, bytes: &[u8]) -> Result<u16> {
