@@ -4,24 +4,30 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      rust-patch-updates:
+      rust-compatible-updates:
         update-types:
+          - minor
           - patch
 
   - package-ecosystem: npm
     directory: /trueshot-dashboard
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      dashboard-patch-updates:
+      dashboard-compatible-updates:
         update-types:
+          - minor
           - patch
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    groups:
+      action-updates:
+        patterns:
+          - "*"
