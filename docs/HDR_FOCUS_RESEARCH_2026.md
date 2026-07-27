@@ -57,8 +57,16 @@ Source: [Bayesian multi-exposure image fusion for robust high dynamic range ptyc
 
 Implementation state (2026-07-27): TrueShot's paired calibration command now
 fits two independently gated artifacts in one streamed decode pass. Exact-ISO
-noise profiles drive censored Poisson-Gaussian inference and posterior
-uncertainty. An optics-bound spatial profile fits a compact per-CFA
+noise profiles drive a bounded analytic censored Poisson-Gaussian survival
+likelihood and posterior uncertainty. Ordinary observations use the calibrated
+heteroscedastic variance and retain the allocation-free robust weighted
+least-squares fast path. A clipped observation contributes its one-sided
+survival probability, including the variance derivative in the analytic
+score/Fisher information; a stable inverse Mills ratio handles far-tail
+constraints, and a six-sigma compatibility gate identifies contradictory
+clipping evidence instead of forcing a biased estimate. All-clipped pixels
+remain attributed lower bounds with infinite uncertainty rather than invented
+detail. An optics-bound spatial profile fits a compact per-CFA
 full-sensor gain grid in the log domain, records the measured focus envelope,
 and identifies only persistent, pair-agreeing defect pixels. Complete flat
 pairs are held out; publication requires corrected p95 relative error at most
@@ -72,6 +80,16 @@ geometry/bit depth, lens, aperture, focal length, focus envelope, crop
 containment, and Bayer origin mismatches fail closed. The exact correction map
 and profile digest are exported. Retained real integrating-sphere, thermal,
 exposure-duration, and focus-envelope qualification remain.
+
+The conditional-censor simulation records 28,021 clipping events across
+40,000 deterministic draws: nominal 95% intervals cover 96.203%, mean bias is
+0.005563 against a 0.15-sigma gate, and compatible evidence produces 0% false
+conflicts. The independent ordinary end-to-end posterior gate covers
+3,472/3,600 pixels (96.444%). The private 21-frame NEF integration fixture has
+no clipped pixels and no exact sensor profile, so it verifies production
+execution and diagnostics but cannot qualify the real calibrated posterior.
+Exact evidence is retained in
+`docs/benchmarks/censored_pg_qualification_2026-07-27.json`.
 
 ### 2. Physical focus coordinates and PSF-aware depth
 
@@ -204,6 +222,23 @@ bytes, and the atomic export report recorded the Apple M1 adapter, no fallback,
 exact measured-CFA policy, and no generative reconstruction. This proves the
 real integration path, but the private stack is not a substitute for a
 redistributable chart corpus or release-mode end-to-end qualification.
+
+The release native-fusion benchmark on that group measured 358.68 ms scan,
+0.90 seconds decode, 1.17 seconds fusion, and 0.07 seconds demosaic/display.
+It reported p05/p50/p95 radiance uncertainty of
+0.000020/0.000063/0.000206, 192 selectively aligned cells, 40 disoccluded
+cells, and 679,020 depth-refused pixels. Two independent current-build
+production runs then produced byte-identical fused TIFF, fusion-state, source,
+boundary, and glare artifacts and semantically identical reports after
+output-path fields were removed. These are one-machine integration and
+repeatability measurements, not p50/p95 throughput or competitor claims.
+
+Production admission also now accounts for Apple unified memory through Mach
+free, inactive, and speculative pages rather than `sysinfo`'s near-free-only
+value. On the retained 16 GiB M1, the old path reported only 42.5-140.9 MiB
+available and rejected a bounded 245.6 MiB job; the corrected path reported
+5.1 GiB reclaimable and completed under a 512 MiB explicit budget. Active,
+wired, and compressed memory remain excluded.
 
 ### 5. Exposure-aware local alignment and frequency-separated deghosting
 

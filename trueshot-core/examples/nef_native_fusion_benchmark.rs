@@ -5,7 +5,10 @@ use trueshot_core::demosaic_ahd::ahd_demosaic_f32_owned;
 use trueshot_core::export::{
     generate_output_path, save_depth_tiff, save_png, save_tiff16_from_f32,
 };
-use trueshot_core::native_fusion::{fuse_native_group, NativeFusionConfig};
+use trueshot_core::native_fusion::{
+    fuse_native_group, NativeFusionConfig, FUSION_FLAG_CENSORED, FUSION_FLAG_CENSOR_CONFLICT,
+    FUSION_FLAG_OUTLIER_REJECTED, FUSION_FLAG_SOURCE_FALLBACK, FUSION_FLAG_UNCALIBRATED_NOISE,
+};
 use trueshot_core::postprocess::postprocess_f32;
 use trueshot_core::smart_loader::{NativeGroupArena, SmartLoader};
 use trueshot_core::timing::HierarchicalTimer;
@@ -114,10 +117,30 @@ fn run(
         let transforms = fused.transforms.clone();
         let frame_alignments = fused.frame_alignments.clone();
         let depth_refusion_pixels = fused.depth_refusion_pixels;
+        let noise_model_calibrated = fused.noise_model_calibrated;
+        let count_flag = |flag| {
+            fused
+                .fusion_flags
+                .iter()
+                .filter(|value| **value & flag != 0)
+                .count()
+        };
+        let censored_pixels = count_flag(FUSION_FLAG_CENSORED);
+        let censor_conflict_pixels = count_flag(FUSION_FLAG_CENSOR_CONFLICT);
+        let rejected_pixels = count_flag(FUSION_FLAG_OUTLIER_REJECTED);
+        let fallback_pixels = count_flag(FUSION_FLAG_SOURCE_FALLBACK);
+        let uncalibrated_pixels = count_flag(FUSION_FLAG_UNCALIBRATED_NOISE);
         let mut depth_values: Vec<f32> = fused.depth.iter().copied().collect();
         let mut confidence_values: Vec<f32> = fused.confidence.iter().copied().collect();
+        let mut uncertainty_values: Vec<f32> = fused
+            .radiance_uncertainty
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect();
         depth_values.sort_unstable_by(f32::total_cmp);
         confidence_values.sort_unstable_by(f32::total_cmp);
+        uncertainty_values.sort_unstable_by(f32::total_cmp);
         let percentile = |values: &[f32], fraction: f32| {
             values[((values.len() - 1) as f32 * fraction).round() as usize]
         };
@@ -203,6 +226,22 @@ fn run(
             percentile(&confidence_values, 0.05),
             percentile(&confidence_values, 0.50),
             percentile(&confidence_values, 0.95),
+        );
+        if uncertainty_values.is_empty() {
+            println!("  radiance uncertainty: no finite posterior intervals");
+        } else {
+            println!(
+                "  uncertainty p05={:.6} p50={:.6} p95={:.6} | calibrated={}",
+                percentile(&uncertainty_values, 0.05),
+                percentile(&uncertainty_values, 0.50),
+                percentile(&uncertainty_values, 0.95),
+                noise_model_calibrated,
+            );
+        }
+        println!(
+            "  evidence pixels: censored={censored_pixels}, conflicts={censor_conflict_pixels}, \
+             rejected={rejected_pixels}, fallback={fallback_pixels}, \
+             uncalibrated={uncalibrated_pixels}"
         );
         println!(
             "  depth-consistent refusion: {} / {} pixels ({:.2}%)",

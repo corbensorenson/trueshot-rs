@@ -11018,6 +11018,7 @@ dependencies = [
  "kdtree",
  "keyring",
  "lazy_static",
+ "libc",
  "lz4_flex",
  "mac_address",
  "mdns-sd",

@@ -164,12 +164,8 @@ pub fn validate_mesh_vertex_count(count: usize) -> ValidationResult {
 
 /// Validate memory availability
 pub fn validate_memory_available(needed_gb: f64) -> ValidationResult {
-    use sysinfo::System;
-
-    let mut sys = System::new_all();
-    sys.refresh_memory();
-
-    let available_gb = sys.available_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+    let available_gb =
+        crate::resource_manager::available_memory_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
 
     // Require 20% safety margin
     let required_with_margin = needed_gb * 1.2;

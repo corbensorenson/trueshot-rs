@@ -22,6 +22,8 @@ use rayon::prelude::*;
 
 const RGGB: [u8; 4] = [0, 1, 1, 2];
 const MAX_HDR_EXPOSURES: usize = 32;
+const MAX_CENSORED_POSTERIOR_ITERATIONS: usize = 8;
+const CENSOR_CONFLICT_SIGMA: f64 = 6.0;
 
 pub const FUSION_FLAG_CENSORED: u8 = 1 << 0;
 pub const FUSION_FLAG_OUTLIER_REJECTED: u8 = 1 << 1;
@@ -571,6 +573,8 @@ struct FrameCalibration {
 struct HdrSample {
     radiance: f32,
     variance: f32,
+    read_variance: f32,
+    shot_variance_per_radiance: f32,
     lower_bound: f32,
     fallback_score: f32,
     frame_index: u16,
@@ -585,6 +589,15 @@ struct HdrEstimate {
     uncertainty: f32,
     source_index: u16,
     flags: u8,
+    correction_flags: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CensoredPosterior {
+    radiance: f32,
+    uncertainty: f32,
+    used_censored: bool,
+    censor_conflict: bool,
     correction_flags: u8,
 }
 
@@ -2478,16 +2491,26 @@ fn fuse_hdr_sample(
         let saturation_signal = calibration.noise_model.saturation_signal(range_dn);
         let censored = sensor_signal >= saturation_signal;
         let radiance = signal * radiance_scale;
-        let sensor_variance = calibration.noise_model.normalized_variance(
-            site,
-            sensor_signal.min(saturation_signal),
-            range_dn,
-        );
-        let variance = (sensor_variance * gain * gain * radiance_scale * radiance_scale).max(1e-16);
+        let radiance_gain = gain * radiance_scale;
+        let read_variance_dn = calibration.noise_model.read_noise_dn[site].powi(2)
+            + calibration.noise_model.black_drift_dn[site].powi(2);
+        let read_variance = (read_variance_dn * (radiance_gain / range_dn).powi(2)).max(1e-16);
+        let shot_variance_per_radiance =
+            (radiance_gain / (calibration.noise_model.electrons_per_dn[site] * range_dn)).max(0.0);
+        let variance = (read_variance
+            + shot_variance_per_radiance
+                * if censored {
+                    saturation_signal * radiance_gain
+                } else {
+                    radiance
+                })
+        .max(1e-16);
         if radiance.is_finite() && variance.is_finite() && sample_count < samples.len() {
             samples[sample_count] = HdrSample {
                 radiance,
                 variance,
+                read_variance,
+                shot_variance_per_radiance,
                 lower_bound: saturation_signal * gain * radiance_scale,
                 fallback_score: calibration.exposure * (1.0 - sensor_signal.min(1.0)),
                 frame_index: u16::try_from(frame_index).unwrap_or(u16::MAX),
@@ -2563,7 +2586,8 @@ fn fuse_hdr_sample(
     let mut source_index = u16::MAX;
     let mut rejected = false;
     let mut correction_flags = 0u8;
-    for sample in usable.iter() {
+    let mut robust_factors = [0.0f32; MAX_HDR_EXPOSURES];
+    for (sample_index, sample) in usable.iter().enumerate() {
         let normalized_residual = if cutoff.is_finite() {
             (sample.radiance - center) / (cutoff * robust_scale)
         } else {
@@ -2576,6 +2600,7 @@ fn fuse_hdr_sample(
             rejected = true;
             0.0
         };
+        robust_factors[sample_index] = robust_weight;
         let weight = robust_weight / sample.variance;
         if weight > 0.0 {
             correction_flags |= sample.correction_flags;
@@ -2593,29 +2618,42 @@ fn fuse_hdr_sample(
         let mut uncertainty = robust_weight_sum.recip().sqrt();
         let weighted_residual = usable
             .iter()
-            .map(|sample| {
+            .zip(robust_factors)
+            .filter(|(_, robust_factor)| *robust_factor > 0.0)
+            .map(|(sample, robust_factor)| {
                 let residual = sample.radiance - radiance;
-                residual * residual / sample.variance
+                robust_factor * residual * residual / sample.variance
             })
             .sum::<f32>();
-        if uncensored_count > 1 {
-            uncertainty *= (weighted_residual / (uncensored_count - 1) as f32)
-                .max(1.0)
-                .sqrt();
-        }
-
-        let strongest_censored = valid
+        let effective_count = robust_factors[..uncensored_count]
             .iter()
-            .filter(|sample| sample.censored)
-            .max_by(|left, right| left.lower_bound.total_cmp(&right.lower_bound));
-        if let Some(sample) = strongest_censored {
-            if sample.lower_bound > radiance {
-                if sample.lower_bound <= radiance + cutoff.min(6.0) * uncertainty {
-                    radiance = sample.lower_bound;
-                    correction_flags |= sample.correction_flags;
-                } else {
-                    flags |= FUSION_FLAG_CENSOR_CONFLICT;
-                }
+            .filter(|factor| **factor > 0.0)
+            .count();
+        let residual_inflation = if effective_count > 1 {
+            (weighted_residual / (effective_count - 1) as f32)
+                .max(1.0)
+                .sqrt()
+        } else {
+            1.0
+        };
+        uncertainty *= residual_inflation;
+
+        if valid.iter().any(|sample| sample.censored) {
+            let posterior = solve_censored_poisson_gaussian(
+                usable,
+                &robust_factors[..uncensored_count],
+                valid,
+                radiance,
+                uncertainty,
+                residual_inflation,
+            );
+            radiance = posterior.radiance;
+            uncertainty = posterior.uncertainty;
+            if posterior.used_censored {
+                correction_flags |= posterior.correction_flags;
+            }
+            if posterior.censor_conflict {
+                flags |= FUSION_FLAG_CENSOR_CONFLICT;
             }
         }
         if rejected {
@@ -2646,6 +2684,176 @@ fn fuse_hdr_sample(
                 flags: flags | FUSION_FLAG_SOURCE_FALLBACK | FUSION_FLAG_OUTLIER_REJECTED,
                 correction_flags: sample.correction_flags,
             })
+    }
+}
+
+fn solve_censored_poisson_gaussian(
+    uncensored: &[HdrSample],
+    robust_factors: &[f32],
+    all_samples: &[HdrSample],
+    initial_radiance: f32,
+    initial_uncertainty: f32,
+    residual_inflation: f32,
+) -> CensoredPosterior {
+    let mut accepted_censored = [false; MAX_HDR_EXPOSURES];
+    let mut used_censored = false;
+    let mut censor_conflict = false;
+    let mut correction_flags = 0u8;
+    let initial = f64::from(initial_radiance.max(0.0));
+    let initial_variance = f64::from(initial_uncertainty.max(1e-8)).powi(2);
+
+    for (index, sample) in all_samples.iter().enumerate() {
+        if !sample.censored {
+            continue;
+        }
+        let constraint_variance =
+            hdr_variance_at(*sample, initial.max(f64::from(sample.lower_bound)));
+        let compatibility_sigma = (initial_variance + constraint_variance).sqrt();
+        if f64::from(sample.lower_bound) > initial + CENSOR_CONFLICT_SIGMA * compatibility_sigma {
+            censor_conflict = true;
+            continue;
+        }
+        accepted_censored[index] = true;
+        used_censored = true;
+        correction_flags |= sample.correction_flags;
+    }
+
+    if !used_censored {
+        return CensoredPosterior {
+            radiance: initial_radiance,
+            uncertainty: initial_uncertainty,
+            used_censored,
+            censor_conflict,
+            correction_flags,
+        };
+    }
+
+    let mut radiance = initial;
+    for _ in 0..MAX_CENSORED_POSTERIOR_ITERATIONS {
+        let (score, information) = censored_posterior_terms(
+            radiance,
+            uncensored,
+            robust_factors,
+            all_samples,
+            &accepted_censored,
+        );
+        if !score.is_finite() || !information.is_finite() || information <= 0.0 {
+            break;
+        }
+        let posterior_sigma = information.recip().sqrt();
+        let maximum_step = (4.0 * posterior_sigma.max(initial_variance.sqrt())).max(1e-8);
+        let step = (score / information).clamp(-maximum_step, maximum_step);
+        let next = (radiance + step).max(0.0);
+        radiance = next;
+        if step.abs() <= 1e-7 * radiance.abs().max(1.0) {
+            break;
+        }
+    }
+
+    let (_, information) = censored_posterior_terms(
+        radiance,
+        uncensored,
+        robust_factors,
+        all_samples,
+        &accepted_censored,
+    );
+    let uncertainty = if information.is_finite() && information > 0.0 {
+        information.recip().sqrt() * f64::from(residual_inflation.max(1.0))
+    } else {
+        f64::from(initial_uncertainty)
+    };
+    CensoredPosterior {
+        radiance: radiance as f32,
+        uncertainty: uncertainty as f32,
+        used_censored,
+        censor_conflict,
+        correction_flags,
+    }
+}
+
+fn censored_posterior_terms(
+    radiance: f64,
+    uncensored: &[HdrSample],
+    robust_factors: &[f32],
+    all_samples: &[HdrSample],
+    accepted_censored: &[bool; MAX_HDR_EXPOSURES],
+) -> (f64, f64) {
+    let mut score = 0.0f64;
+    let mut information = 0.0f64;
+    for (sample, robust_factor) in uncensored.iter().zip(robust_factors) {
+        let robust_factor = f64::from(*robust_factor);
+        if robust_factor <= 0.0 {
+            continue;
+        }
+        let variance = hdr_variance_at(*sample, radiance);
+        let shot = f64::from(sample.shot_variance_per_radiance.max(0.0));
+        let residual = f64::from(sample.radiance) - radiance;
+        score += robust_factor
+            * (residual / variance
+                + 0.5 * shot * (residual * residual / (variance * variance) - variance.recip()));
+        // Fisher information is positive and stable for heteroscedastic
+        // Poisson-Gaussian observations.
+        information +=
+            robust_factor * (variance.recip() + 0.5 * shot * shot / (variance * variance));
+    }
+
+    for (index, sample) in all_samples.iter().enumerate() {
+        if !accepted_censored[index] {
+            continue;
+        }
+        let variance = hdr_variance_at(*sample, radiance);
+        let sigma = variance.sqrt();
+        let shot = f64::from(sample.shot_variance_per_radiance.max(0.0));
+        let distance = radiance - f64::from(sample.lower_bound);
+        let z = distance / sigma;
+        let z_prime = variance.recip().sqrt() - 0.5 * distance * shot / (variance * sigma);
+        let z_second = -shot / (variance * sigma)
+            + 0.75 * distance * shot * shot / (variance * variance * sigma);
+        let inverse_mills = inverse_mills_ratio(z);
+        score += inverse_mills * z_prime;
+        let observed_information =
+            inverse_mills * (z + inverse_mills) * z_prime * z_prime - inverse_mills * z_second;
+        information += observed_information.max(0.0);
+    }
+    (score, information)
+}
+
+fn hdr_variance_at(sample: HdrSample, radiance: f64) -> f64 {
+    let read = f64::from(sample.read_variance.max(0.0));
+    let shot = f64::from(sample.shot_variance_per_radiance.max(0.0));
+    let modeled = read + shot * radiance.max(0.0);
+    if modeled > 0.0 {
+        modeled.max(1e-16)
+    } else {
+        f64::from(sample.variance).max(1e-16)
+    }
+}
+
+fn inverse_mills_ratio(z: f64) -> f64 {
+    if z < -8.0 {
+        let x = -z;
+        let inverse = x.recip();
+        return x + inverse - 2.0 * inverse.powi(3) + 10.0 * inverse.powi(5);
+    }
+    let density = (-0.5 * z * z).exp() * 0.398_942_280_401_432_7;
+    if z > 8.0 {
+        return density;
+    }
+    density / normal_cdf(z).max(f64::MIN_POSITIVE)
+}
+
+fn normal_cdf(z: f64) -> f64 {
+    let absolute = z.abs();
+    let t = 1.0 / (1.0 + 0.231_641_9 * absolute);
+    let polynomial = t
+        * (0.319_381_530
+            + t * (-0.356_563_782
+                + t * (1.781_477_937 + t * (-1.821_255_978 + t * 1.330_274_429))));
+    let lower_tail = 0.398_942_280_401_432_7 * (-0.5 * absolute * absolute).exp() * polynomial;
+    if z >= 0.0 {
+        1.0 - lower_tail
+    } else {
+        lower_tail
     }
 }
 
@@ -5109,6 +5317,178 @@ mod tests {
                 },
             }],
         }
+    }
+
+    fn posterior_sample(radiance: f32, lower_bound: f32, censored: bool) -> HdrSample {
+        let read_variance = 4e-4;
+        let shot_variance_per_radiance = 2e-3;
+        let modeled_radiance = if censored { lower_bound } else { radiance };
+        HdrSample {
+            radiance,
+            variance: read_variance + shot_variance_per_radiance * modeled_radiance,
+            read_variance,
+            shot_variance_per_radiance,
+            lower_bound,
+            censored,
+            frame_index: 0,
+            ..HdrSample::default()
+        }
+    }
+
+    #[test]
+    fn inverse_mills_ratio_matches_known_survival_scores() {
+        assert!((inverse_mills_ratio(0.0) - 0.797_884_560_8).abs() < 1e-6);
+        assert!((inverse_mills_ratio(-2.0) - 2.373_215_533).abs() < 2e-5);
+        assert!((inverse_mills_ratio(2.0) - 0.055_247_863).abs() < 2e-6);
+        assert!(inverse_mills_ratio(-20.0).is_finite());
+    }
+
+    #[test]
+    fn censored_likelihood_softly_updates_radiance_and_information() {
+        let uncensored = [posterior_sample(0.48, 0.0, false)];
+        let censored = posterior_sample(0.52, 0.52, true);
+        let all_samples = [uncensored[0], censored];
+        let initial_uncertainty = uncensored[0].variance.sqrt();
+        let first = solve_censored_poisson_gaussian(
+            &uncensored,
+            &[1.0],
+            &all_samples,
+            uncensored[0].radiance,
+            initial_uncertainty,
+            1.0,
+        );
+        let second = solve_censored_poisson_gaussian(
+            &uncensored,
+            &[1.0],
+            &all_samples,
+            uncensored[0].radiance,
+            initial_uncertainty,
+            1.0,
+        );
+        assert_eq!(first.radiance, second.radiance);
+        assert_eq!(first.uncertainty, second.uncertainty);
+        assert!(first.used_censored);
+        assert!(!first.censor_conflict);
+        assert!(
+            (0.48..0.60).contains(&first.radiance),
+            "survival posterior was {}",
+            first.radiance
+        );
+        assert_ne!(
+            first.radiance, censored.lower_bound,
+            "censor evidence must not degrade to a hard lower-bound clamp"
+        );
+        assert!(first.uncertainty < initial_uncertainty);
+    }
+
+    #[test]
+    fn inconsistent_censor_constraint_is_rejected_without_bias() {
+        let uncensored = [posterior_sample(0.48, 0.0, false)];
+        let conflict = posterior_sample(2.0, 2.0, true);
+        let posterior = solve_censored_poisson_gaussian(
+            &uncensored,
+            &[1.0],
+            &[uncensored[0], conflict],
+            uncensored[0].radiance,
+            uncensored[0].variance.sqrt(),
+            1.0,
+        );
+        assert!(!posterior.used_censored);
+        assert!(posterior.censor_conflict);
+        assert_eq!(posterior.radiance, uncensored[0].radiance);
+    }
+
+    #[test]
+    fn censored_posterior_intervals_are_calibrated_conditionally() {
+        struct Noise {
+            state: u64,
+            spare: Option<f32>,
+        }
+        impl Noise {
+            fn normal(&mut self) -> f32 {
+                if let Some(value) = self.spare.take() {
+                    return value;
+                }
+                let uniform = |state: &mut u64| {
+                    *state ^= *state << 13;
+                    *state ^= *state >> 7;
+                    *state ^= *state << 17;
+                    ((*state >> 40) as f32 + 0.5) / ((1u32 << 24) as f32)
+                };
+                let radius = (-2.0 * uniform(&mut self.state).max(1e-7).ln()).sqrt();
+                let angle = std::f32::consts::TAU * uniform(&mut self.state);
+                self.spare = Some(radius * angle.sin());
+                radius * angle.cos()
+            }
+        }
+
+        let truth = 0.56f32;
+        let censor_threshold = 0.54f32;
+        let model = posterior_sample(truth, 0.0, false);
+        let sigma = model.variance.sqrt();
+        let censored_model = posterior_sample(censor_threshold, censor_threshold, true);
+        let mut noise = Noise {
+            state: 0x243f_6a88_85a3_08d3,
+            spare: None,
+        };
+        let mut censored_trials = 0usize;
+        let mut covered = 0usize;
+        let mut conflicts = 0usize;
+        let mut bias = 0.0f64;
+        for _ in 0..40_000 {
+            let uncensored = [
+                posterior_sample(truth + sigma * noise.normal(), 0.0, false),
+                posterior_sample(truth + sigma * noise.normal(), 0.0, false),
+                posterior_sample(truth + sigma * noise.normal(), 0.0, false),
+            ];
+            let censored_observation = truth + sigma * noise.normal();
+            if censored_observation < censor_threshold {
+                continue;
+            }
+            let initial_radiance =
+                uncensored.iter().map(|sample| sample.radiance).sum::<f32>() / 3.0;
+            let initial_uncertainty = (model.variance / 3.0).sqrt();
+            let all_samples = [uncensored[0], uncensored[1], uncensored[2], censored_model];
+            let posterior = solve_censored_poisson_gaussian(
+                &uncensored,
+                &[1.0; 3],
+                &all_samples,
+                initial_radiance,
+                initial_uncertainty,
+                1.0,
+            );
+            assert!(posterior.radiance.is_finite());
+            assert!(posterior.uncertainty.is_finite() && posterior.uncertainty > 0.0);
+            conflicts += usize::from(posterior.censor_conflict);
+            covered += usize::from(
+                (posterior.radiance - truth).abs() <= 1.959_964 * posterior.uncertainty,
+            );
+            bias += f64::from(posterior.radiance - truth);
+            censored_trials += 1;
+        }
+
+        let coverage = covered as f64 / censored_trials as f64;
+        let mean_bias = bias / censored_trials as f64;
+        let conflict_rate = conflicts as f64 / censored_trials as f64;
+        println!(
+            "conditional censored posterior: trials={censored_trials}, \
+             coverage={:.3}%, bias={mean_bias:.6}, conflict={:.4}%",
+            coverage * 100.0,
+            conflict_rate * 100.0
+        );
+        assert!(censored_trials > 25_000);
+        assert!(
+            (0.925..=0.975).contains(&coverage),
+            "nominal 95% conditional coverage was {coverage:.4}"
+        );
+        assert!(
+            mean_bias.abs() <= 0.15 * f64::from(sigma),
+            "conditional bias {mean_bias:.6} exceeded 0.15 sigma"
+        );
+        assert!(
+            conflict_rate <= 0.0005,
+            "compatible censor constraints were rejected at rate {conflict_rate:.6}"
+        );
     }
 
     #[test]

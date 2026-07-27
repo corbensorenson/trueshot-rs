@@ -32,7 +32,7 @@ impl SystemResources {
         sys.refresh_memory();
 
         let total_memory = sys.total_memory();
-        let available_memory = sys.available_memory();
+        let available_memory = platform_available_memory(total_memory, sys.available_memory());
 
         let physical_cores = num_cpus::get_physical();
         let logical_cores = num_cpus::get();
@@ -54,6 +54,73 @@ impl SystemResources {
     pub fn total_memory_gb(&self) -> f64 {
         self.total_memory as f64 / (1024.0 * 1024.0 * 1024.0)
     }
+}
+
+/// Return memory that can be admitted without relying on swap.
+///
+/// `sysinfo` reports essentially free pages on macOS, which excludes clean
+/// inactive pages that the kernel can reclaim immediately. That can make a
+/// healthy unified-memory Mac appear to have only a few MiB available.
+pub fn available_memory_bytes() -> u64 {
+    let mut sys = System::new();
+    sys.refresh_memory();
+    platform_available_memory(sys.total_memory(), sys.available_memory())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn platform_available_memory(total_memory: u64, fallback: u64) -> u64 {
+    use std::mem::MaybeUninit;
+
+    let mut statistics = MaybeUninit::<libc::vm_statistics64>::zeroed();
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: both pointers reference writable storage of the exact Mach
+    // structure/count requested. The value is read only after KERN_SUCCESS.
+    let status = unsafe {
+        libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            statistics.as_mut_ptr().cast(),
+            &mut count,
+        )
+    };
+    if status != libc::KERN_SUCCESS || count < libc::HOST_VM_INFO64_COUNT {
+        return fallback.min(total_memory);
+    }
+    // SAFETY: host_statistics64 returned KERN_SUCCESS for the complete struct.
+    let statistics = unsafe { statistics.assume_init() };
+    // SAFETY: sysconf has no pointer preconditions and returns the VM page size.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return fallback.min(total_memory);
+    }
+    reclaimable_memory_bytes(
+        page_size as u64,
+        u64::from(statistics.free_count),
+        u64::from(statistics.inactive_count),
+        u64::from(statistics.speculative_count),
+        total_memory,
+    )
+    .max(fallback.min(total_memory))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_available_memory(total_memory: u64, fallback: u64) -> u64 {
+    fallback.min(total_memory)
+}
+
+fn reclaimable_memory_bytes(
+    page_size: u64,
+    free_pages: u64,
+    inactive_pages: u64,
+    speculative_pages: u64,
+    total_memory: u64,
+) -> u64 {
+    free_pages
+        .saturating_add(inactive_pages)
+        .saturating_add(speculative_pages)
+        .saturating_mul(page_size)
+        .min(total_memory)
 }
 
 /// Memory estimation for a sequence
@@ -782,6 +849,19 @@ mod tests {
         assert!(
             with_gpu.peak_memory_bytes > without_gpu.peak_memory_bytes,
             "scratch exceeding the fusion stage must raise admission"
+        );
+    }
+
+    #[test]
+    fn reclaimable_memory_is_overflow_safe_and_capped_to_physical_ram() {
+        assert_eq!(
+            reclaimable_memory_bytes(16_384, 10, 20, 5, u64::MAX),
+            35 * 16_384
+        );
+        assert_eq!(reclaimable_memory_bytes(16_384, 10, 20, 5, 64), 64);
+        assert_eq!(
+            reclaimable_memory_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX, 4096),
+            4096
         );
     }
 

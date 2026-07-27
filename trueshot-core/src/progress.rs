@@ -273,11 +273,11 @@ impl RuntimePredictor {
             System::new_with_specifics(RefreshKind::new().with_memory(MemoryRefreshKind::new()));
         sys.refresh_memory();
 
-        let total_memory_kb = sys.total_memory() as f32;
-        let available_memory_kb = sys.available_memory() as f32;
+        let total_memory_bytes = sys.total_memory() as f32;
+        let available_memory_bytes = crate::resource_manager::available_memory_bytes() as f32;
 
-        let memory_gb = total_memory_kb / (1024.0 * 1024.0);
-        let available_memory_gb = available_memory_kb / (1024.0 * 1024.0);
+        let memory_gb = total_memory_bytes / (1024.0 * 1024.0 * 1024.0);
+        let available_memory_gb = available_memory_bytes / (1024.0 * 1024.0 * 1024.0);
 
         let storage_type = detect_storage_type();
 

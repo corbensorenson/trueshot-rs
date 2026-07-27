@@ -1,0 +1,92 @@
+{
+  "schema": "trueshot.censored-pg-qualification.v1",
+  "date": "2026-07-27",
+  "status": "pass_with_real_calibration_pending",
+  "source": {
+    "parent_commit": "44c9bf067256607de0a3b0eb1f69f1412b95ade3",
+    "native_fusion_sha256": "aaacb764bac3fa6e26e660499a3d09ef51e8616cecfcec5fef556b7edf35c3d8",
+    "resource_manager_sha256": "84fe4213719e865038edcb1d2570be3bab65f15a0c146578ad983fb24f6c0142",
+    "benchmark_sha256": "2d7d3ee896287c1616b1d51b77b8c093d3d88057c526f0e86322a65cb61c0586"
+  },
+  "host": {
+    "os": "macOS 15.0 (24A5320a)",
+    "architecture": "arm64",
+    "adapter": "Apple M1",
+    "physical_memory_gib": 16.0
+  },
+  "synthetic": {
+    "ordinary_nominal_95_coverage": 0.96444,
+    "ordinary_covered": 3472,
+    "ordinary_trials": 3600,
+    "conditional_censored_nominal_95_coverage": 0.96203,
+    "conditional_censored_events": 28021,
+    "conditional_draws": 40000,
+    "conditional_mean_bias": 0.005563,
+    "bias_limit_sigma": 0.15,
+    "compatible_false_conflict_rate": 0.0,
+    "focus_psnr_db": 44.161,
+    "focus_depth_accuracy": 1.0,
+    "crossing_halo_energy_before": 23.759999,
+    "crossing_halo_energy_after": 0.002434,
+    "glare_annulus_reduction": 0.301
+  },
+  "private_nef_release_integration": {
+    "redistributable": false,
+    "frames": 21,
+    "width": 1310,
+    "height": 1304,
+    "scan_ms": 358.68,
+    "decode_seconds": 0.90,
+    "fusion_seconds": 1.17,
+    "demosaic_display_seconds": 0.07,
+    "radiance_uncertainty_p05": 0.000020,
+    "radiance_uncertainty_p50": 0.000063,
+    "radiance_uncertainty_p95": 0.000206,
+    "noise_model_calibrated": false,
+    "censored_pixels": 0,
+    "censor_conflict_pixels": 0,
+    "ordinary_rejected_pixels": 14,
+    "fallback_pixels": 20660,
+    "uncalibrated_pixels": 1708240,
+    "accepted_bracket_transforms": 14,
+    "total_bracket_transforms": 14,
+    "locally_aligned_cells": 192,
+    "disoccluded_cells": 40,
+    "depth_refusion_pixels": 679020
+  },
+  "production_metal_repeatability": {
+    "independent_current_build_runs": 2,
+    "fused_tiff_sha256": "774a54525ecd04adff22f56ef83b823c1fbdf53d1e1f2850846ce93c975fd321",
+    "fusion_state_map_sha256": "02aa1fd7108f8173d5223398a181d3fe1bb44401c9c43e860d19e1c7d8bdbbed",
+    "source_map_sha256": "87160ed4196e3f430ffb82ea47fcda69e2a1999350cc93dba9ab07d1e27656fa",
+    "boundary_trimap_sha256": "8dec03d65210b9743f7304f46b145e18026ac98052819abd11fa1a6205be628e",
+    "glare_map_sha256": "8dec03d65210b9743f7304f46b145e18026ac98052819abd11fa1a6205be628e",
+    "semantic_reports_equal_after_path_elision": true
+  },
+  "macos_memory_admission": {
+    "before_reported_available_mib": [
+      42.5,
+      140.9
+    ],
+    "after_reported_available_gib": 5.1,
+    "configured_budget_mib": 512,
+    "required_peak_mib": 245.6,
+    "production_result": "pass",
+    "counted_page_classes": [
+      "free",
+      "inactive",
+      "speculative"
+    ],
+    "excluded_page_classes": [
+      "active",
+      "wired",
+      "compressed"
+    ]
+  },
+  "caveats": [
+    "The private NEF fixture has no censored pixels and no exact sensor profile, so it does not qualify the real calibrated posterior.",
+    "Timing values are one release integration observation, not a p50/p95 claim.",
+    "Real qualification still requires retained per-ISO dark/flat/integrating-sphere captures across temperature, exposure duration, and focus envelope.",
+    "No competitor-superiority claim is made by this record."
+  ]
+}

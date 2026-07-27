@@ -2750,13 +2750,11 @@ fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<()> {
 }
 
 fn available_memory_ratio() -> f64 {
-    let mut system = sysinfo::System::new();
-    system.refresh_memory();
-    let total_memory = system.total_memory();
-    if total_memory == 0 {
+    let resources = SystemResources::query();
+    if resources.total_memory == 0 {
         0.0
     } else {
-        system.available_memory() as f64 / total_memory as f64
+        resources.available_memory as f64 / resources.total_memory as f64
     }
 }
 
@@ -4490,12 +4488,12 @@ fn cmd_status(hardware: bool, check_updates: bool) -> Result<()> {
     // System resources
     println!("  {} System Resources:", style("📊").dim());
 
-    let sys = sysinfo::System::new_all();
+    let resources = SystemResources::query();
     println!("    CPU:    {} cores", num_cpus::get());
     println!(
         "    Memory: {:.1} GB total, {:.1} GB available",
-        sys.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
-        sys.available_memory() as f64 / 1024.0 / 1024.0 / 1024.0
+        resources.total_memory_gb(),
+        resources.available_memory_gb()
     );
 
     if hardware {
