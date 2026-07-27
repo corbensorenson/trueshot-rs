@@ -205,7 +205,7 @@ jobs:
       run: docker build -t trueshot-scan .
 
     - name: Scan image with Trivy (SARIF)
-      uses: aquasecurity/trivy-action@0.17.0
+      uses: aquasecurity/trivy-action@v0.36.0
       with:
         image-ref: trueshot-scan
         format: sarif
