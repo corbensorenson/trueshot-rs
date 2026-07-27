@@ -172,20 +172,22 @@ impl NativeSequenceMemoryEstimate {
             .checked_mul(frame_count as u64)
             .and_then(|value| value.checked_mul(2))
             .context("Native input arena estimate overflow")?;
-        // Bayer + depth + confidence + foreground mask.
+        // Bayer, normalized/metric depth, confidence, radiance uncertainty,
+        // source map, provenance flags, and foreground mask.
         let fusion_output_bytes = pixels
-            .checked_mul(13)
+            .checked_mul(24)
             .context("Native fusion output estimate overflow")?;
         let tile_edge = tile_size.saturating_add(6) as u64;
-        // Plane Bayer/valid/green/metric plus top-two score/value/index state.
+        // Extended plane state is 20 B/pixel. Tile state retains top-two
+        // radiance/evidence plus previous and adjacent focus responses: 46 B.
         let scratch_per_worker = tile_edge
             .checked_mul(tile_edge)
-            .and_then(|value| value.checked_mul(13))
+            .and_then(|value| value.checked_mul(20))
             .and_then(|value| {
                 value.checked_add(
                     (tile_size as u64)
                         .checked_mul(tile_size as u64)?
-                        .checked_mul(20)?,
+                        .checked_mul(46)?,
                 )
             })
             .context("Native fusion scratch estimate overflow")?;

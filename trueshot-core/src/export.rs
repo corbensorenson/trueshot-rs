@@ -410,6 +410,40 @@ pub fn save_depth_tiff_with_digest(depth: &Array2<f32>, path: &Path) -> Result<E
     Ok(digest)
 }
 
+/// Save metric depth without quantization as a crash-safe little-endian PFM.
+///
+/// PFM stores rows bottom-to-top and uses a negative scale to declare
+/// little-endian IEEE-754 samples.
+pub fn save_metric_depth_pfm_with_digest(
+    depth_m: &Array2<f32>,
+    path: &Path,
+) -> Result<ExportDigest> {
+    let (height, width) = depth_m.dim();
+    if width == 0 || height == 0 {
+        anyhow::bail!("Cannot export an empty metric depth map");
+    }
+    if depth_m
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        anyhow::bail!("Metric depth map contains invalid distances");
+    }
+    let (partial, file) = PartialExport::create(path)?;
+    let mut writer = DigestWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+    write!(writer, "Pf\n{width} {height}\n-1.0\n")?;
+    for y in (0..height).rev() {
+        for x in 0..width {
+            writer.write_all(&depth_m[[y, x]].to_le_bytes())?;
+        }
+    }
+    writer.flush()?;
+    let digest = writer.export_digest();
+    drop(writer);
+    partial.publish(path)?;
+    write_provenance_for_export(path)?;
+    Ok(digest)
+}
+
 /// Save an RGBA preview through a same-directory atomic rename.
 pub fn save_png(rgb: &Array3<u8>, mask: &Array2<u8>, path: &Path) -> Result<()> {
     save_png_with_digest(rgb, mask, path).map(|_| ())
@@ -668,6 +702,20 @@ mod tests {
             panic!("Expected 16-bit depth samples");
         };
         assert_eq!(values, vec![0, 16_384, 32_768, 65_535]);
+
+        let metric = Array2::from_shape_vec((2, 2), vec![0.25f32, 0.5, 1.0, 2.0]).unwrap();
+        let metric_path = directory.path().join("depth_m.pfm");
+        let metric_digest = save_metric_depth_pfm_with_digest(&metric, &metric_path).unwrap();
+        let metric_bytes = std::fs::read(&metric_path).unwrap();
+        let header = b"Pf\n2 2\n-1.0\n";
+        assert!(metric_bytes.starts_with(header));
+        assert_eq!(metric_digest.size_bytes, metric_bytes.len() as u64);
+        let first = f32::from_le_bytes(
+            metric_bytes[header.len()..header.len() + 4]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(first, 1.0, "PFM rows must be stored bottom-to-top");
         assert!(directory.path().read_dir().unwrap().all(|entry| {
             !entry
                 .unwrap()

@@ -29,8 +29,8 @@ use trueshot_core::demosaic_ahd::ahd_demosaic_f32_owned;
 use trueshot_core::export::usd::{export_usd_with_options, UsdExportOptions};
 use trueshot_core::export::{
     export_fbx, export_glb, export_gltf, export_ply, export_point_cloud_ply,
-    save_depth_tiff_with_digest, save_png_preview_with_digest, save_tiff16_from_f32_with_digest,
-    PlyExportOptions,
+    save_depth_tiff_with_digest, save_metric_depth_pfm_with_digest, save_png_preview_with_digest,
+    save_tiff16_from_f32_with_digest, PlyExportOptions,
 };
 use trueshot_core::gaussian_splatting::{Camera as GsCamera, GaussianSplatTrainer, TrainingConfig};
 use trueshot_core::intrinsics::{
@@ -1371,6 +1371,8 @@ fn run_burst_pipeline(
             let NativeFusionResult {
                 bayer,
                 depth,
+                metric_depth_m,
+                focus_diopters,
                 confidence: _,
                 radiance_uncertainty: _,
                 source_map: _,
@@ -1400,6 +1402,13 @@ fn run_burst_pipeline(
                     .and_then(|value| value.to_str())
                     .unwrap_or("trueshot-burst")
             ));
+            let metric_depth_path = output_path.with_file_name(format!(
+                "{}_depth_m.pfm",
+                output_path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("trueshot-burst")
+            ));
             let accepted_transforms = transforms
                 .iter()
                 .filter(|transform| transform.accepted)
@@ -1409,6 +1418,8 @@ fn run_burst_pipeline(
             let group_id = capture_group.group_id.clone();
             let label = sequence.meta.bone_id.clone();
             let depth = export_depth.then_some(depth);
+            let metric_depth_m = export_depth.then_some(metric_depth_m).flatten();
+            let physical_focus_planes = focus_diopters.len();
             let preview_max_dimension = if full_resolution_preview {
                 usize::MAX
             } else {
@@ -1461,13 +1472,24 @@ fn run_burst_pipeline(
                             depth_digest.sha256,
                         )?);
                     }
+                    if let Some(metric_depth_m) = metric_depth_m {
+                        let metric_digest =
+                            save_metric_depth_pfm_with_digest(&metric_depth_m, &metric_depth_path)?;
+                        artifacts.push(artifact_digest_from_parts(
+                            &metric_depth_path,
+                            &output_root,
+                            metric_digest.size_bytes,
+                            metric_digest.sha256,
+                        )?);
+                    }
                     step_pb.inc(1);
                     step_pb.finish_with_message(format!(
-                        "Sequence complete ({:.1} MiB native + {:.1} MiB fused, {}/{} transforms, anchor {:.3e})",
+                        "Sequence complete ({:.1} MiB native + {:.1} MiB fused, {}/{} transforms, {} physical focus planes, anchor {:.3e})",
                         native_input_bytes as f64 / (1024.0 * 1024.0),
                         fused_bytes as f64 / (1024.0 * 1024.0),
                         accepted_transforms,
                         transform_count,
+                        physical_focus_planes,
                         radiance_anchor,
                     ));
                     Ok(artifacts)

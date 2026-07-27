@@ -113,8 +113,14 @@ impl PlaneTransform {
 pub struct NativeFusionResult {
     /// Linear, white-balanced Bayer mosaic in normalized scene-radiance space.
     pub bayer: Array3<f32>,
-    /// Normalized focus depth, near/far ordering follows capture order.
+    /// Normalized continuous focus coordinate; ordering follows capture order.
     pub depth: Array2<f32>,
+    /// Physical subject distance in meters when complete lens metadata permits
+    /// a nonuniform diopter-space focus model.
+    pub metric_depth_m: Option<Array2<f32>>,
+    /// Per-plane focus coordinates in inverse meters. Empty means the pipeline
+    /// explicitly fell back to normalized capture indices.
+    pub focus_diopters: Vec<f32>,
     /// Separation between the best and second-best focus hypotheses.
     pub confidence: Array2<f32>,
     /// Absolute one-standard-deviation uncertainty in anchored radiance units.
@@ -140,6 +146,11 @@ impl NativeFusionResult {
     pub fn size_bytes(&self) -> usize {
         self.bayer.len() * std::mem::size_of::<f32>()
             + self.depth.len() * std::mem::size_of::<f32>()
+            + self
+                .metric_depth_m
+                .as_ref()
+                .map_or(0, |depth| depth.len() * std::mem::size_of::<f32>())
+            + self.focus_diopters.len() * std::mem::size_of::<f32>()
             + self.confidence.len() * std::mem::size_of::<f32>()
             + self.radiance_uncertainty.len() * std::mem::size_of::<f32>()
             + self.source_map.len() * std::mem::size_of::<u16>()
@@ -176,6 +187,66 @@ struct HdrEstimate {
     flags: u8,
 }
 
+#[derive(Debug, Clone)]
+struct PhysicalFocusModel {
+    distances_m: Vec<f32>,
+    diopters: Vec<f32>,
+    focal_length_mm: f32,
+    aperture: f32,
+}
+
+impl PhysicalFocusModel {
+    fn distance_at_index(&self, index: f32) -> f32 {
+        if self.diopters.len() == 1 {
+            return self.distances_m[0];
+        }
+        let lower = index
+            .floor()
+            .clamp(0.0, self.diopters.len().saturating_sub(1) as f32) as usize;
+        let upper = (lower + 1).min(self.diopters.len() - 1);
+        let fraction = (index - lower as f32).clamp(0.0, 1.0);
+        let diopter =
+            self.diopters[lower] + (self.diopters[upper] - self.diopters[lower]) * fraction;
+        1.0 / diopter.max(1e-8)
+    }
+
+    fn index_at_diopter(&self, best: usize, diopter: f32) -> f32 {
+        let (lower, upper) = if diopter_between(
+            diopter,
+            self.diopters[best.saturating_sub(1)],
+            self.diopters[best],
+        ) {
+            (best - 1, best)
+        } else {
+            (best, best + 1)
+        };
+        let denominator = self.diopters[upper] - self.diopters[lower];
+        if denominator.abs() <= 1e-8 {
+            return best as f32;
+        }
+        lower as f32 + ((diopter - self.diopters[lower]) / denominator).clamp(0.0, 1.0)
+    }
+
+    fn psf_sampling_balance(&self, best: usize) -> f32 {
+        if best == 0 || best + 1 >= self.distances_m.len() {
+            return 1.0;
+        }
+        let left = defocus_circle_mm(
+            self.focal_length_mm,
+            self.aperture,
+            self.distances_m[best],
+            self.distances_m[best - 1],
+        );
+        let right = defocus_circle_mm(
+            self.focal_length_mm,
+            self.aperture,
+            self.distances_m[best],
+            self.distances_m[best + 1],
+        );
+        left.min(right) / left.max(right).max(1e-8)
+    }
+}
+
 /// Fuse one ordered focus/HDR group without materializing calibrated or aligned
 /// full-frame copies.
 pub fn fuse_native_group(
@@ -188,6 +259,7 @@ pub fn fuse_native_group(
     let focus_steps = usize::from(meta.focus_steps).max(1);
     let exposures_per_focus = group.len() / focus_steps;
     let calibrations = build_calibrations(group, config)?;
+    let focus_model = physical_focus_model(group, focus_steps, exposures_per_focus);
     let radiance_anchor = calibrations
         .iter()
         .map(|calibration| calibration.exposure)
@@ -238,6 +310,7 @@ pub fn fuse_native_group(
                     group,
                     &calibrations,
                     &transforms,
+                    focus_model.as_ref(),
                     focus_steps,
                     exposures_per_focus,
                     radiance_anchor,
@@ -277,12 +350,31 @@ pub fn fuse_native_group(
         }
     }
     let foreground_mask = infer_foreground_mask(&bayer, width, height);
+    let metric_depth_m = focus_model.as_ref().map(|model| {
+        Array2::from_shape_vec(
+            (height, width),
+            depth
+                .iter()
+                .map(|value| {
+                    model.distance_at_index(
+                        value.clamp(0.0, 1.0) * focus_steps.saturating_sub(1) as f32,
+                    )
+                })
+                .collect(),
+        )
+        .expect("metric depth shape matches normalized depth")
+    });
+    let focus_diopters = focus_model
+        .as_ref()
+        .map_or_else(Vec::new, |model| model.diopters.clone());
 
     Ok(NativeFusionResult {
         bayer: Array3::from_shape_vec((height, width, 1), bayer)
             .context("Unable to shape fused Bayer output")?,
         depth: Array2::from_shape_vec((height, width), depth)
             .context("Unable to shape fused depth output")?,
+        metric_depth_m,
+        focus_diopters,
         confidence: Array2::from_shape_vec((height, width), confidence)
             .context("Unable to shape fused confidence output")?,
         radiance_uncertainty: Array2::from_shape_vec((height, width), radiance_uncertainty)
@@ -397,6 +489,98 @@ fn validate_group(
         }
     }
     Ok(())
+}
+
+fn physical_focus_model(
+    group: &NativeFrameGroup<'_>,
+    focus_steps: usize,
+    exposures_per_focus: usize,
+) -> Option<PhysicalFocusModel> {
+    if focus_steps < 2 {
+        return None;
+    }
+    let reference = group.metadata.first()?;
+    let focal_length_mm = reference.focal_length?;
+    let aperture = reference.aperture?;
+    if !focal_length_mm.is_finite()
+        || focal_length_mm <= 0.0
+        || !aperture.is_finite()
+        || aperture <= 0.0
+    {
+        tracing::warn!("Physical focus model disabled: invalid focal length or aperture");
+        return None;
+    }
+
+    let minimum_distance_m = focal_length_mm * 0.001 * 1.01;
+    let mut distances_m = Vec::with_capacity(focus_steps);
+    for focus in 0..focus_steps {
+        let start = focus * exposures_per_focus;
+        let distance = group.metadata.get(start)?.focus_distance?;
+        if !distance.is_finite() || distance <= minimum_distance_m {
+            tracing::warn!(
+                "Physical focus model disabled: plane {} has invalid focus distance {:?}",
+                focus,
+                distance
+            );
+            return None;
+        }
+        for metadata in &group.metadata[start..start + exposures_per_focus] {
+            let candidate = metadata.focus_distance?;
+            let tolerance = (distance.abs() * 0.005).max(0.001);
+            if !candidate.is_finite()
+                || (candidate - distance).abs() > tolerance
+                || metadata
+                    .focal_length
+                    .map_or(true, |value| (value - focal_length_mm).abs() > 0.05)
+                || metadata
+                    .aperture
+                    .map_or(true, |value| (value - aperture).abs() > 0.01)
+            {
+                tracing::warn!(
+                    "Physical focus model disabled: inconsistent lens metadata in plane {}",
+                    focus
+                );
+                return None;
+            }
+        }
+        distances_m.push(distance);
+    }
+
+    let diopters: Vec<f32> = distances_m.iter().map(|distance| 1.0 / distance).collect();
+    let increasing = diopters.windows(2).all(|pair| pair[1] - pair[0] > 1e-6);
+    let decreasing = diopters.windows(2).all(|pair| pair[0] - pair[1] > 1e-6);
+    if !increasing && !decreasing {
+        tracing::warn!(
+            "Physical focus model disabled: focus distances are duplicated or non-monotonic"
+        );
+        return None;
+    }
+
+    Some(PhysicalFocusModel {
+        distances_m,
+        diopters,
+        focal_length_mm,
+        aperture,
+    })
+}
+
+fn diopter_between(value: f32, left: f32, right: f32) -> bool {
+    value >= left.min(right) && value <= left.max(right)
+}
+
+/// Thin-lens defocus-circle diameter at the sensor plane.
+fn defocus_circle_mm(
+    focal_length_mm: f32,
+    aperture: f32,
+    focused_distance_m: f32,
+    subject_distance_m: f32,
+) -> f32 {
+    let focused_mm = focused_distance_m * 1000.0;
+    let subject_mm = subject_distance_m * 1000.0;
+    let focused_image_mm = focal_length_mm * focused_mm / (focused_mm - focal_length_mm);
+    let subject_image_mm = focal_length_mm * subject_mm / (subject_mm - focal_length_mm);
+    let entrance_pupil_mm = focal_length_mm / aperture;
+    entrance_pupil_mm * (focused_image_mm - subject_image_mm).abs() / subject_image_mm
 }
 
 fn build_calibrations(
@@ -642,6 +826,7 @@ fn process_band(
     group: &NativeFrameGroup<'_>,
     calibrations: &[FrameCalibration],
     transforms: &[PlaneTransform],
+    focus_model: Option<&PhysicalFocusModel>,
     focus_steps: usize,
     exposures_per_focus: usize,
     radiance_anchor: f32,
@@ -690,6 +875,9 @@ fn process_band(
         let mut second_flags = vec![0u8; tile_pixels];
         let mut best_plane = vec![0u16; tile_pixels];
         let mut second_plane = vec![0u16; tile_pixels];
+        let mut previous_score = vec![f32::NEG_INFINITY; tile_pixels];
+        let mut left_score = vec![f32::NEG_INFINITY; tile_pixels];
+        let mut right_score = vec![f32::NEG_INFINITY; tile_pixels];
 
         for focus in 0..focus_steps {
             plane_bayer.fill(0.0);
@@ -748,13 +936,19 @@ fn process_band(
                 for tile_x in 0..tile_width {
                     let ext_x = x0 + tile_x - ext_x0;
                     let ext_index = ext_y * ext_width + ext_x;
+                    let tile_index = tile_y * tile_width + tile_x;
                     if !plane_valid[ext_index] {
+                        previous_score[tile_index] = f32::NEG_INFINITY;
                         continue;
                     }
                     let metric =
                         smoothed_metric(&focus_metric, ext_width, ext_height, ext_x, ext_y);
-                    let tile_index = tile_y * tile_width + tile_x;
                     let value = plane_bayer[ext_index];
+                    if best_score[tile_index].is_finite()
+                        && usize::from(best_plane[tile_index]) + 1 == focus
+                    {
+                        right_score[tile_index] = metric;
+                    }
                     if metric > best_score[tile_index] {
                         second_score[tile_index] = best_score[tile_index];
                         second_value[tile_index] = best_value[tile_index];
@@ -768,6 +962,12 @@ fn process_band(
                         best_source[tile_index] = plane_source[ext_index];
                         best_flags[tile_index] = plane_flags[ext_index];
                         best_plane[tile_index] = focus as u16;
+                        left_score[tile_index] = if focus > 0 {
+                            previous_score[tile_index]
+                        } else {
+                            f32::NEG_INFINITY
+                        };
+                        right_score[tile_index] = f32::NEG_INFINITY;
                     } else if metric > second_score[tile_index] {
                         second_score[tile_index] = metric;
                         second_value[tile_index] = value;
@@ -776,6 +976,7 @@ fn process_band(
                         second_flags[tile_index] = plane_flags[ext_index];
                         second_plane[tile_index] = focus as u16;
                     }
+                    previous_score[tile_index] = metric;
                 }
             }
         }
@@ -822,14 +1023,73 @@ fn process_band(
                     } else {
                         0
                     };
-                let focus_position = best_plane[tile_index] as f32 * best_weight
+                let discrete_focus_position = best_plane[tile_index] as f32 * best_weight
                     + second_plane[tile_index] as f32 * (1.0 - best_weight);
+                let best_focus = usize::from(best_plane[tile_index]);
+                let focus_position = focus_model
+                    .and_then(|model| {
+                        subplane_focus_position(
+                            model,
+                            best_focus,
+                            left_score[tile_index],
+                            best_score[tile_index],
+                            right_score[tile_index],
+                        )
+                    })
+                    .unwrap_or(discrete_focus_position);
                 depth_output[output_index] = focus_position / depth_denominator;
-                confidence_output[output_index] = separation;
+                confidence_output[output_index] = if let Some(model) = focus_model {
+                    separation * (0.5 + 0.5 * model.psf_sampling_balance(best_focus))
+                } else {
+                    separation
+                };
             }
         }
     }
     Ok(())
+}
+
+fn subplane_focus_position(
+    model: &PhysicalFocusModel,
+    best: usize,
+    left_score: f32,
+    best_score: f32,
+    right_score: f32,
+) -> Option<f32> {
+    if best == 0
+        || best + 1 >= model.diopters.len()
+        || !left_score.is_finite()
+        || !best_score.is_finite()
+        || !right_score.is_finite()
+    {
+        return None;
+    }
+    let x0 = model.diopters[best - 1];
+    let x1 = model.diopters[best];
+    let x2 = model.diopters[best + 1];
+    let y0 = left_score.max(1e-12).ln();
+    let y1 = best_score.max(1e-12).ln();
+    let y2 = right_score.max(1e-12).ln();
+    let d0 = (x0 - x1) * (x0 - x2);
+    let d1 = (x1 - x0) * (x1 - x2);
+    let d2 = (x2 - x0) * (x2 - x1);
+    if d0.abs() <= 1e-12 || d1.abs() <= 1e-12 || d2.abs() <= 1e-12 {
+        return None;
+    }
+    let quadratic = y0 / d0 + y1 / d1 + y2 / d2;
+    let linear = -y0 * (x1 + x2) / d0 - y1 * (x0 + x2) / d1 - y2 * (x0 + x1) / d2;
+    if !quadratic.is_finite() || quadratic >= -1e-8 || !linear.is_finite() {
+        return None;
+    }
+    let vertex = -linear / (2.0 * quadratic);
+    if !vertex.is_finite()
+        || vertex < x0.min(x2)
+        || vertex > x0.max(x2)
+        || !diopter_between(vertex, x0, x1) && !diopter_between(vertex, x1, x2)
+    {
+        return None;
+    }
+    Some(model.index_at_diopter(best, vertex))
 }
 
 fn fuse_hdr_sample(
@@ -1535,6 +1795,71 @@ mod tests {
             bone_id: "test".to_string(),
             cam_mul: [2.0, 1.0, 1.5, 1.0],
         }
+    }
+
+    fn physical_model(distances_m: &[f32]) -> PhysicalFocusModel {
+        PhysicalFocusModel {
+            distances_m: distances_m.to_vec(),
+            diopters: distances_m.iter().map(|distance| 1.0 / distance).collect(),
+            focal_length_mm: 105.0,
+            aperture: 8.0,
+        }
+    }
+
+    #[test]
+    fn nonuniform_diopter_fit_recovers_the_physical_peak() {
+        let model = physical_model(&[0.25, 0.5, 1.0]);
+        let target_diopter = 2.3f32;
+        let score = |diopter: f32| (-(diopter - target_diopter).powi(2) / 1.7).exp();
+        let index = subplane_focus_position(
+            &model,
+            1,
+            score(model.diopters[0]),
+            score(model.diopters[1]),
+            score(model.diopters[2]),
+        )
+        .unwrap();
+        assert!((index - 0.85).abs() < 1e-4, "index was {index}");
+        assert!((model.distance_at_index(index) - 1.0 / target_diopter).abs() < 1e-4);
+    }
+
+    #[test]
+    fn physical_focus_model_requires_complete_monotonic_metadata() {
+        let pixels = vec![2048u16; 3 * 16 * 16];
+        let mut metadata = vec![metadata(1.0), metadata(1.0), metadata(1.0)];
+        for (frame, distance) in metadata.iter_mut().zip([0.25, 0.5, 1.0]) {
+            frame.focus_distance = Some(distance);
+        }
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            3,
+            16,
+            16,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            metadata.clone(),
+        )
+        .unwrap();
+        let model = physical_focus_model(&group, 3, 1).unwrap();
+        assert_eq!(model.diopters, vec![4.0, 2.0, 1.0]);
+
+        metadata[2].focus_distance = Some(0.4);
+        let nonmonotonic = NativeFrameGroup::from_parts(
+            &pixels,
+            3,
+            16,
+            16,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            metadata,
+        )
+        .unwrap();
+        assert!(physical_focus_model(&nonmonotonic, 3, 1).is_none());
+    }
+
+    #[test]
+    fn wider_apertures_produce_larger_defocus_circles() {
+        let wide = defocus_circle_mm(105.0, 2.8, 0.5, 0.6);
+        let stopped_down = defocus_circle_mm(105.0, 11.0, 0.5, 0.6);
+        assert!(wide > stopped_down * 3.9);
     }
 
     #[test]

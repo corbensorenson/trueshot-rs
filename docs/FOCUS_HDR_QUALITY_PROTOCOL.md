@@ -113,8 +113,10 @@ Not yet qualified:
 - Per-ISO/CFA photon-transfer calibration capture/fit and empirical posterior
   uncertainty calibration. Validated profile persistence and production loading
   are implemented.
-- Diopter/PSF-based sub-plane depth and aperture-constrained occlusion
-  correction.
+- Held-out calibration of the implemented nonuniform diopter/thin-lens
+  sub-plane depth path, plus lens-breathing and aperture-constrained occlusion
+  correction. Native fusion already exports unquantized metric depth when
+  complete focus distance, focal length, and aperture metadata are valid.
 - Deterministic uncertainty-driven exposure and focus acquisition scheduling.
 - Release-mode Apple Silicon timing, memory, thermal, and energy baselines.
 
