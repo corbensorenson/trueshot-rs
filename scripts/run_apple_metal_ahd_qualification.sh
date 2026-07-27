@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-WIDTH="${TRUESHOT_AHD_QUALIFICATION_WIDTH:-1310}"
-HEIGHT="${TRUESHOT_AHD_QUALIFICATION_HEIGHT:-1304}"
-RUNS="${TRUESHOT_AHD_QUALIFICATION_RUNS:-7}"
+WIDTH="${TRUESHOT_AHD_QUALIFICATION_WIDTH:-8256}"
+HEIGHT="${TRUESHOT_AHD_QUALIFICATION_HEIGHT:-5504}"
+RUNS="${TRUESHOT_AHD_QUALIFICATION_RUNS:-3}"
 MINIMUM_SPEEDUP="${TRUESHOT_AHD_MINIMUM_SPEEDUP:-1.10}"
-HDR_WIDTH="${TRUESHOT_AHD_HDR_WIDTH:-1536}"
-HDR_HEIGHT="${TRUESHOT_AHD_HDR_HEIGHT:-700}"
+HDR_WIDTH="${TRUESHOT_AHD_HDR_WIDTH:-8256}"
+HDR_HEIGHT="${TRUESHOT_AHD_HDR_HEIGHT:-5504}"
 HDR_RUNS="${TRUESHOT_AHD_HDR_RUNS:-3}"
 HDR_MULTIPLIER="${TRUESHOT_AHD_HDR_MULTIPLIER:-6.25}"
 
@@ -54,6 +54,10 @@ if record["parity"]["values_over_tolerance"] != 0:
     )
 if record["parity"]["maximum_absolute_error"] > record["parity"]["normalized_tolerance"]:
     failures.append("maximum reconstructed-channel error exceeded tolerance")
+if record["parity"]["direction_selection_mismatches"] != 0:
+    failures.append(
+        f"{record['parity']['direction_selection_mismatches']} direction selections disagreed"
+    )
 if hdr_record.get("profile") != "release":
     failures.append("HDR stress qualification did not use the release profile")
 if hdr_record.get("adapter") != record.get("adapter"):
@@ -79,6 +83,11 @@ if (
     > hdr_record["parity"]["normalized_tolerance"]
 ):
     failures.append("HDR stress maximum normalized error exceeded tolerance")
+if hdr_record["parity"]["direction_selection_mismatches"] != 0:
+    failures.append(
+        "HDR stress had "
+        f"{hdr_record['parity']['direction_selection_mismatches']} direction disagreements"
+    )
 
 record["hdr_stress"] = hdr_record
 print(json.dumps(record, indent=2, sort_keys=True))

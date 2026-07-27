@@ -16,6 +16,7 @@
 
 pub mod avatar;
 pub mod facial_landmarks;
+#[cfg(feature = "wgpu")]
 pub mod gpu_meshification;
 pub mod meshification;
 pub mod motion_score;
@@ -29,6 +30,7 @@ pub mod unified_renderer;
 // Re-exports
 pub use avatar::{Avatar, AvatarTracker, BlendshapePreset, BoneName, BoundAvatar, Skeleton};
 pub use facial_landmarks::{ARKitBlendshape, FaceDetection, FacialLandmarkDetector};
+#[cfg(feature = "wgpu")]
 pub use gpu_meshification::GpuMeshifier;
 pub use meshification::{MeshificationConfig, MeshificationPipeline, MeshificationResult};
 pub use motion_score::{MotionClassification, MotionScorer};

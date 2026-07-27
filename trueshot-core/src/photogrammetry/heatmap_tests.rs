@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::photogrammetry::heatmap::{CoverageDensity, CoverageVoxelGrid};
     use crate::reconstruction::ColoredPoint;
     use nalgebra as na;

@@ -2,7 +2,9 @@
 host = "0.0.0.0"
 port = 3000
 # api_key = "set-a-strong-admin-key"
+# hmac_secret_path = "/secure/path/trueshot_hmac.key"
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 cookie_secure = false
 public_base_url = "http://localhost:3000"
 frontend_base_url = "http://localhost:5173"

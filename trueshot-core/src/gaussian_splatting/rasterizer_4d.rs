@@ -143,8 +143,6 @@ pub struct GpuRasterizer4D {
     frame_cache: FrameCache,
     /// Last rendered time (for temporal AA)
     last_time: f32,
-    /// Velocity buffer for motion blur
-    velocity_buffer: Vec<na::Vector3<f32>>,
 }
 
 impl GpuRasterizer4D {
@@ -154,7 +152,6 @@ impl GpuRasterizer4D {
             config,
             frame_cache: FrameCache::new(cache_size),
             last_time: 0.0,
-            velocity_buffer: Vec::new(),
         }
     }
 
@@ -389,12 +386,9 @@ impl GpuRasterizer4D {
     fn apply_motion_blur(
         &self,
         projected: &[ProjectedGaussian4D],
-        scene: &Dynamic4DScene,
-        t: f32,
+        _scene: &Dynamic4DScene,
+        _t: f32,
     ) -> Vec<ProjectedGaussian4D> {
-        let samples = self.config.motion_blur_samples.max(1);
-        let dt = 1.0 / (scene.capture_fps * samples as f32);
-
         projected.to_vec()
     }
 

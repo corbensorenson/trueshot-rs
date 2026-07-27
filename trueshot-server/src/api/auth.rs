@@ -5,8 +5,8 @@ use utoipa::ToSchema;
 
 use crate::audit::AuditEvent;
 use crate::auth::{
-    require_admin, AuthContext, Role, CSRF_COOKIE_NAME, CSRF_HEADER_NAME, REFRESH_COOKIE_NAME,
-    SESSION_COOKIE_NAME,
+    require_admin, validate_api_token_scopes, AuthContext, Role, CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME, REFRESH_COOKIE_NAME, SESSION_COOKIE_NAME,
 };
 use crate::state::AppState;
 
@@ -46,15 +46,19 @@ pub async fn guest_token(
 
     let subject = json.label.as_deref().unwrap_or("guest");
 
-    let token = match state.auth.issue_guest_token(
-        subject,
-        vec![
-            "stream:read".to_string(),
-            "system:read".to_string(),
-            "guest:connect".to_string(),
-            "phone:connect".to_string(),
-        ],
-    ) {
+    let token = match state
+        .auth
+        .issue_guest_token(
+            subject,
+            vec![
+                "stream:read".to_string(),
+                "system:read".to_string(),
+                "guest:connect".to_string(),
+                "phone:connect".to_string(),
+            ],
+        )
+        .await
+    {
         Ok(token) => token,
         Err(_) => return HttpResponse::InternalServerError().body("Failed to issue token"),
     };
@@ -96,7 +100,7 @@ pub async fn guest_token(
 #[post("/api/auth/session")]
 pub async fn create_session(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Some(token) = extract_bearer_token(&req) {
-        let ctx = match state.auth.verify_token(&token) {
+        let ctx = match state.auth.verify_token(&token).await {
             Ok(ctx) => ctx,
             Err(_) => return HttpResponse::Unauthorized().body("Invalid auth token"),
         };
@@ -205,6 +209,15 @@ pub async fn create_session(req: HttpRequest, state: web::Data<AppState>) -> imp
 )]
 #[delete("/api/auth/session")]
 pub async fn clear_session(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
+    let access_token = extract_bearer_token(&req).or_else(|| {
+        req.cookie(SESSION_COOKIE_NAME)
+            .map(|cookie| cookie.value().to_string())
+    });
+    if let Some(access_token) = access_token {
+        if state.auth.revoke_access_token(&access_token).await.is_err() {
+            return HttpResponse::InternalServerError().body("Failed to revoke session");
+        }
+    }
     if let Some(refresh) = req.cookie(REFRESH_COOKIE_NAME) {
         state.auth.revoke_refresh_token(refresh.value()).await;
     }
@@ -314,7 +327,9 @@ pub async fn refresh_session(req: HttpRequest, state: web::Data<AppState>) -> im
 #[post("/api/auth/logout_all")]
 pub async fn logout_all(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     let (actor, role, ip) = audit_actor(&req);
-    state.auth.revoke_all_for_subject(&actor).await;
+    if state.auth.revoke_all_for_subject(&actor).await.is_err() {
+        return HttpResponse::InternalServerError().body("Failed to revoke sessions");
+    }
     let cookie = Cookie::build(SESSION_COOKIE_NAME, "")
         .path("/")
         .max_age(CookieDuration::seconds(0))
@@ -563,7 +578,8 @@ pub async fn bootstrap_admin(
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Login success", body = TokenResponse),
-        (status = 401, description = "Unauthorized")
+        (status = 401, description = "Unauthorized"),
+        (status = 429, description = "Temporarily locked")
     )
 )]
 #[post("/api/auth/login")]
@@ -578,6 +594,13 @@ pub async fn login(
         .await
     {
         Ok(user) => user,
+        Err(crate::auth::AuthError::RateLimited {
+            retry_after_seconds,
+        }) => {
+            return HttpResponse::TooManyRequests()
+                .insert_header(("Retry-After", retry_after_seconds.to_string()))
+                .body("Invalid credentials")
+        }
         Err(_) => return HttpResponse::Unauthorized().body("Invalid credentials"),
     };
     let role = if user.role == "Admin" {
@@ -651,7 +674,14 @@ pub async fn create_api_token(
     if actor == "api_key" {
         return HttpResponse::Forbidden().body("API key cannot mint tokens");
     }
-    let scopes = json.scopes.clone().unwrap_or_else(|| vec!["*".to_string()]);
+    let requested_scopes = json
+        .scopes
+        .clone()
+        .unwrap_or_else(|| vec!["read".to_string()]);
+    let scopes = match validate_api_token_scopes(requested_scopes) {
+        Ok(scopes) => scopes,
+        Err(message) => return HttpResponse::BadRequest().body(message),
+    };
     let expires_at = json.expires_in_seconds.map(|ttl| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -769,8 +799,12 @@ pub async fn pairing_claim(
     let ip = req.peer_addr().map(|p| p.ip());
     let grant = match state.auth.consume_pairing_code(&body.code, ip).await {
         Ok(grant) => grant,
-        Err(crate::auth::AuthError::RateLimited) => {
-            return HttpResponse::TooManyRequests().body("Pairing rate limited");
+        Err(crate::auth::AuthError::RateLimited {
+            retry_after_seconds,
+        }) => {
+            return HttpResponse::TooManyRequests()
+                .insert_header(("Retry-After", retry_after_seconds.to_string()))
+                .body("Pairing rate limited");
         }
         Err(_) => return HttpResponse::BadRequest().body("Invalid pairing code"),
     };
@@ -783,8 +817,8 @@ pub async fn pairing_claim(
 
     let role = grant.role;
     let token = match role {
-        Role::Admin => state.auth.issue_admin_token(&subject, grant.scopes),
-        Role::Guest => state.auth.issue_guest_token(&subject, grant.scopes),
+        Role::Admin => state.auth.issue_admin_token(&subject, grant.scopes).await,
+        Role::Guest => state.auth.issue_guest_token(&subject, grant.scopes).await,
     };
     let token = match token {
         Ok(token) => token,
@@ -856,11 +890,12 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state
+    if state
         .audit
         .append_with_redaction(event, &state.config.privacy)
+        .is_err()
     {
-        tracing::warn!("audit log failed for {}: {}", req.path(), err);
+        crate::public_error::log_redacted_failure(req, "audit.append");
     }
 }
 

@@ -1,13 +1,15 @@
 use crate::at_rest::{
-    decrypt_file_to_bytes, encrypt_file_in_place, policy_for_project, require_master_key,
+    decrypt_file_handle_to_bytes, encrypt_file_in_place, policy_for_project, require_master_key,
     ProjectKeyStore,
 };
 use crate::config::AppConfig;
+use crate::fs_safety::open_project_file_read;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,13 +21,22 @@ use trueshot_core::fusion_replay::{
     FusionReplayArtifact, FusionReplayCapsule, FusionRevisionEnvelope,
     FUSION_REVISION_ENVELOPE_SCHEMA, MAX_FUSION_BASE_REPORT_BYTES,
 };
+use trueshot_core::lens_psf::MAX_LENS_PSF_ARTIFACT_BYTES;
 use trueshot_core::scheduler::Job;
+use trueshot_core::sensor_correction::MAX_SENSOR_CORRECTION_PROFILE_BYTES;
+use trueshot_core::sensor_noise::MAX_SENSOR_NOISE_PROFILE_BYTES;
 use uuid::Uuid;
 use walkdir::WalkDir;
 use zeroize::Zeroizing;
 
 pub const FUSION_REVISION_JOB_KIND: &str = "local_fusion_revision";
 const MAX_REVISION_INPUT_FILES: usize = 2_000_000;
+const MAX_FUSION_PROCESSOR_INPUT_BYTES: usize =
+    trueshot_core::fusion_replay::MAX_FUSION_REVISION_ENVELOPE_BYTES
+        + 2 * (MAX_SENSOR_NOISE_PROFILE_BYTES as usize
+            + MAX_SENSOR_CORRECTION_PROFILE_BYTES as usize
+            + MAX_LENS_PSF_ARTIFACT_BYTES as usize)
+        + 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,22 +204,25 @@ impl Job for FusionRevisionJob {
         if !prepared.replay.depth_consistent_refusion {
             command.arg("--no-depth-refusion");
         }
-        append_profile_arg(
-            &mut command,
-            "--sensor-noise-profile",
-            prepared.sensor_noise_profile.as_deref(),
-        );
-        append_profile_arg(
-            &mut command,
-            "--sensor-correction-profile",
-            prepared.sensor_correction_profile.as_deref(),
-        );
-        append_profile_arg(
-            &mut command,
-            "--lens-psf-profile",
-            prepared.lens_psf_profile.as_deref(),
-        );
-
+        let envelope_bytes = Zeroizing::new(serde_json::to_vec(&FusionProcessorInput {
+            envelope: &prepared.envelope,
+            encrypted_raw_key: prepared.encrypted_raw_key.as_deref(),
+            sensor_noise_profile_json: prepared
+                .sensor_noise_profile_json
+                .as_ref()
+                .map(|value| value.as_str()),
+            sensor_correction_profile_json: prepared
+                .sensor_correction_profile_json
+                .as_ref()
+                .map(|value| value.as_str()),
+            lens_psf_profile_json: prepared
+                .lens_psf_profile_json
+                .as_ref()
+                .map(|value| value.as_str()),
+        })?);
+        if envelope_bytes.len() > MAX_FUSION_PROCESSOR_INPUT_BYTES {
+            anyhow::bail!("Fusion processor input exceeds the bounded size limit");
+        }
         let mut child = command
             .spawn()
             .context("Launch packaged TrueShot processor")?;
@@ -217,10 +231,6 @@ impl Job for FusionRevisionJob {
             .take()
             .context("Fusion processor stderr is unavailable")?;
         let stderr_task = tokio::spawn(read_bounded_stderr(stderr));
-        let envelope_bytes = Zeroizing::new(serde_json::to_vec(&FusionProcessorInput {
-            envelope: &prepared.envelope,
-            encrypted_raw_key: prepared.encrypted_raw_key.as_deref(),
-        })?);
         let mut stdin = child
             .stdin
             .take()
@@ -311,9 +321,9 @@ struct PreparedRevision {
     output_root: PathBuf,
     replay: FusionReplayCapsule,
     envelope: FusionRevisionEnvelope,
-    sensor_noise_profile: Option<PathBuf>,
-    sensor_correction_profile: Option<PathBuf>,
-    lens_psf_profile: Option<PathBuf>,
+    sensor_noise_profile_json: Option<Zeroizing<String>>,
+    sensor_correction_profile_json: Option<Zeroizing<String>>,
+    lens_psf_profile_json: Option<Zeroizing<String>>,
     encrypt_revision_outputs: bool,
     encrypted_raw_key: Option<Zeroizing<[u8; 32]>>,
 }
@@ -322,6 +332,9 @@ struct PreparedRevision {
 struct FusionProcessorInput<'a> {
     envelope: &'a FusionRevisionEnvelope,
     encrypted_raw_key: Option<&'a [u8; 32]>,
+    sensor_noise_profile_json: Option<&'a str>,
+    sensor_correction_profile_json: Option<&'a str>,
+    lens_psf_profile_json: Option<&'a str>,
 }
 
 fn prepare_revision(
@@ -367,7 +380,6 @@ fn prepare_revision(
     let report_bytes = read_bounded_project_artifact(
         config,
         &payload.project_id,
-        &output_root,
         &report_path,
         MAX_FUSION_BASE_REPORT_BYTES,
     )?
@@ -380,7 +392,6 @@ fn prepare_revision(
     let edit_bytes = read_bounded_project_artifact(
         config,
         &payload.project_id,
-        &output_root,
         &edit_path,
         MAX_FUSION_EDIT_BYTES as usize,
     )?
@@ -400,18 +411,32 @@ fn prepare_revision(
     };
     envelope.validate()?;
     let replay = envelope.replay()?;
-    let encrypted_profile_present = [
+    let opened_sensor_noise = open_replay_profile(
+        &config.paths.projects_dir,
+        &payload.project_id,
+        &project_root,
         replay.sensor_noise_profile.as_ref(),
+    )?;
+    let opened_sensor_correction = open_replay_profile(
+        &config.paths.projects_dir,
+        &payload.project_id,
+        &project_root,
         replay.sensor_correction_profile.as_ref(),
+    )?;
+    let opened_lens_psf = open_replay_profile(
+        &config.paths.projects_dir,
+        &payload.project_id,
+        &project_root,
         replay.lens_psf_profile.as_ref(),
+    )?;
+    let encrypted_profile_present = [
+        opened_sensor_noise.as_ref(),
+        opened_sensor_correction.as_ref(),
+        opened_lens_psf.as_ref(),
     ]
     .into_iter()
     .flatten()
-    .try_fold(false, |found, artifact| {
-        Ok::<_, anyhow::Error>(
-            found || replay_profile_uses_encrypted_file(&project_root, artifact)?,
-        )
-    })?;
+    .any(|profile| profile.encrypted);
     if encrypted_profile_present && encrypted_project_key.is_none() {
         let master = require_master_key(&config.privacy, &config.paths.projects_dir)?;
         encrypted_project_key = Some(Zeroizing::new(
@@ -419,19 +444,24 @@ fn prepare_revision(
                 .load_or_create(&payload.project_id)?,
         ));
     }
-    let profile_key = encrypted_project_key.as_deref();
-    let sensor_noise_profile = resolve_replay_profile(
-        &project_root,
+    let sensor_noise_profile_json = read_replay_profile(
+        opened_sensor_noise,
         replay.sensor_noise_profile.as_ref(),
-        profile_key,
+        encrypted_project_key.as_deref(),
+        MAX_SENSOR_NOISE_PROFILE_BYTES as usize,
     )?;
-    let sensor_correction_profile = resolve_replay_profile(
-        &project_root,
+    let sensor_correction_profile_json = read_replay_profile(
+        opened_sensor_correction,
         replay.sensor_correction_profile.as_ref(),
-        profile_key,
+        encrypted_project_key.as_deref(),
+        MAX_SENSOR_CORRECTION_PROFILE_BYTES as usize,
     )?;
-    let lens_psf_profile =
-        resolve_replay_profile(&project_root, replay.lens_psf_profile.as_ref(), profile_key)?;
+    let lens_psf_profile_json = read_replay_profile(
+        opened_lens_psf,
+        replay.lens_psf_profile.as_ref(),
+        encrypted_project_key.as_deref(),
+        MAX_LENS_PSF_ARTIFACT_BYTES as usize,
+    )?;
     let encrypt_revision_outputs = policy_for_project(
         &config.paths.projects_dir,
         &payload.project_id,
@@ -444,122 +474,151 @@ fn prepare_revision(
         output_root,
         replay,
         envelope,
-        sensor_noise_profile,
-        sensor_correction_profile,
-        lens_psf_profile,
+        sensor_noise_profile_json,
+        sensor_correction_profile_json,
+        lens_psf_profile_json,
         encrypt_revision_outputs,
         encrypted_raw_key: encrypted_project_key,
     })
 }
 
-fn replay_profile_uses_encrypted_file(
-    project_root: &Path,
-    artifact: &FusionReplayArtifact,
-) -> Result<bool> {
-    artifact.validate()?;
-    let clear = project_root.join(&artifact.project_relative_path);
-    if clear.is_file() {
-        return Ok(false);
-    }
-    Ok(PathBuf::from(format!("{}.enc", clear.display())).is_file())
+struct OpenedReplayProfile {
+    file: std::fs::File,
+    encrypted: bool,
 }
 
-fn resolve_replay_profile(
+fn open_replay_profile(
+    projects_root: &Path,
+    project_id: &str,
     project_root: &Path,
     artifact: Option<&FusionReplayArtifact>,
-    encrypted_key: Option<&[u8; 32]>,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<OpenedReplayProfile>> {
     let Some(artifact) = artifact else {
         return Ok(None);
     };
     artifact.validate()?;
     let clear = project_root.join(&artifact.project_relative_path);
-    let path = if clear.is_file() {
-        clear
-    } else {
-        PathBuf::from(format!("{}.enc", clear.display()))
+    match open_project_file_read(projects_root, project_id, &clear) {
+        Ok(file) => {
+            return Ok(Some(OpenedReplayProfile {
+                file,
+                encrypted: false,
+            }));
+        }
+        Err(response) if response.status() == actix_web::http::StatusCode::NOT_FOUND => {}
+        Err(response) => {
+            anyhow::bail!(
+                "Rooted replay profile open failed with {}",
+                response.status()
+            )
+        }
+    }
+    let encrypted = PathBuf::from(format!("{}.enc", clear.display()));
+    match open_project_file_read(projects_root, project_id, &encrypted) {
+        Ok(file) => Ok(Some(OpenedReplayProfile {
+            file,
+            encrypted: true,
+        })),
+        Err(response) if response.status() == actix_web::http::StatusCode::NOT_FOUND => {
+            anyhow::bail!(
+                "Fusion replay profile is missing: {}",
+                artifact.project_relative_path
+            )
+        }
+        Err(response) => {
+            anyhow::bail!(
+                "Rooted encrypted replay profile open failed with {}",
+                response.status()
+            )
+        }
+    }
+}
+
+fn read_replay_profile(
+    opened: Option<OpenedReplayProfile>,
+    artifact: Option<&FusionReplayArtifact>,
+    encrypted_key: Option<&[u8; 32]>,
+    max_bytes: usize,
+) -> Result<Option<Zeroizing<String>>> {
+    let Some(opened) = opened else {
+        return Ok(None);
     };
-    let metadata = std::fs::symlink_metadata(&path)
-        .with_context(|| format!("Inspect replay profile {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("Fusion replay profile must be a real project file");
-    }
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("Resolve replay profile {}", path.display()))?;
-    if !canonical.starts_with(project_root) || !canonical.is_file() {
-        anyhow::bail!("Fusion replay profile escaped the project");
-    }
-    let observed = if canonical.extension().and_then(|value| value.to_str()) == Some("enc") {
+    let artifact = artifact.context("Opened replay profile is missing replay identity")?;
+    artifact.validate()?;
+    let bytes = if opened.encrypted {
         let key = encrypted_key.context("Encrypted replay profile key is unavailable")?;
-        let mut reader = trueshot_storage::encrypted::SeekableEncryptedFile::open(&canonical, key)?;
-        if reader.plaintext_len()
-            > trueshot_core::sensor_correction::MAX_SENSOR_CORRECTION_PROFILE_BYTES
-        {
-            anyhow::bail!("Encrypted replay profile exceeds the bounded size limit");
-        }
-        let mut digest = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let count = std::io::Read::read(&mut reader, &mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            digest.update(&buffer[..count]);
-        }
-        hex::encode(digest.finalize())
+        Zeroizing::new(decrypt_file_handle_to_bytes(opened.file, key, max_bytes)?)
     } else {
-        sha256_file(&canonical)?
+        if opened.file.metadata()?.len() > max_bytes as u64 {
+            anyhow::bail!("Replay profile exceeds the bounded size limit");
+        }
+        let mut reader = opened.file.take(max_bytes.saturating_add(1) as u64);
+        let mut bytes = Zeroizing::new(Vec::new());
+        reader.read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            anyhow::bail!("Replay profile exceeds the bounded size limit");
+        }
+        bytes
     };
+    let observed = hex::encode(Sha256::digest(bytes.as_slice()));
     if observed != artifact.sha256 {
         anyhow::bail!("Fusion replay profile digest changed");
     }
-    Ok(Some(canonical))
+    let json = std::str::from_utf8(&bytes)
+        .context("Fusion replay profile is not UTF-8 JSON")?
+        .to_owned();
+    Ok(Some(Zeroizing::new(json)))
 }
 
 fn read_bounded_project_artifact(
     config: &AppConfig,
     project_id: &str,
-    output_root: &Path,
     logical_path: &Path,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
-    validate_candidate(output_root, logical_path)?;
-    if logical_path.is_file() {
-        let metadata = std::fs::metadata(logical_path)?;
-        if metadata.len() > max_bytes as u64 {
-            anyhow::bail!("Fusion artifact exceeds the bounded read limit");
+    match open_project_file_read(&config.paths.projects_dir, project_id, logical_path) {
+        Ok(file) => {
+            if file.metadata()?.len() > max_bytes as u64 {
+                anyhow::bail!("Fusion artifact exceeds the bounded read limit");
+            }
+            let mut reader = file.take(max_bytes.saturating_add(1) as u64);
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+            if bytes.len() > max_bytes {
+                anyhow::bail!("Fusion artifact exceeds the bounded read limit");
+            }
+            return Ok(Some(bytes));
         }
-        return Ok(Some(std::fs::read(logical_path)?));
+        Err(response) if response.status() == actix_web::http::StatusCode::NOT_FOUND => {}
+        Err(response) => {
+            anyhow::bail!(
+                "Rooted fusion artifact open failed with {}",
+                response.status()
+            )
+        }
     }
     let encrypted = PathBuf::from(format!("{}.enc", logical_path.display()));
-    validate_candidate(output_root, &encrypted)?;
-    if !encrypted.is_file() {
-        return Ok(None);
-    }
+    let encrypted_file =
+        match open_project_file_read(&config.paths.projects_dir, project_id, &encrypted) {
+            Ok(file) => file,
+            Err(response) if response.status() == actix_web::http::StatusCode::NOT_FOUND => {
+                return Ok(None)
+            }
+            Err(response) => {
+                anyhow::bail!(
+                    "Rooted encrypted fusion artifact open failed with {}",
+                    response.status()
+                )
+            }
+        };
     let master = require_master_key(&config.privacy, &config.paths.projects_dir)?;
     let key =
         ProjectKeyStore::new(&config.paths.projects_dir, master).load_or_create(project_id)?;
-    Ok(Some(decrypt_file_to_bytes(&encrypted, &key, max_bytes)?))
-}
-
-fn validate_candidate(root: &Path, candidate: &Path) -> Result<()> {
-    let parent = candidate
-        .parent()
-        .context("Fusion artifact has no parent")?;
-    let parent = parent
-        .canonicalize()
-        .context("Resolve fusion artifact parent")?;
-    if !parent.starts_with(root) {
-        anyhow::bail!("Fusion artifact escaped the output root");
-    }
-    if candidate.exists() {
-        let metadata = std::fs::symlink_metadata(candidate)?;
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("Fusion artifact cannot be a symbolic link");
-        }
-    }
-    Ok(())
+    Ok(Some(decrypt_file_handle_to_bytes(
+        encrypted_file,
+        &key,
+        max_bytes,
+    )?))
 }
 
 fn inspect_raw_inputs(raw_root: &Path) -> Result<Vec<PathBuf>> {
@@ -639,12 +698,6 @@ fn resolve_packaged_cli() -> Result<PathBuf> {
     Ok(cli)
 }
 
-fn append_profile_arg(command: &mut tokio::process::Command, flag: &str, path: Option<&Path>) {
-    if let Some(path) = path {
-        command.arg(flag).arg(path);
-    }
-}
-
 fn canonical_real_directory(path: &Path, project_root: &Path) -> Result<PathBuf> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -699,26 +752,6 @@ fn validate_sha256(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut Sha256Writer(&mut hasher))?;
-    Ok(hex::encode(hasher.finalize()))
-}
-
-impl std::io::Write for Sha256Writer<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-struct Sha256Writer<'a>(&'a mut Sha256);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,32 +787,66 @@ mod tests {
         assert!(!executor.cancel(Uuid::new_v4()));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn encrypted_replay_profile_is_plaintext_digest_bound_and_wrong_key_fails() {
+    fn encrypted_replay_profile_is_descriptor_bound_digest_checked_and_zero_copy_handoff_ready() {
+        use std::os::unix::fs::symlink;
+
         let directory = tempfile::tempdir().unwrap();
-        let project_root = directory.path().canonicalize().unwrap();
+        let project_root = directory.path().join("project");
         let raw = project_root.join("raw");
-        std::fs::create_dir(&raw).unwrap();
+        std::fs::create_dir_all(&raw).unwrap();
         let clear = raw.join("noise.json");
         let encrypted = raw.join("noise.json.enc");
+        let encrypted_original = raw.join("noise.original.json.enc");
+        let attacker = directory.path().join("attacker.json.enc");
         let payload = br#"{"schema":"trueshot.sensor-noise.v1"}"#;
         let key = [0x51u8; 32];
         std::fs::write(&clear, payload).unwrap();
         trueshot_storage::encrypted::encrypt_file(&clear, &encrypted, &key, 64 * 1024).unwrap();
+        trueshot_storage::encrypted::encrypt_bytes(
+            &attacker,
+            &key,
+            br#"{"schema":"attacker"}"#,
+            64 * 1024,
+        )
+        .unwrap();
         std::fs::remove_file(&clear).unwrap();
         let artifact = FusionReplayArtifact {
             project_relative_path: "raw/noise.json".to_string(),
             sha256: hex::encode(Sha256::digest(payload)),
         };
 
-        assert!(replay_profile_uses_encrypted_file(&project_root, &artifact).unwrap());
+        let opened =
+            open_replay_profile(directory.path(), "project", &project_root, Some(&artifact))
+                .unwrap();
+        assert!(opened.as_ref().unwrap().encrypted);
+        std::fs::rename(&encrypted, &encrypted_original).unwrap();
+        symlink(&attacker, &encrypted).unwrap();
+        let resolved = read_replay_profile(
+            opened,
+            Some(&artifact),
+            Some(&key),
+            MAX_SENSOR_NOISE_PROFILE_BYTES as usize,
+        )
+        .unwrap();
         assert_eq!(
-            resolve_replay_profile(&project_root, Some(&artifact), Some(&key)).unwrap(),
-            Some(encrypted.canonicalize().unwrap())
+            resolved.as_ref().map(|value| value.as_str()),
+            Some(std::str::from_utf8(payload).unwrap())
         );
-        assert!(
-            resolve_replay_profile(&project_root, Some(&artifact), Some(&[0x52u8; 32])).is_err()
-        );
+
+        std::fs::remove_file(&encrypted).unwrap();
+        std::fs::rename(&encrypted_original, &encrypted).unwrap();
+        let opened =
+            open_replay_profile(directory.path(), "project", &project_root, Some(&artifact))
+                .unwrap();
+        assert!(read_replay_profile(
+            opened,
+            Some(&artifact),
+            Some(&[0x52u8; 32]),
+            MAX_SENSOR_NOISE_PROFILE_BYTES as usize,
+        )
+        .is_err());
         assert!(!clear.exists());
     }
 }

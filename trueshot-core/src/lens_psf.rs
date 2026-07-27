@@ -277,8 +277,15 @@ impl LensPsfProfile {
         } else {
             bounded_read(path, "Lens PSF profile")?
         };
-        let mut profile: Self = serde_json::from_slice(&bytes)?;
-        profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        Self::from_json_bytes(&bytes)
+    }
+
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > MAX_LENS_PSF_ARTIFACT_BYTES {
+            anyhow::bail!("Lens PSF profile exceeds the size limit");
+        }
+        let mut profile: Self = serde_json::from_slice(bytes)?;
+        profile.calibration_id = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         profile.validate()?;
         Ok(profile)
     }

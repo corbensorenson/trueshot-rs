@@ -1,7 +1,3 @@
-// Suppress warnings for intentionally unused items (future expansion points)
-#![allow(dead_code)]
-#![allow(unused_variables)]
-
 pub mod align_raw;
 pub mod bayer_cache;
 pub mod brdf;
@@ -124,6 +120,7 @@ pub mod compute {
     pub mod async_utils;
     pub mod cluster;
     pub mod context;
+    #[cfg(feature = "wgpu")]
     pub mod gpu;
     pub mod wavelet;
 }

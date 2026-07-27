@@ -89,7 +89,7 @@ default = ["wgpu"]
 wgpu = ["dep:wgpu"]
 vision = ["dep:trueshot-vision"]
 timing = ["comfy-table"]
-gpu = []
+gpu = ["wgpu"]
 opencv = ["trueshot-calibration/opencv"]
 utoipa = ["dep:utoipa"]
 dev_license = []
@@ -109,6 +109,10 @@ harness = false
 [[bench]]
 name = "fusion_benchmark"
 harness = false
+
+[[example]]
+name = "demosaic_metal_qualification"
+required-features = ["gpu"]
 
 [lints]
 workspace = true

@@ -396,6 +396,7 @@ impl std::fmt::Display for UsageLimitError {
 impl std::error::Error for UsageLimitError {}
 
 /// Compute checksum of a byte slice
+#[cfg(test)]
 pub fn compute_checksum(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -405,6 +406,7 @@ pub fn compute_checksum(data: &[u8]) -> [u8; 32] {
 /// Obfuscated license check distribution
 /// Call this from multiple places in the code
 #[inline(never)]
+#[cfg(test)]
 pub fn distributed_check_a() -> bool {
     // This function should be called from various places
     // to make it harder to find and patch the license check
@@ -413,6 +415,7 @@ pub fn distributed_check_a() -> bool {
 }
 
 #[inline(never)]
+#[cfg(test)]
 pub fn distributed_check_b() -> bool {
     // Another distributed check point
     let count = VERIFICATION_COUNT.load(Ordering::SeqCst);

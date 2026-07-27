@@ -226,7 +226,6 @@ pub fn gpu_compute_mertens_weights(
 }
 
 // WGSL shader for Mertens weight computation (currently unused - GPU implementation not active)
-const WORKGROUP_SIZE: u32 = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]

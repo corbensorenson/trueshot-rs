@@ -32,7 +32,7 @@ impl PluginEngine {
         let init_func = instance.get_typed_func::<(), ()>(&mut self.store, "init")?;
 
         Ok(PluginInstance {
-            instance,
+            _instance: instance,
             init_func,
         })
     }
@@ -44,6 +44,7 @@ impl PluginEngine {
 }
 
 pub struct PluginInstance {
-    instance: Instance,
+    // Keep the Wasmtime instance alive for the exported typed function.
+    _instance: Instance,
     init_func: TypedFunc<(), ()>,
 }

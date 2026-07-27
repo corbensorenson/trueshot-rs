@@ -1,18 +1,20 @@
+use super::project_asset::OpenedProjectAsset;
 use crate::at_rest::{
-    clear_project_encrypted, decrypt_file_in_place, decrypt_file_to_bytes, decrypt_project_scopes,
+    clear_project_encrypted, decrypt_file_handle_to_bytes, decrypt_project_scopes,
     encrypt_file_in_place, encrypt_project_scopes, mark_project_encrypted, policy_for_project,
     require_master_key, write_encrypted_bytes_atomic, ProjectKeyStore,
 };
 use crate::audit::AuditEvent;
 use crate::auth::require_admin;
 use crate::fs_safety::{
-    project_size_bytes, resolve_project_child, resolve_project_child_file, resolve_project_dir,
-    resolve_project_file,
+    create_project_directory, ensure_project_directory, list_project_scope_files,
+    open_project_file_read, project_size_bytes, remove_project_directory_tree,
+    remove_project_file_if_exists, resolve_project_child, resolve_project_child_file,
+    resolve_project_dir, resolve_project_file, stage_project_file, write_project_file_atomic,
 };
 use crate::fusion_revision::{preflight as preflight_fusion_revision, FusionRevisionJobPayload};
 use crate::licensing::require_license_feature;
 use crate::state::AppState;
-use actix_files::NamedFile;
 use actix_web::{delete, get, post, put, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -21,20 +23,21 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
-use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use trueshot_core::fusion_edit::{
-    FusionEditDocument, FusionEditOperation, FUSION_EDIT_SCHEMA, MAX_FUSION_EDIT_BYTES,
+    FusionEditDocument, FusionEditOperation, FusionEditSelector, FUSION_EDIT_SCHEMA,
+    MAX_FUSION_EDIT_BYTES,
 };
 use trueshot_core::fusion_replay::FusionReplayCapsule;
 use trueshot_core::licensing::Feature;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use walkdir::WalkDir;
 
 const MAX_FUSION_REPORT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_FUSION_ARTIFACT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_FUSION_REPORTS: usize = 128;
+const MAX_IMU_TIMELINE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PROJECT_METADATA_BYTES: usize = 1024 * 1024;
 
 // Struct for create request
 #[derive(serde::Deserialize, ToSchema)]
@@ -89,6 +92,8 @@ pub struct FusionReportSummary {
     pub frame_count: Option<u16>,
     pub crop_origin_x: Option<u32>,
     pub crop_origin_y: Option<u32>,
+    pub glare_physical_scale: bool,
+    pub trimap_physical_scale: bool,
     pub fusion_edit_digest: Option<String>,
     pub editable_base: bool,
     pub revision_executable: bool,
@@ -215,22 +220,18 @@ pub async fn create_project(
         return resp;
     }
     let projects_dir = &state.config.paths.projects_dir;
-    let project_path = match resolve_project_dir(projects_dir, &json.name) {
+    let project_path = match create_project_directory(projects_dir, &json.name) {
         Ok(path) => path,
         Err(resp) => return resp,
     };
 
-    if project_path.exists() {
-        return HttpResponse::Conflict().body("Project already exists");
+    for child in ["raw", "processed", "output"] {
+        if let Err(response) =
+            ensure_project_directory(projects_dir, &json.name, &project_path.join(child))
+        {
+            return response;
+        }
     }
-
-    if let Err(e) = fs::create_dir_all(&project_path).await {
-        return HttpResponse::InternalServerError().body(e.to_string());
-    }
-
-    // Create raw/processed dirs
-    let _ = fs::create_dir_all(project_path.join("raw")).await;
-    let _ = fs::create_dir_all(project_path.join("processed")).await;
 
     // Persist project metadata
     let metadata_path = project_path.join("project.json");
@@ -241,14 +242,14 @@ pub async fn create_project(
         "created_at": Utc::now().to_rfc3339(),
         "license": license
     });
-    if let Ok(payload) = serde_json::to_vec_pretty(&metadata) {
-        if let Err(e) = fs::write(&metadata_path, payload).await {
-            tracing::warn!(
-                "Failed to write project metadata {:?}: {}",
-                metadata_path,
-                e
-            );
-        }
+    let payload = match serde_json::to_vec_pretty(&metadata) {
+        Ok(payload) => payload,
+        Err(error) => return HttpResponse::InternalServerError().body(error.to_string()),
+    };
+    if let Err(response) =
+        write_project_file_atomic(projects_dir, &json.name, &metadata_path, &payload)
+    {
+        return response;
     }
 
     if let Some(policy) = policy_for_project(
@@ -311,9 +312,24 @@ pub async fn purge_project_raw(
         Err(resp) => return resp,
     };
 
-    if project_path.exists() {
-        if let Err(e) = fs::remove_dir_all(project_path).await {
-            return HttpResponse::InternalServerError().body(e.to_string());
+    let projects_dir = state.config.paths.projects_dir.clone();
+    let purge_id = id.clone();
+    match tokio::task::spawn_blocking(move || {
+        remove_project_directory_tree(&projects_dir, &purge_id, &project_path)
+            .map_err(|response| response.status())
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(status)) if status == actix_web::http::StatusCode::BAD_REQUEST => {
+            return HttpResponse::BadRequest().body("Unsafe project RAW path");
+        }
+        Ok(Err(status)) if status == actix_web::http::StatusCode::NOT_FOUND => {}
+        Ok(Err(status)) if status == actix_web::http::StatusCode::PAYLOAD_TOO_LARGE => {
+            return HttpResponse::PayloadTooLarge().body("Project RAW tree is too deeply nested");
+        }
+        Ok(Err(_)) | Err(_) => {
+            return HttpResponse::InternalServerError().body("Failed to purge project RAW");
         }
     }
     log_audit(
@@ -510,7 +526,7 @@ pub async fn import_model(
         .max_project_bytes
         .unwrap_or(100 * 1024 * 1024 * 1024);
 
-    let existing_size = match project_size_bytes(&project_path) {
+    let existing_size = match project_size_bytes(&state.config.paths.projects_dir, &id) {
         Ok(size) => size,
         Err(resp) => return resp,
     };
@@ -533,17 +549,14 @@ pub async fn import_model(
                 Ok(path) => path,
                 Err(resp) => return resp,
             };
-            let mut f = match tokio::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&filepath)
-                .await
-            {
-                Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return HttpResponse::Conflict().body("File already exists")
-                }
-                Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+            let staged =
+                match stage_project_file(&state.config.paths.projects_dir, &id, &filepath, false) {
+                    Ok(staged) => staged,
+                    Err(response) => return response,
+                };
+            let mut f = match staged.try_clone_file() {
+                Ok(file) => tokio::fs::File::from_std(file),
+                Err(response) => return response,
             };
 
             let mut hasher = Sha256::new();
@@ -558,12 +571,10 @@ pub async fn import_model(
                         total_written = total_written.saturating_add(data.len() as u64);
                         file_written = file_written.saturating_add(data.len() as u64);
                         if total_written > max_upload_bytes {
-                            let _ = tokio::fs::remove_file(&filepath).await;
                             return HttpResponse::PayloadTooLarge()
                                 .body("Upload exceeded max size");
                         }
                         if existing_size.saturating_add(total_written) > max_project_bytes {
-                            let _ = tokio::fs::remove_file(&filepath).await;
                             return HttpResponse::PayloadTooLarge().body("Project quota exceeded");
                         }
                         if sniff_buf.len() < 8192 {
@@ -578,21 +589,22 @@ pub async fn import_model(
                         }
                         hasher.update(&data);
                         if let Err(e) = f.write_all(&data).await {
-                            let _ = tokio::fs::remove_file(&filepath).await;
                             return HttpResponse::InternalServerError().body(e.to_string());
                         }
                     }
                     Err(e) => {
-                        let _ = tokio::fs::remove_file(&filepath).await;
                         return HttpResponse::InternalServerError().body(e.to_string());
                     }
                 }
             }
 
             if let Err(e) = f.flush().await {
-                let _ = tokio::fs::remove_file(&filepath).await;
                 return HttpResponse::InternalServerError().body(e.to_string());
             }
+            if let Err(e) = f.sync_all().await {
+                return HttpResponse::InternalServerError().body(e.to_string());
+            }
+            drop(f);
 
             if sniffed_mime.is_none() {
                 if let Some(kind) = infer::get(&sniff_buf) {
@@ -607,13 +619,22 @@ pub async fn import_model(
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 if !is_allowed_mime_for_extension(&ext, mime) {
-                    let _ = tokio::fs::remove_file(&filepath).await;
                     return HttpResponse::BadRequest().body("Uploaded file MIME type not allowed");
                 }
             }
 
+            if let Err(response) = staged.commit() {
+                return response;
+            }
             if let Err(resp) = run_antivirus_scan(&state, &filepath).await {
-                let _ = tokio::fs::remove_file(&filepath).await;
+                if let Err(cleanup) =
+                    remove_project_file_if_exists(&state.config.paths.projects_dir, &id, &filepath)
+                {
+                    tracing::error!(
+                        "Failed to remove antivirus-rejected project upload: {}",
+                        cleanup.status()
+                    );
+                }
                 return resp;
             }
 
@@ -695,7 +716,7 @@ pub async fn download_output_file(
             Err(resp) => return resp,
         };
 
-    match open_project_file(&state, &id, &file_path).await {
+    match OpenedProjectAsset::open(&state, &id, &file_path) {
         Ok(file) => {
             log_audit(
                 &req,
@@ -710,7 +731,7 @@ pub async fn download_output_file(
                     serde_json::json!({ "path": file_path.to_string_lossy() }),
                 ),
             );
-            file.into_response(&req)
+            file.into_response(&req, None, false)
         }
         Err(resp) => resp,
     }
@@ -747,35 +768,12 @@ pub async fn list_project_assets(
 
     let mut assets: Vec<(i64, ProjectAsset)> = Vec::new();
 
-    let add_scope = |root: std::path::PathBuf,
-                     prefix: &str,
-                     traversal_limit: Option<usize>,
-                     assets: &mut Vec<(i64, ProjectAsset)>| {
-        let mut added = 0usize;
-        for entry in WalkDir::new(&root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if traversal_limit.is_some_and(|limit| added >= limit) {
-                break;
-            }
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            let rel = match path.strip_prefix(&root) {
-                Ok(rel) => rel,
-                Err(_) => continue,
-            };
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            let meta = entry.metadata().ok();
-            let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            let modified_at = meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64);
+    let add_scope = |prefix: &str, assets: &mut Vec<(i64, ProjectAsset)>| {
+        let (entries, _) =
+            list_project_scope_files(&state.config.paths.projects_dir, &id, prefix, 64, 20_000)?;
+        for entry in entries {
+            let rel_str = entry.relative_path.to_string_lossy().replace('\\', "/");
+            let modified_at = entry.modified_at_unix;
             let modified_label = modified_at.map(|ts| {
                 DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(ts as u64))
                     .to_rfc3339()
@@ -785,49 +783,37 @@ pub async fn list_project_assets(
                 modified_at.unwrap_or(0),
                 ProjectAsset {
                     path,
-                    bytes,
+                    bytes: entry.bytes,
                     modified_at: modified_label,
                 },
             ));
-            added = added.saturating_add(1);
         }
+        Ok::<(), HttpResponse>(())
     };
 
     match scope.as_str() {
         "raw" => {
-            let dir = match resolve_project_child(&state.config.paths.projects_dir, &id, "raw") {
-                Ok(path) => path,
-                Err(resp) => return resp,
-            };
-            add_scope(dir, "raw", Some(limit), &mut assets);
+            if let Err(response) = add_scope("raw", &mut assets) {
+                return response;
+            }
         }
         "output" => {
-            let dir = match resolve_project_child(&state.config.paths.projects_dir, &id, "output") {
-                Ok(path) => path,
-                Err(resp) => return resp,
-            };
-            add_scope(dir, "output", None, &mut assets);
+            if let Err(response) = add_scope("output", &mut assets) {
+                return response;
+            }
         }
         "processed" => {
-            let dir =
-                match resolve_project_child(&state.config.paths.projects_dir, &id, "processed") {
-                    Ok(path) => path,
-                    Err(resp) => return resp,
-                };
-            add_scope(dir, "processed", None, &mut assets);
+            if let Err(response) = add_scope("processed", &mut assets) {
+                return response;
+            }
         }
         "all" => {
-            let dir = match resolve_project_child(&state.config.paths.projects_dir, &id, "output") {
-                Ok(path) => path,
-                Err(resp) => return resp,
-            };
-            add_scope(dir, "output", None, &mut assets);
-            let dir =
-                match resolve_project_child(&state.config.paths.projects_dir, &id, "processed") {
-                    Ok(path) => path,
-                    Err(resp) => return resp,
-                };
-            add_scope(dir, "processed", None, &mut assets);
+            if let Err(response) = add_scope("output", &mut assets) {
+                return response;
+            }
+            if let Err(response) = add_scope("processed", &mut assets) {
+                return response;
+            }
         }
         _ => {
             return HttpResponse::BadRequest().body("scope must be raw, output, processed, or all");
@@ -883,37 +869,34 @@ pub async fn list_fusion_reports(
         Err(resp) => return resp,
     };
     let requested_limit = query.limit.unwrap_or(32).clamp(1, MAX_FUSION_REPORTS);
-    let mut candidates: HashMap<String, (PathBuf, i64, Option<String>)> = HashMap::new();
-    let mut visited_files = 0usize;
+    let (inventory, traversal_truncated) = match list_project_scope_files(
+        &state.config.paths.projects_dir,
+        &id,
+        "output",
+        8,
+        20_000,
+    ) {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
+    let available_files: HashMap<String, u64> = inventory
+        .iter()
+        .map(|entry| {
+            (
+                entry.relative_path.to_string_lossy().replace('\\', "/"),
+                entry.bytes,
+            )
+        })
+        .collect();
+    let mut candidates: HashMap<String, (bool, i64, Option<String>)> = HashMap::new();
 
-    for entry in WalkDir::new(&output_root)
-        .max_depth(8)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        visited_files = visited_files.saturating_add(1);
-        if visited_files > 20_000 {
-            break;
-        }
-        let relative = match entry.path().strip_prefix(&output_root) {
-            Ok(path) => path.to_string_lossy().replace('\\', "/"),
-            Err(_) => continue,
-        };
+    for entry in inventory {
+        let relative = entry.relative_path.to_string_lossy().replace('\\', "/");
         let logical = relative.strip_suffix(".enc").unwrap_or(&relative);
         if !logical.ends_with("_fusion_report.json") {
             continue;
         }
-        let metadata = entry.metadata().ok();
-        let modified_at = metadata
-            .as_ref()
-            .and_then(|meta| meta.modified().ok())
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs() as i64)
-            .unwrap_or(0);
+        let modified_at = entry.modified_at_unix.unwrap_or(0);
         let modified_label = (modified_at > 0).then(|| {
             DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(modified_at as u64))
                 .to_rfc3339()
@@ -922,28 +905,17 @@ pub async fn list_fusion_reports(
         candidates
             .entry(logical.to_string())
             .and_modify(|current| {
-                let current_encrypted =
-                    current.0.extension().and_then(|value| value.to_str()) == Some("enc");
+                let current_encrypted = current.0;
                 if (current_encrypted && !is_encrypted) || modified_at > current.1 {
-                    *current = (
-                        entry.path().to_path_buf(),
-                        modified_at,
-                        modified_label.clone(),
-                    );
+                    *current = (is_encrypted, modified_at, modified_label.clone());
                 }
             })
-            .or_insert_with(|| {
-                (
-                    entry.path().to_path_buf(),
-                    modified_at,
-                    modified_label.clone(),
-                )
-            });
+            .or_insert_with(|| (is_encrypted, modified_at, modified_label.clone()));
     }
 
     let mut candidates = candidates.into_iter().collect::<Vec<_>>();
     candidates.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then_with(|| a.0.cmp(&b.0)));
-    let truncated = candidates.len() > requested_limit || visited_files > 20_000;
+    let truncated = candidates.len() > requested_limit || traversal_truncated;
     candidates.truncate(requested_limit);
 
     let mut reports = Vec::with_capacity(candidates.len());
@@ -982,6 +954,7 @@ pub async fn list_fusion_reports(
             &report_sha256,
             modified_at,
             &output_root,
+            Some(&available_files),
         ) {
             Ok(report) => reports.push(report),
             Err(_) => rejected_reports = rejected_reports.saturating_add(1),
@@ -1046,14 +1019,11 @@ pub async fn download_fusion_artifact(
     }
 
     let (id, tail) = path.into_inner();
-    if !is_allowed_fusion_artifact(&tail) {
-        return HttpResponse::BadRequest().body("Unsupported fusion artifact");
-    }
-    let file_path =
-        match resolve_project_child_file(&state.config.paths.projects_dir, &id, "output", &tail) {
-            Ok(path) => path,
-            Err(resp) => return resp,
-        };
+    let file_path = match resolve_fusion_artifact_path(&state.config.paths.projects_dir, &id, &tail)
+    {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
     let bytes =
         match read_project_file_bytes_bounded(&state, &id, &file_path, MAX_FUSION_ARTIFACT_BYTES)
             .await
@@ -1152,6 +1122,7 @@ pub async fn create_fusion_edit(
         &report_sha256,
         None,
         &output_root,
+        None,
     ) {
         Ok(summary) => summary,
         Err(_) => {
@@ -1185,6 +1156,9 @@ pub async fn create_fusion_edit(
         operations: json.operations.clone(),
     };
     if let Err(error) = document.validate() {
+        return HttpResponse::BadRequest().body(error.to_string());
+    }
+    if let Err(error) = validate_physical_edit_evidence(&document, &report_value) {
         return HttpResponse::BadRequest().body(error.to_string());
     }
     let digest = match document.digest() {
@@ -1311,6 +1285,38 @@ pub async fn create_fusion_edit(
         "cli_argument": cli_argument,
         "document": document
     }))
+}
+
+fn validate_physical_edit_evidence(
+    document: &FusionEditDocument,
+    report: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let glare_physical = report
+        .get("glare_physical_scale")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let boundary_physical = report
+        .get("trimap_physical_scale")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    for operation in &document.operations {
+        match operation.selector {
+            FusionEditSelector::GlareAffected if !glare_physical => anyhow::bail!(
+                "Fusion edit {} requires verified sensor-pitch glare evidence",
+                operation.id
+            ),
+            FusionEditSelector::BoundaryAffected | FusionEditSelector::BoundaryCrossingCore
+                if !boundary_physical =>
+            {
+                anyhow::bail!(
+                    "Fusion edit {} requires a verified aperture/PSF boundary trimap",
+                    operation.id
+                )
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -1605,12 +1611,18 @@ pub async fn get_project_license(
 
     let metadata_path = project_path.join("project.json");
     let mut license = None;
-    if let Ok(payload) = fs::read(&metadata_path).await {
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) {
-            if let Some(license_value) = value.get("license") {
-                license = serde_json::from_value::<ProjectLicense>(license_value.clone()).ok();
+    match read_project_file_bytes_bounded(&state, &id, &metadata_path, MAX_PROJECT_METADATA_BYTES)
+        .await
+    {
+        Ok(Some(payload)) => {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                if let Some(license_value) = value.get("license") {
+                    license = serde_json::from_value::<ProjectLicense>(license_value.clone()).ok();
+                }
             }
         }
+        Ok(None) => {}
+        Err(response) => return response,
     }
 
     let response = license
@@ -1651,20 +1663,51 @@ pub async fn update_project_license(
     }
 
     let metadata_path = project_path.join("project.json");
-    let mut metadata = if let Ok(payload) = fs::read(&metadata_path).await {
-        serde_json::from_slice::<serde_json::Value>(&payload)
-            .unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
+    let mut metadata = match read_project_file_bytes_bounded(
+        &state,
+        &id,
+        &metadata_path,
+        MAX_PROJECT_METADATA_BYTES,
+    )
+    .await
+    {
+        Ok(Some(payload)) => serde_json::from_slice::<serde_json::Value>(&payload)
+            .unwrap_or_else(|_| serde_json::json!({})),
+        Ok(None) => serde_json::json!({}),
+        Err(response) => return response,
     };
 
     let mut updated = payload.into_inner();
     updated.updated_at = Some(Utc::now().to_rfc3339());
     metadata["license"] = serde_json::to_value(&updated).unwrap_or_else(|_| serde_json::json!({}));
 
-    if let Ok(serialized) = serde_json::to_vec_pretty(&metadata) {
-        if let Err(err) = fs::write(&metadata_path, serialized).await {
-            return HttpResponse::InternalServerError().body(err.to_string());
+    let serialized = match serde_json::to_vec_pretty(&metadata) {
+        Ok(serialized) => serialized,
+        Err(_) => {
+            return HttpResponse::InternalServerError().body("Project metadata encode failed")
+        }
+    };
+    let projects_dir = state.config.paths.projects_dir.clone();
+    let write_id = id.clone();
+    let write_path = metadata_path.clone();
+    match tokio::task::spawn_blocking(move || {
+        write_project_file_atomic(&projects_dir, &write_id, &write_path, &serialized)
+            .map_err(|response| response.status())
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(status)) if status == actix_web::http::StatusCode::BAD_REQUEST => {
+            return HttpResponse::BadRequest().body("Unsafe project metadata path");
+        }
+        Ok(Err(status)) if status == actix_web::http::StatusCode::NOT_FOUND => {
+            return HttpResponse::NotFound().body("Project not found");
+        }
+        Ok(Err(_)) => {
+            return HttpResponse::InternalServerError().body("Project metadata write failed");
+        }
+        Err(_) => {
+            return HttpResponse::InternalServerError().body("Project metadata write failed");
         }
     }
 
@@ -1716,25 +1759,27 @@ pub async fn get_imu_diagnostics(
         Err(resp) => return resp,
     };
 
-    let payload = match read_project_file_bytes(&state, &id, &imu_path).await {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            return HttpResponse::Ok().json(ImuDiagnostics {
-                status: "missing".to_string(),
-                samples: 0,
-                duration_seconds: 0.0,
-                sample_rate_hz: 0.0,
-                accel_mean: 0.0,
-                accel_rms: 0.0,
-                accel_peak: 0.0,
-                gyro_mean: 0.0,
-                gyro_rms: 0.0,
-                gyro_peak: 0.0,
-                warnings: vec!["IMU timeline not found".to_string()],
-            });
-        }
-        Err(resp) => return resp,
-    };
+    let payload =
+        match read_project_file_bytes_bounded(&state, &id, &imu_path, MAX_IMU_TIMELINE_BYTES).await
+        {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                return HttpResponse::Ok().json(ImuDiagnostics {
+                    status: "missing".to_string(),
+                    samples: 0,
+                    duration_seconds: 0.0,
+                    sample_rate_hz: 0.0,
+                    accel_mean: 0.0,
+                    accel_rms: 0.0,
+                    accel_peak: 0.0,
+                    gyro_mean: 0.0,
+                    gyro_rms: 0.0,
+                    gyro_peak: 0.0,
+                    warnings: vec!["IMU timeline not found".to_string()],
+                });
+            }
+            Err(resp) => return resp,
+        };
 
     let samples: Vec<ImuSample> = match serde_json::from_slice(&payload) {
         Ok(samples) => samples,
@@ -1862,7 +1907,7 @@ pub async fn download_processed_file(
             Err(resp) => return resp,
         };
 
-    match open_project_file(&state, &id, &file_path).await {
+    match OpenedProjectAsset::open(&state, &id, &file_path) {
         Ok(file) => {
             log_audit(
                 &req,
@@ -1877,7 +1922,7 @@ pub async fn download_processed_file(
                     serde_json::json!({ "path": file_path.to_string_lossy() }),
                 ),
             );
-            file.into_response(&req)
+            file.into_response(&req, None, false)
         }
         Err(resp) => resp,
     }
@@ -1913,7 +1958,7 @@ pub async fn download_raw_file(
             Err(resp) => return resp,
         };
 
-    match open_project_file(&state, &id, &file_path).await {
+    match OpenedProjectAsset::open(&state, &id, &file_path) {
         Ok(file) => {
             log_audit(
                 &req,
@@ -1928,7 +1973,7 @@ pub async fn download_raw_file(
                     serde_json::json!({ "path": file_path.to_string_lossy() }),
                 ),
             );
-            file.into_response(&req)
+            file.into_response(&req, None, false)
         }
         Err(resp) => resp,
     }
@@ -2103,6 +2148,7 @@ fn parse_fusion_report_summary(
     report_sha256: &str,
     modified_at: Option<String>,
     output_root: &Path,
+    available_files: Option<&HashMap<String, u64>>,
 ) -> Result<FusionReportSummary, &'static str> {
     let object = value.as_object().ok_or("Fusion report must be an object")?;
     let schema = bounded_string(object.get("schema"), 80).ok_or("Missing fusion schema")?;
@@ -2158,16 +2204,14 @@ fn parse_fusion_report_summary(
             return Err("Fusion artifact must be a portable PNG filename");
         }
         let relative = report_directory.join(filename);
-        let absolute = output_root.join(&relative);
-        let encrypted = PathBuf::from(format!("{}.enc", absolute.display()));
-        let present_path = safe_existing_file(output_root, &absolute)
-            .or_else(|| safe_existing_file(output_root, &encrypted));
-        let present = present_path.is_some();
-        let bytes = present_path
-            .as_ref()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| metadata.len());
         let portable_path = relative.to_string_lossy().replace('\\', "/");
+        let bytes = fusion_artifact_inventory_bytes(
+            output_root,
+            &relative,
+            &portable_path,
+            available_files,
+        );
+        let present = bytes.is_some();
         if !present {
             warnings.push(format!("Missing {key} artifact: {portable_path}"));
         }
@@ -2189,16 +2233,14 @@ fn parse_fusion_report_summary(
             return Err("Fusion edit artifact must be a portable PNG filename");
         }
         let relative = report_directory.join(edit_filename);
-        let absolute = output_root.join(&relative);
-        let encrypted = PathBuf::from(format!("{}.enc", absolute.display()));
-        let present_path = safe_existing_file(output_root, &absolute)
-            .or_else(|| safe_existing_file(output_root, &encrypted));
-        let present = present_path.is_some();
-        let bytes = present_path
-            .as_ref()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| metadata.len());
         let portable_path = relative.to_string_lossy().replace('\\', "/");
+        let bytes = fusion_artifact_inventory_bytes(
+            output_root,
+            &relative,
+            &portable_path,
+            available_files,
+        );
+        let present = bytes.is_some();
         if !present {
             warnings.push(format!("Missing edit artifact: {portable_path}"));
         }
@@ -2363,10 +2405,39 @@ fn parse_fusion_report_summary(
         frame_count,
         crop_origin_x,
         crop_origin_y,
+        glare_physical_scale: object
+            .get("glare_physical_scale")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+        trimap_physical_scale: object
+            .get("trimap_physical_scale")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
         fusion_edit_digest,
         editable_base,
         revision_executable,
     })
+}
+
+fn fusion_artifact_inventory_bytes(
+    output_root: &Path,
+    relative: &Path,
+    portable_path: &str,
+    available_files: Option<&HashMap<String, u64>>,
+) -> Option<u64> {
+    if let Some(available_files) = available_files {
+        return available_files.get(portable_path).copied().or_else(|| {
+            available_files
+                .get(&format!("{portable_path}.enc"))
+                .copied()
+        });
+    }
+    let absolute = output_root.join(relative);
+    let encrypted = PathBuf::from(format!("{}.enc", absolute.display()));
+    safe_existing_file(output_root, &absolute)
+        .or_else(|| safe_existing_file(output_root, &encrypted))
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
 }
 
 fn fusion_edit_binding_from_report(
@@ -2500,6 +2571,17 @@ fn is_allowed_fusion_artifact(path: &str) -> bool {
     .any(|suffix| lower.ends_with(suffix))
 }
 
+fn resolve_fusion_artifact_path(
+    projects_dir: &Path,
+    project_id: &str,
+    tail: &str,
+) -> Result<PathBuf, HttpResponse> {
+    if !is_allowed_fusion_artifact(tail) {
+        return Err(HttpResponse::BadRequest().body("Unsupported fusion artifact"));
+    }
+    resolve_project_child_file(projects_dir, project_id, "output", tail)
+}
+
 fn is_allowed_model_extension(name: &str) -> bool {
     let allowed = ["ply", "obj", "gltf", "glb", "usdz", "usd"];
     std::path::Path::new(name)
@@ -2538,115 +2620,103 @@ fn is_allowed_mime_for_extension(ext: &str, mime: &str) -> bool {
     }
 }
 
-async fn open_project_file(
-    state: &AppState,
-    project_id: &str,
-    file_path: &std::path::Path,
-) -> Result<NamedFile, HttpResponse> {
-    let mut resolved = file_path.to_path_buf();
-    if !resolved.exists() {
-        let enc_path = std::path::PathBuf::from(format!("{}.enc", resolved.display()));
-        if enc_path.exists() {
-            let key_store = project_key_store(state)?;
-            let key = key_store
-                .load_or_create(project_id)
-                .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-            if let Ok(restored) = decrypt_file_in_place(&enc_path, &key) {
-                resolved = restored;
-            }
-        }
-    }
-
-    if !resolved.exists() {
-        return Err(HttpResponse::NotFound().body("File not found"));
-    }
-
-    NamedFile::open_async(resolved)
-        .await
-        .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))
-}
-
-async fn read_project_file_bytes(
-    state: &AppState,
-    project_id: &str,
-    file_path: &std::path::Path,
-) -> Result<Option<Vec<u8>>, HttpResponse> {
-    let mut resolved = file_path.to_path_buf();
-    if !resolved.exists() {
-        let enc_path = std::path::PathBuf::from(format!("{}.enc", resolved.display()));
-        if enc_path.exists() {
-            let key_store = project_key_store(state)?;
-            let key = key_store
-                .load_or_create(project_id)
-                .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-            match decrypt_file_in_place(&enc_path, &key) {
-                Ok(restored) => resolved = restored,
-                Err(err) => {
-                    return Err(HttpResponse::InternalServerError().body(err.to_string()));
-                }
-            }
-        } else {
-            return Ok(None);
-        }
-    }
-
-    if !resolved.exists() {
-        return Ok(None);
-    }
-
-    let bytes = fs::read(resolved)
-        .await
-        .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-    Ok(Some(bytes))
-}
-
 async fn read_project_file_bytes_bounded(
     state: &AppState,
     project_id: &str,
     file_path: &Path,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>, HttpResponse> {
-    let allowed_root =
-        resolve_project_child(&state.config.paths.projects_dir, project_id, "output")?;
-    if let Some(safe_path) = safe_existing_file(&allowed_root, file_path) {
-        let metadata = fs::metadata(&safe_path)
-            .await
-            .map_err(|error| HttpResponse::InternalServerError().body(error.to_string()))?;
-        if metadata.len() > max_bytes as u64 {
-            return Err(HttpResponse::PayloadTooLarge().body(format!(
-                "Project file exceeds {} byte read limit",
-                max_bytes
-            )));
-        }
-        let bytes = fs::read(safe_path)
-            .await
-            .map_err(|error| HttpResponse::InternalServerError().body(error.to_string()))?;
-        return Ok(Some(bytes));
+    match read_clear_project_file_bytes_bounded(
+        &state.config.paths.projects_dir,
+        project_id,
+        file_path,
+        max_bytes,
+    )
+    .await?
+    {
+        Some(bytes) => return Ok(Some(bytes)),
+        None => {}
     }
 
     let encrypted_path = PathBuf::from(format!("{}.enc", file_path.display()));
-    let Some(encrypted_path) = safe_existing_file(&allowed_root, &encrypted_path) else {
-        return Ok(None);
+    let encrypted_file = match open_project_file_read(
+        &state.config.paths.projects_dir,
+        project_id,
+        &encrypted_path,
+    ) {
+        Ok(file) => file,
+        Err(response) if response.status() == actix_web::http::StatusCode::NOT_FOUND => {
+            return Ok(None)
+        }
+        Err(response) => return Err(response),
     };
     let key_store = project_key_store(state)?;
     let key = key_store
         .load_or_create(project_id)
-        .map_err(|error| HttpResponse::InternalServerError().body(error.to_string()))?;
+        .map_err(|_| HttpResponse::InternalServerError().body("Project key unavailable"))?;
     let decrypted = tokio::task::spawn_blocking(move || {
-        decrypt_file_to_bytes(&encrypted_path, &key, max_bytes)
+        decrypt_file_handle_to_bytes(encrypted_file, &key, max_bytes)
     })
     .await
-    .map_err(|error| HttpResponse::InternalServerError().body(error.to_string()))?
+    .map_err(|_| HttpResponse::InternalServerError().body("Encrypted project read failed"))?
     .map_err(|error| {
         if error.to_string().contains("read limit") {
-            HttpResponse::PayloadTooLarge().body(error.to_string())
+            HttpResponse::PayloadTooLarge().body(format!(
+                "Encrypted project file exceeds {} byte read limit",
+                max_bytes,
+            ))
         } else {
-            HttpResponse::InternalServerError().body(error.to_string())
+            HttpResponse::InternalServerError().body("Encrypted project read failed")
         }
     })?;
     Ok(Some(decrypted))
 }
 
+async fn read_clear_project_file_bytes_bounded(
+    projects_dir: &Path,
+    project_id: &str,
+    file_path: &Path,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, HttpResponse> {
+    let file = match open_project_file_read(projects_dir, project_id, file_path) {
+        Ok(file) => file,
+        Err(response) if response.status() == actix_web::http::StatusCode::NOT_FOUND => {
+            return Ok(None);
+        }
+        Err(response) => return Err(response),
+    };
+    if file
+        .metadata()
+        .map_err(|_| HttpResponse::InternalServerError().body("Project file inspection failed"))?
+        .len()
+        > max_bytes as u64
+    {
+        return Err(HttpResponse::PayloadTooLarge().body(format!(
+            "Project file exceeds {} byte read limit",
+            max_bytes
+        )));
+    }
+    let bytes = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut reader = file.take(max_bytes.saturating_add(1) as u64);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Ok::<_, std::io::Error>(bytes)
+    })
+    .await
+    .map_err(|_| HttpResponse::InternalServerError().body("Project file read failed"))?
+    .map_err(|_| HttpResponse::InternalServerError().body("Project file read failed"))?;
+    if bytes.len() > max_bytes {
+        return Err(HttpResponse::PayloadTooLarge().body(format!(
+            "Project file exceeds {} byte read limit",
+            max_bytes
+        )));
+    }
+    Ok(Some(bytes))
+}
+
+// Inventory-only helper. Content reads must use `open_project_file_read` so this
+// canonicalization result never becomes file-open authority.
 fn safe_existing_file(allowed_root: &Path, candidate: &Path) -> Option<PathBuf> {
     let root = allowed_root.canonicalize().ok()?;
     let candidate = candidate.canonicalize().ok()?;
@@ -2794,17 +2864,19 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state
+    if state
         .audit
         .append_with_redaction(event, &state.config.privacy)
+        .is_err()
     {
-        tracing::warn!("audit log failed for {}: {}", req.path(), err);
+        crate::public_error::log_redacted_failure(req, "audit.append");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::{test as actix_test, web, App};
 
     fn valid_fusion_report() -> serde_json::Value {
         serde_json::json!({
@@ -2846,6 +2918,8 @@ mod tests {
             "physical_focus_policy": "calibrated_breathing_pupil_field_psf",
             "boundary_policy": "single_traceable_measured_focus_plane_no_cross_depth_interpolation",
             "glare_policy": "focus_evidence_suppression_only_measured_radiance_unchanged",
+            "glare_physical_scale": true,
+            "trimap_physical_scale": true,
             "frequency_policy": "same_cfa_sparse_low_detail_measured_sources_only_envelope_clamped",
             "noise_model_calibrated": true,
             "lens_psf_calibrated": true,
@@ -2895,6 +2969,7 @@ mod tests {
             &"e".repeat(64),
             Some("2026-07-27T00:00:00Z".to_string()),
             directory.path(),
+            None,
         )
         .unwrap();
 
@@ -2926,6 +3001,7 @@ mod tests {
             &"e".repeat(64),
             None,
             directory.path(),
+            None,
         );
 
         assert!(result.is_err());
@@ -2943,6 +3019,7 @@ mod tests {
             &"e".repeat(64),
             None,
             directory.path(),
+            None,
         );
 
         assert!(result.is_err());
@@ -2960,6 +3037,97 @@ mod tests {
         assert!(is_allowed_fusion_artifact("capture_sensor_correction.png"));
         assert!(!is_allowed_fusion_artifact("capture_fusion_report.json"));
         assert!(!is_allowed_fusion_artifact("capture.tiff"));
+    }
+
+    #[cfg(unix)]
+    async fn actix_fusion_artifact_security_route(
+        path: web::Path<(String, String)>,
+        projects_dir: web::Data<PathBuf>,
+    ) -> HttpResponse {
+        let (project_id, tail) = path.into_inner();
+        let artifact_path =
+            match resolve_fusion_artifact_path(projects_dir.get_ref(), &project_id, &tail) {
+                Ok(path) => path,
+                Err(response) => return response,
+            };
+        match read_clear_project_file_bytes_bounded(
+            projects_dir.get_ref(),
+            &project_id,
+            &artifact_path,
+            MAX_FUSION_ARTIFACT_BYTES,
+        )
+        .await
+        {
+            Ok(Some(bytes)) => HttpResponse::Ok().body(bytes),
+            Ok(None) => HttpResponse::NotFound().finish(),
+            Err(response) => response,
+        }
+    }
+
+    #[cfg(unix)]
+    #[actix_web::test]
+    async fn direct_fusion_artifact_route_rejects_final_and_intermediate_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let projects = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let output = projects.path().join("project").join("output");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("safe_fusion_overlay.png"), b"safe").unwrap();
+        std::fs::write(
+            outside.path().join("secret_fusion_overlay.png"),
+            b"outside-secret",
+        )
+        .unwrap();
+        symlink(
+            outside.path().join("secret_fusion_overlay.png"),
+            output.join("final_fusion_overlay.png"),
+        )
+        .unwrap();
+        symlink(outside.path(), output.join("redirect")).unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(projects.path().to_path_buf()))
+                .route(
+                    "/api/projects/{id}/fusion-artifact/{tail:.*}",
+                    web::get().to(actix_fusion_artifact_security_route),
+                ),
+        )
+        .await;
+
+        let safe = actix_test::call_service(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/api/projects/project/fusion-artifact/safe_fusion_overlay.png")
+                .to_request(),
+        )
+        .await;
+        let safe_status = safe.status();
+        let safe_body = actix_test::read_body(safe).await;
+        assert_eq!(
+            safe_status,
+            actix_web::http::StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&safe_body)
+        );
+        assert_eq!(safe_body.as_ref(), b"safe");
+
+        for uri in [
+            "/api/projects/project/fusion-artifact/final_fusion_overlay.png",
+            "/api/projects/project/fusion-artifact/redirect/secret_fusion_overlay.png",
+        ] {
+            let response = actix_test::call_service(
+                &app,
+                actix_test::TestRequest::get().uri(uri).to_request(),
+            )
+            .await;
+            assert_ne!(response.status(), actix_web::http::StatusCode::OK);
+            assert!(!actix_test::read_body(response)
+                .await
+                .windows(b"outside-secret".len())
+                .any(|window| window == b"outside-secret"));
+        }
     }
 
     #[test]
@@ -2984,6 +3152,7 @@ mod tests {
             &"e".repeat(64),
             None,
             directory.path(),
+            None,
         )
         .unwrap();
 
@@ -3013,6 +3182,43 @@ mod tests {
     }
 
     #[test]
+    fn physical_edit_publication_requires_qualified_report_evidence() {
+        let glare: FusionEditDocument = serde_json::from_value(serde_json::json!({
+            "schema": FUSION_EDIT_SCHEMA,
+            "capture_group_id": "a".repeat(64),
+            "base_report_sha256": "b".repeat(64),
+            "width": 64,
+            "height": 48,
+            "crop_origin_x": 12,
+            "crop_origin_y": 20,
+            "frame_count": 6,
+            "operations": [{
+                "id": "glare",
+                "rect": {"x": 0, "y": 0, "width": 8, "height": 8},
+                "source_frame": 0,
+                "reason": "glare",
+                "selector": "glare_affected"
+            }]
+        }))
+        .unwrap();
+        glare.validate().unwrap();
+        let mut report = valid_fusion_report();
+        validate_physical_edit_evidence(&glare, &report).unwrap();
+        report["glare_physical_scale"] = serde_json::json!(false);
+        assert!(validate_physical_edit_evidence(&glare, &report).is_err());
+
+        let mut boundary = glare;
+        boundary.operations[0].id = "boundary".to_string();
+        boundary.operations[0].reason = trueshot_core::fusion_edit::FusionEditReason::Boundary;
+        boundary.operations[0].selector = FusionEditSelector::BoundaryCrossingCore;
+        boundary.validate().unwrap();
+        report["glare_physical_scale"] = serde_json::json!(true);
+        validate_physical_edit_evidence(&boundary, &report).unwrap();
+        report["trimap_physical_scale"] = serde_json::json!(false);
+        assert!(validate_physical_edit_evidence(&boundary, &report).is_err());
+    }
+
+    #[test]
     fn fusion_report_parser_rejects_revision_identity_as_editable_base() {
         let directory = tempfile::tempdir().unwrap();
         write_fusion_artifacts(directory.path());
@@ -3025,6 +3231,7 @@ mod tests {
             &"e".repeat(64),
             None,
             directory.path(),
+            None,
         )
         .unwrap();
 
@@ -3070,6 +3277,7 @@ mod tests {
             &"e".repeat(64),
             None,
             directory.path(),
+            None,
         )
         .unwrap();
 

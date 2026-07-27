@@ -123,6 +123,10 @@ pub fn compute_sharpness_map(image: &Array2<f64>, params: &GradingParams) -> Res
 /// Gaussian smoothing to reduce noise in sharpness map
 ///
 /// This prevents edge speckles caused by noisy sharpness values
+#[expect(
+    dead_code,
+    reason = "kept as a benchmark baseline for edge-aware grading filters"
+)]
 fn gaussian_smooth(image: &Array2<f64>, sigma: f64) -> Result<Array2<f64>> {
     let (height, width) = image.dim();
     let mut smoothed = Array2::<f64>::zeros((height, width));
@@ -414,6 +418,10 @@ pub fn compute_grade_stats(grades: &Array2<u8>) -> GradeStats {
 ///
 /// For each pixel, if it's surrounded by higher-grade neighbors, upgrade it.
 /// This creates smoother transitions between grade regions and reduces artifacts.
+#[expect(
+    dead_code,
+    reason = "kept as a benchmark baseline for aperture-constrained boundary refinement"
+)]
 fn smooth_grade_boundaries(grades: &mut Array2<u8>, foreground_mask: &Array2<bool>) -> Result<()> {
     let (height, width) = grades.dim();
     let mut smoothed = grades.clone();

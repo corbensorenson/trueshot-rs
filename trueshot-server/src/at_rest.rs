@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rand::RngCore;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
@@ -467,6 +467,9 @@ pub fn encrypt_file_in_place(
     Ok(Some(enc_path))
 }
 
+// Retained only for the dormant legacy reconstruction adapter. Shipping paths
+// use bounded decryption-aware readers and never materialize plaintext siblings.
+#[allow(dead_code)]
 pub fn decrypt_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBuf> {
     if path.extension().and_then(|s| s.to_str()) != Some("enc") {
         return Ok(path.to_path_buf());
@@ -489,12 +492,21 @@ pub fn decrypt_file_to_bytes(
     key: &[u8; 32],
     max_plaintext_bytes: usize,
 ) -> Result<Vec<u8>> {
-    let mut file = File::open(path)
+    let file = File::open(path)
         .with_context(|| format!("Failed to open encrypted file: {}", path.display()))?;
+    decrypt_file_handle_to_bytes(file, key, max_plaintext_bytes)
+}
+
+pub fn decrypt_file_handle_to_bytes(
+    mut file: File,
+    key: &[u8; 32],
+    max_plaintext_bytes: usize,
+) -> Result<Vec<u8>> {
+    file.rewind()?;
     let mut header = [0u8; 4];
     file.read_exact(&mut header)?;
     if header == trueshot_storage::encrypted::MAGIC {
-        let mut reader = trueshot_storage::encrypted::SeekableEncryptedFile::open(path, key)?;
+        let mut reader = trueshot_storage::encrypted::SeekableEncryptedFile::from_file(file, key)?;
         let plaintext_len = usize::try_from(reader.plaintext_len())
             .context("Encrypted plaintext length exceeds this platform")?;
         if plaintext_len > max_plaintext_bytes {
@@ -525,9 +537,10 @@ pub fn decrypt_file_to_bytes(
     file.read_exact(&mut nonce_prefix)?;
 
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let capacity = std::fs::metadata(path)
+    let capacity = file
+        .metadata()
         .ok()
-        .and_then(|meta| usize::try_from(meta.len()).ok())
+        .and_then(|metadata| usize::try_from(metadata.len()).ok())
         .unwrap_or(0)
         .min(max_plaintext_bytes);
     let mut output = Vec::with_capacity(capacity);
@@ -548,7 +561,7 @@ pub fn decrypt_file_to_bytes(
         let nonce = build_nonce(&nonce_prefix, chunk_index);
         let plaintext = cipher
             .decrypt(Nonce::from_slice(&nonce), cipher_buf.as_ref())
-            .with_context(|| format!("Decryption failed for {}", path.display()))?;
+            .context("Encrypted chunk authentication failed")?;
         if output.len().saturating_add(plaintext.len()) > max_plaintext_bytes {
             anyhow::bail!(
                 "Decrypted file exceeds {} byte read limit",

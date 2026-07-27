@@ -463,9 +463,9 @@ mod tests {
     #[test]
     fn test_timed_scope_macro() {
         #[allow(unused_mut)]
-        let mut timer = HierarchicalTimer::new("test");
+        let mut _timer = HierarchicalTimer::new("test");
 
-        let result = timed_scope!(&mut timer, "macro_test", {
+        let result = timed_scope!(&mut _timer, "macro_test", {
             thread::sleep(Duration::from_millis(5));
             42
         });
@@ -474,7 +474,7 @@ mod tests {
 
         #[cfg(feature = "timing")]
         {
-            let report = timer.aggregate();
+            let report = _timer.aggregate();
             assert!(report.timings.contains_key("macro_test"));
         }
     }

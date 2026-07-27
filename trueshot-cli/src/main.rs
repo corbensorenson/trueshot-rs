@@ -47,6 +47,7 @@ use trueshot_core::intrinsics::{
 use trueshot_core::inventory::{Device, Inventory, Machine, Model, Sequence, SequenceStatus};
 use trueshot_core::lens_psf::{
     calibrate_lens_psf, LensPsfCalibrationConfig, LensPsfMeasurementSet, LensPsfProfile,
+    MAX_LENS_PSF_ARTIFACT_BYTES,
 };
 use trueshot_core::lens_psf_extract::{extract_lens_psf_measurements, LensPsfExtractionPlan};
 use trueshot_core::licensing::{Feature, LicenseError, LicenseManager};
@@ -54,10 +55,12 @@ use trueshot_core::native_fusion::{
     fuse_native_group_with_id, fusion_provenance_preview_with_frequency, NativeFusionConfig,
     NativeFusionResult, FREQUENCY_FLAG_DETAIL_REFERENCE, FREQUENCY_FLAG_DETAIL_SINGLE_SOURCE,
     FREQUENCY_FLAG_MEASUREMENT_CLAMPED, FREQUENCY_FLAG_SEPARATED, FREQUENCY_FLAG_SPLIT_SOURCES,
-    FUSION_EDIT_MEASURED_SOURCE, FUSION_FLAG_BRACKET_ALIGNED, FUSION_FLAG_CENSORED,
-    FUSION_FLAG_CENSOR_CONFLICT, FUSION_FLAG_DISOCCLUDED, FUSION_FLAG_OUTLIER_REJECTED,
-    FUSION_FLAG_SOURCE_FALLBACK, FUSION_FLAG_UNCALIBRATED_NOISE, FUSION_FLAG_VISIBILITY_CORRECTED,
-    SENSOR_CORRECTION_DEFECT_REPAIRED, SENSOR_CORRECTION_FLAT_FIELD,
+    FUSION_EDIT_BOUNDARY_CONSTRAINED, FUSION_EDIT_BOUNDARY_CORE_CONSTRAINED,
+    FUSION_EDIT_GLARE_CONSTRAINED, FUSION_EDIT_MEASURED_SOURCE, FUSION_FLAG_BRACKET_ALIGNED,
+    FUSION_FLAG_CENSORED, FUSION_FLAG_CENSOR_CONFLICT, FUSION_FLAG_DISOCCLUDED,
+    FUSION_FLAG_OUTLIER_REJECTED, FUSION_FLAG_SOURCE_FALLBACK, FUSION_FLAG_UNCALIBRATED_NOISE,
+    FUSION_FLAG_VISIBILITY_CORRECTED, SENSOR_CORRECTION_DEFECT_REPAIRED,
+    SENSOR_CORRECTION_FLAT_FIELD,
 };
 use trueshot_core::performance_telemetry::{ProcessTelemetrySnapshot, ProcessTelemetryWindow};
 use trueshot_core::postprocess::postprocess_f32;
@@ -79,16 +82,22 @@ use trueshot_core::sensor_calibration::{
 };
 use trueshot_core::sensor_correction::{
     CorrectionCalibrationSplit, SensorCorrectionAccumulator, SensorCorrectionCalibrationConfig,
-    SensorCorrectionProfile,
+    SensorCorrectionProfile, MAX_SENSOR_CORRECTION_PROFILE_BYTES,
 };
-use trueshot_core::sensor_noise::{SensorNoiseProfile, SENSOR_NOISE_PROFILE_SCHEMA};
+use trueshot_core::sensor_noise::{
+    SensorNoiseProfile, MAX_SENSOR_NOISE_PROFILE_BYTES, SENSOR_NOISE_PROFILE_SCHEMA,
+};
 use trueshot_core::smart_loader::{NativeGroupArena, SmartLoader};
 use trueshot_core::timing::HierarchicalTimer;
 use trueshot_core::types::ProcessingOptions;
 use trueshot_core::validation::validate_photogrammetry_input;
 use zeroize::Zeroizing;
 
-const MAX_FUSION_PROCESSOR_INPUT_BYTES: usize = MAX_FUSION_REVISION_ENVELOPE_BYTES + 4096;
+const MAX_FUSION_PROCESSOR_INPUT_BYTES: usize = MAX_FUSION_REVISION_ENVELOPE_BYTES
+    + 2 * (MAX_SENSOR_NOISE_PROFILE_BYTES as usize
+        + MAX_SENSOR_CORRECTION_PROFILE_BYTES as usize
+        + MAX_LENS_PSF_ARTIFACT_BYTES as usize)
+    + 64 * 1024;
 use uuid::Uuid;
 
 const SENSOR_CALIBRATION_ARTIFACT_SCHEMA: &str = "trueshot.sensor-calibration.artifact.v2";
@@ -841,7 +850,7 @@ fn cmd_process(
     if fusion_edits.is_some() && fusion_revision_stdin {
         anyhow::bail!("--fusion-edits and --fusion-revision-stdin are mutually exclusive");
     }
-    let (fusion_revision, encrypted_raw_key) = if fusion_revision_stdin {
+    let (fusion_revision, encrypted_raw_key, inline_profiles) = if fusion_revision_stdin {
         let mut bytes = Zeroizing::new(Vec::new());
         io::stdin()
             .take((MAX_FUSION_PROCESSOR_INPUT_BYTES + 1) as u64)
@@ -856,15 +865,27 @@ fn cmd_process(
             let input: FusionProcessorInput =
                 serde_json::from_value(value).context("Validate fusion processor input")?;
             input.envelope.validate()?;
+            let replay = input.envelope.replay()?;
+            let profiles = InlineFusionProfiles {
+                sensor_noise_profile_json: input.sensor_noise_profile_json,
+                sensor_correction_profile_json: input.sensor_correction_profile_json,
+                lens_psf_profile_json: input.lens_psf_profile_json,
+            };
+            profiles.validate(&replay)?;
             (
                 Some(input.envelope),
                 input.encrypted_raw_key.map(Zeroizing::new),
+                Some(profiles),
             )
         } else {
-            (Some(FusionRevisionEnvelope::from_json_bytes(&bytes)?), None)
+            (
+                Some(FusionRevisionEnvelope::from_json_bytes(&bytes)?),
+                None,
+                None,
+            )
         }
     } else {
-        (None, None)
+        (None, None, None)
     };
     let mut license_manager = init_license_manager()?;
     let required = process_required_features(mode);
@@ -918,6 +939,7 @@ fn cmd_process(
             lens_psf_profile.as_deref(),
             fusion_edits.as_deref(),
             fusion_revision.as_ref(),
+            inline_profiles.as_ref(),
             !no_depth_refusion,
             encrypted_raw_key,
             Some(&inventory_ctx),
@@ -1000,6 +1022,65 @@ fn cmd_process(
 struct FusionProcessorInput {
     envelope: FusionRevisionEnvelope,
     encrypted_raw_key: Option<[u8; 32]>,
+    #[serde(default)]
+    sensor_noise_profile_json: Option<String>,
+    #[serde(default)]
+    sensor_correction_profile_json: Option<String>,
+    #[serde(default)]
+    lens_psf_profile_json: Option<String>,
+}
+
+struct InlineFusionProfiles {
+    sensor_noise_profile_json: Option<String>,
+    sensor_correction_profile_json: Option<String>,
+    lens_psf_profile_json: Option<String>,
+}
+
+impl InlineFusionProfiles {
+    fn validate(&self, replay: &FusionReplayCapsule) -> Result<()> {
+        validate_inline_profile(
+            "sensor noise",
+            self.sensor_noise_profile_json.as_deref(),
+            replay.sensor_noise_profile.as_ref(),
+            MAX_SENSOR_NOISE_PROFILE_BYTES as usize,
+        )?;
+        validate_inline_profile(
+            "sensor correction",
+            self.sensor_correction_profile_json.as_deref(),
+            replay.sensor_correction_profile.as_ref(),
+            MAX_SENSOR_CORRECTION_PROFILE_BYTES as usize,
+        )?;
+        validate_inline_profile(
+            "lens PSF",
+            self.lens_psf_profile_json.as_deref(),
+            replay.lens_psf_profile.as_ref(),
+            MAX_LENS_PSF_ARTIFACT_BYTES as usize,
+        )
+    }
+}
+
+fn validate_inline_profile(
+    label: &str,
+    json: Option<&str>,
+    artifact: Option<&FusionReplayArtifact>,
+    max_bytes: usize,
+) -> Result<()> {
+    match (json, artifact) {
+        (None, None) => Ok(()),
+        (Some(_), None) => anyhow::bail!("Unexpected inline {label} profile"),
+        (None, Some(_)) => anyhow::bail!("Missing inline {label} profile"),
+        (Some(json), Some(artifact)) => {
+            artifact.validate()?;
+            if json.len() > max_bytes {
+                anyhow::bail!("Inline {label} profile exceeds its size limit");
+            }
+            let observed = hex::encode(Sha256::digest(json.as_bytes()));
+            if observed != artifact.sha256 {
+                anyhow::bail!("Inline {label} profile digest mismatch");
+            }
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -2243,6 +2324,7 @@ fn run_burst_pipeline(
     lens_psf_profile_path: Option<&Path>,
     fusion_edits_path: Option<&Path>,
     fusion_revision: Option<&FusionRevisionEnvelope>,
+    inline_profiles: Option<&InlineFusionProfiles>,
     depth_consistent_refusion: bool,
     encrypted_raw_key: Option<Zeroizing<[u8; 32]>>,
     _inventory_ctx: Option<&InventoryContext>,
@@ -2284,10 +2366,25 @@ fn run_burst_pipeline(
         state.mark_step_completed("scan_input", vec![]);
         state.mark_step_started("sfm");
     }
-    let sensor_noise_profile = sensor_noise_profile_path
-        .map(|path| SensorNoiseProfile::load_json_with_key(path, encrypted_raw_key.as_deref()))
-        .transpose()
-        .context("Load sensor noise calibration profile")?;
+    if inline_profiles.is_some()
+        && (sensor_noise_profile_path.is_some()
+            || sensor_correction_profile_path.is_some()
+            || lens_psf_profile_path.is_some())
+    {
+        anyhow::bail!("Inline and pathname calibration profiles are mutually exclusive");
+    }
+    let sensor_noise_profile = match inline_profiles
+        .and_then(|profiles| profiles.sensor_noise_profile_json.as_deref())
+    {
+        Some(json) => Some(
+            SensorNoiseProfile::from_json_bytes(json.as_bytes())
+                .context("Parse inline sensor noise calibration profile")?,
+        ),
+        None => sensor_noise_profile_path
+            .map(|path| SensorNoiseProfile::load_json_with_key(path, encrypted_raw_key.as_deref()))
+            .transpose()
+            .context("Load sensor noise calibration profile")?,
+    };
     if let Some(profile) = &sensor_noise_profile {
         println!(
             "  Sensor noise: {} {} {}-bit, {} ISO models ({})",
@@ -2298,10 +2395,20 @@ fn run_burst_pipeline(
             profile.calibration_id
         );
     }
-    let sensor_correction_profile = sensor_correction_profile_path
-        .map(|path| SensorCorrectionProfile::load_json_with_key(path, encrypted_raw_key.as_deref()))
-        .transpose()
-        .context("Load sensor spatial correction profile")?;
+    let sensor_correction_profile = match inline_profiles
+        .and_then(|profiles| profiles.sensor_correction_profile_json.as_deref())
+    {
+        Some(json) => Some(
+            SensorCorrectionProfile::from_json_bytes(json.as_bytes())
+                .context("Parse inline sensor spatial correction profile")?,
+        ),
+        None => sensor_correction_profile_path
+            .map(|path| {
+                SensorCorrectionProfile::load_json_with_key(path, encrypted_raw_key.as_deref())
+            })
+            .transpose()
+            .context("Load sensor spatial correction profile")?,
+    };
     if let Some(profile) = &sensor_correction_profile {
         println!(
             "  Sensor correction: {}x{} grid, {} defects, {:.3}-{:.3} m focus ({})",
@@ -2313,10 +2420,17 @@ fn run_burst_pipeline(
             profile.calibration_id
         );
     }
-    let lens_psf_profile = lens_psf_profile_path
-        .map(|path| LensPsfProfile::load_json_with_key(path, encrypted_raw_key.as_deref()))
-        .transpose()
-        .context("Load lens PSF calibration profile")?;
+    let lens_psf_profile =
+        match inline_profiles.and_then(|profiles| profiles.lens_psf_profile_json.as_deref()) {
+            Some(json) => Some(
+                LensPsfProfile::from_json_bytes(json.as_bytes())
+                    .context("Parse inline lens PSF calibration profile")?,
+            ),
+            None => lens_psf_profile_path
+                .map(|path| LensPsfProfile::load_json_with_key(path, encrypted_raw_key.as_deref()))
+                .transpose()
+                .context("Load lens PSF calibration profile")?,
+        };
     if let Some(profile) = &lens_psf_profile {
         println!(
             "  Lens PSF: {} focus x {} radius knots, ideal/corrected p95 {:.4}/{:.4} ({})",
@@ -2916,12 +3030,15 @@ fn run_burst_pipeline(
                         "base_report_sha256": fusion_edit_base_report_sha256,
                         "map": edit_map_name,
                         "map_legend": {
-                            "measured_source_override": FUSION_EDIT_MEASURED_SOURCE
+                            "rectangle_measured_source": FUSION_EDIT_MEASURED_SOURCE,
+                            "glare_affected_measured_source": FUSION_EDIT_GLARE_CONSTRAINED,
+                            "boundary_affected_measured_source": FUSION_EDIT_BOUNDARY_CONSTRAINED,
+                            "boundary_crossing_core_measured_source": FUSION_EDIT_BOUNDARY_CORE_CONSTRAINED
                         },
                         "operation_count": edit.operations.len(),
                         "edited_pixels": operator_override_pixels,
                         "operations": edit.operations,
-                        "policy": "aligned_uncensored_measured_frame_only_atomic_fail_closed"
+                        "policy": "aligned_uncensored_measured_frame_evidence_constrained_atomic_fail_closed"
                     }),
                 );
             }
@@ -3513,7 +3630,7 @@ fn build_fusion_replay_capsule(
     {
         return Ok(None);
     }
-    let input = input
+    let _input = input
         .canonicalize()
         .with_context(|| format!("Resolve replay input {}", input.display()))?;
     let output = output
@@ -5618,6 +5735,24 @@ fn run_with_tray(port: u16) -> Result<()> {
 #[cfg(test)]
 mod burst_pipeline_tests {
     use super::*;
+
+    #[test]
+    fn inline_fusion_profiles_are_presence_size_and_digest_bound() {
+        let json = r#"{"schema":"trueshot.sensor-noise.v1"}"#;
+        let artifact = FusionReplayArtifact {
+            project_relative_path: "raw/noise.json".to_string(),
+            sha256: hex::encode(Sha256::digest(json.as_bytes())),
+        };
+
+        validate_inline_profile("sensor noise", Some(json), Some(&artifact), 1024).unwrap();
+        assert!(validate_inline_profile("sensor noise", None, Some(&artifact), 1024).is_err());
+        assert!(validate_inline_profile("sensor noise", Some(json), None, 1024).is_err());
+        assert!(validate_inline_profile("sensor noise", Some(json), Some(&artifact), 4).is_err());
+
+        let mut changed = artifact;
+        changed.sha256 = "0".repeat(64);
+        assert!(validate_inline_profile("sensor noise", Some(json), Some(&changed), 1024).is_err());
+    }
 
     #[test]
     fn provenance_asset_filename_serializes_as_a_portable_string() {

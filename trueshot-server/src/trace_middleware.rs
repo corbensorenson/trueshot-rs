@@ -53,12 +53,11 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let method = req.method().to_string();
-        let path = req.path().to_string();
         let start = Instant::now();
         let span = info_span!(
             "http.request",
             http_method = %method,
-            http_route = %path,
+            http_route = field::Empty,
             http_status = field::Empty,
             latency_ms = field::Empty,
             trace_id = field::Empty
@@ -70,6 +69,9 @@ where
         let fut = self.service.call(req);
         Box::pin(async move {
             let mut res = fut.instrument(span.clone()).await?;
+            if let Some(route) = res.request().match_pattern() {
+                span.record("http_route", route);
+            }
             span.record("http_status", res.status().as_u16() as i64);
             span.record("latency_ms", start.elapsed().as_millis() as i64);
             if let Some(trace_id) = trace_id {

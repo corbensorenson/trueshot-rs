@@ -14,6 +14,7 @@ import {
   type FusionArtifactRef,
   type FusionEditOperation,
   type FusionEditReason,
+  type FusionEditSelector,
   type FusionEditReceipt,
   type FusionRevisionJob,
   type FusionReportInventory,
@@ -54,6 +55,12 @@ const EDIT_REASONS: Array<{ value: FusionEditReason; label: string }> = [
   { value: 'boundary', label: 'Depth boundary' },
   { value: 'other', label: 'Other measured correction' },
 ];
+
+const defaultSelector = (reason: FusionEditReason): FusionEditSelector => {
+  if (reason === 'glare') return 'glare_affected';
+  if (reason === 'boundary') return 'boundary_affected';
+  return 'rectangle';
+};
 
 type EditRect = { x: number; y: number; width: number; height: number };
 
@@ -109,6 +116,7 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
   const [editOperations, setEditOperations] = useState<FusionEditOperation[]>([]);
   const [editFrame, setEditFrame] = useState(0);
   const [editReason, setEditReason] = useState<FusionEditReason>('motion');
+  const [editSelector, setEditSelector] = useState<FusionEditSelector>('rectangle');
   const [editNote, setEditNote] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
   const [editReceipt, setEditReceipt] = useState<FusionEditReceipt | null>(null);
@@ -198,6 +206,7 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
     setEditOperations([]);
     setEditFrame(0);
     setEditReason('motion');
+    setEditSelector('rectangle');
     setEditNote('');
     setEditReceipt(null);
     setRevisionJob(null);
@@ -319,12 +328,13 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
     if (!draftRect || !report?.frame_count) return;
     const frameCount = report.frame_count;
     setEditReceipt(null);
-    const id = `${editReason}-${draftRect.x}-${draftRect.y}-${draftRect.width}-${draftRect.height}-f${editFrame}`;
+    const id = `${editReason}-${editSelector}-${draftRect.x}-${draftRect.y}-${draftRect.width}-${draftRect.height}-f${editFrame}`;
     setEditOperations(current => [...current, {
       id,
       rect: draftRect,
       source_frame: Math.max(0, Math.min(frameCount - 1, editFrame)),
       reason: editReason,
+      selector: editSelector,
       ...(editNote.trim() ? { note: editNote.trim() } : {}),
     }]);
     setDraftRect(null);
@@ -478,7 +488,7 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
                 {!report.editable_base ? (
                   <p className="mt-2 text-xs leading-relaxed text-amber-400">This report predates source-bound revisions. Rerun native fusion with the current build.</p>
                 ) : (
-                  <p className="mt-2 text-xs leading-relaxed text-[color:var(--ts-muted)]">Draw non-overlapping regions, then bind each to one real frame. Refusion rejects clipped or disoccluded measurements.</p>
+                  <p className="mt-2 text-xs leading-relaxed text-[color:var(--ts-muted)]">Draw non-overlapping regions, then bind each to one real frame. Glare and boundary revisions apply only where the recomputed physical evidence permits them.</p>
                 )}
                 {editMode && report.frame_count && (
                   <div className="mt-3 space-y-2">
@@ -487,11 +497,38 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
                       {Array.from({ length: report.frame_count }, (_, index) => <option key={index} value={index}>Frame {index}</option>)}
                     </select>
                     <label className="block text-[10px] uppercase tracking-wider text-[color:var(--ts-muted)]">Reason</label>
-                    <select className="ts-input w-full px-3 py-2 text-xs" value={editReason} onChange={event => setEditReason(event.target.value as FusionEditReason)}>
+                    <select className="ts-input w-full px-3 py-2 text-xs" value={editReason} onChange={event => {
+                      const reason = event.target.value as FusionEditReason;
+                      setEditReason(reason);
+                      setEditSelector(defaultSelector(reason));
+                      if (reason === 'glare') setLayer('glare');
+                      if (reason === 'boundary') setLayer('boundary');
+                    }}>
                       {EDIT_REASONS.map(reason => <option key={reason.value} value={reason.value}>{reason.label}</option>)}
                     </select>
+                    {editReason === 'glare' && (
+                      <div className={`rounded-lg border px-3 py-2 text-[10px] leading-relaxed ${report.glare_physical_scale ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-300' : 'border-red-400/25 bg-red-400/5 text-red-300'}`}>
+                        {report.glare_physical_scale
+                          ? 'Evidence lock: only nonzero sensor-pitch-scaled glare pixels inside the rectangle may change.'
+                          : 'Unavailable: this report used a pixel fallback rather than verified sensor-pitch glare support.'}
+                      </div>
+                    )}
+                    {editReason === 'boundary' && (
+                      <>
+                        <label className="block text-[10px] uppercase tracking-wider text-[color:var(--ts-muted)]">Physical boundary evidence</label>
+                        <select className="ts-input w-full px-3 py-2 text-xs" value={editSelector} onChange={event => setEditSelector(event.target.value as FusionEditSelector)}>
+                          <option value="boundary_affected">PSF support + crossing core</option>
+                          <option value="boundary_crossing_core">Crossing core only</option>
+                        </select>
+                        <div className={`rounded-lg border px-3 py-2 text-[10px] leading-relaxed ${report.trimap_physical_scale ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-300' : 'border-red-400/25 bg-red-400/5 text-red-300'}`}>
+                          {report.trimap_physical_scale
+                            ? 'Evidence lock: replay clips to the aperture/PSF trimap and only pixels whose physical focus plane matches the selected frame.'
+                            : 'Unavailable: this report has no verified aperture/PSF boundary trimap.'}
+                        </div>
+                      </>
+                    )}
                     <input className="ts-input w-full px-3 py-2 text-xs" value={editNote} maxLength={512} onChange={event => setEditNote(event.target.value)} placeholder="Optional audit note" />
-                    <button onClick={addEditRegion} disabled={!draftRect} className="w-full rounded-lg bg-amber-400 px-3 py-2 text-xs font-black uppercase tracking-wider text-black disabled:opacity-35">
+                    <button onClick={addEditRegion} disabled={!draftRect || (editReason === 'glare' && !report.glare_physical_scale) || (editReason === 'boundary' && !report.trimap_physical_scale)} className="w-full rounded-lg bg-amber-400 px-3 py-2 text-xs font-black uppercase tracking-wider text-black disabled:opacity-35">
                       Add drawn region
                     </button>
                   </div>
@@ -530,7 +567,12 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
                   : <div className="text-sm text-white/50">Layer artifact unavailable.</div>}
               </div>
               <div className="flex flex-wrap gap-x-4 gap-y-2 border-t border-white/10 px-5 py-3">
-                {layer === 'edit' ? <span className="text-[10px] text-white/65">255 · Exact operator-selected measured source</span>
+                {layer === 'edit' ? <>
+                  <span className="text-[10px] text-white/65">255 · Rectangle measured source</span>
+                  <span className="text-[10px] text-white/65">192 · Glare-evidence measured source</span>
+                  <span className="text-[10px] text-white/65">128 · Boundary-support measured source</span>
+                  <span className="text-[10px] text-white/65">64 · Boundary-core measured source</span>
+                </>
                   : layer === 'overlay' ? OVERLAY_LEGEND.map(([name, color]) => <span key={name} className="flex items-center gap-1.5 text-[10px] text-white/65"><i className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color }} />{name}</span>)
                   : flags.map(([name, value]) => <span key={name} className="text-[10px] text-white/65">{humanize(name)} · {value.pixels.toLocaleString()} ({pixelCount ? ((value.pixels / pixelCount) * 100).toFixed(3) : '0.000'}%)</span>)}
                 {layer === 'boundary' && Object.entries(report.boundary_trimap_legend).map(([name, value]) => <span key={name} className="text-[10px] text-white/65">{humanize(name)} · {value}</span>)}
@@ -551,6 +593,7 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
                         <div className="flex items-start justify-between gap-2">
                           <div>
                             <div className="text-xs font-semibold text-[color:var(--ts-text)]">{humanize(operation.reason)} · Frame {operation.source_frame}</div>
+                            <div className="mt-0.5 text-[10px] text-emerald-300">{humanize(operation.selector)}</div>
                             <div className="mt-0.5 text-[10px] tabular-nums text-[color:var(--ts-muted)]">x{operation.rect.x} y{operation.rect.y} · {operation.rect.width}×{operation.rect.height}</div>
                           </div>
                           <button onClick={() => {
@@ -593,7 +636,7 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
                           </div>
                         )}
                         {editReceipt.encrypted && <div className="mt-2 text-[10px] leading-relaxed text-emerald-300">The edit remains encrypted at rest and is authenticated in memory before bounded local execution.</div>}
-                        <div className="mt-2 text-[10px] text-[color:var(--ts-muted)]">{editReceipt.edited_pixels.toLocaleString()} pixels · {editReceipt.encrypted ? 'encrypted at rest' : 'local project storage'}</div>
+                        <div className="mt-2 text-[10px] text-[color:var(--ts-muted)]">Up to {editReceipt.edited_pixels.toLocaleString()} candidate pixels before evidence clipping · {editReceipt.encrypted ? 'encrypted at rest' : 'local project storage'}</div>
                       </div>
                     )}
                     {error && <p className="text-xs text-red-400">{error}</p>}

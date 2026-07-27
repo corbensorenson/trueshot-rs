@@ -12,6 +12,7 @@ pub mod health;
 pub mod jobs;
 pub mod license;
 pub mod project;
+mod project_asset;
 pub mod scan;
 pub mod share;
 pub mod storage;

@@ -3,7 +3,7 @@
 //! Tests for ORB and SIFT feature detection algorithms.
 
 use image::{DynamicImage, Rgb, RgbImage};
-use trueshot_sfm::features::{detect_orb, detect_sift, Descriptor, Keypoint};
+use trueshot_sfm::features::{detect_orb, detect_sift, Descriptor};
 
 /// Create a test image with distinct features (checkerboard pattern)
 fn create_test_image(width: u32, height: u32) -> DynamicImage {
@@ -16,20 +16,6 @@ fn create_test_image(width: u32, height: u32) -> DynamicImage {
             let is_white = ((x / square_size) + (y / square_size)) % 2 == 0;
             let color = if is_white { 255 } else { 0 };
             img.put_pixel(x, y, Rgb([color, color, color]));
-        }
-    }
-
-    DynamicImage::ImageRgb8(img)
-}
-
-/// Create test image with gradient (for SIFT DoG testing)
-fn create_gradient_image(width: u32, height: u32) -> DynamicImage {
-    let mut img = RgbImage::new(width, height);
-
-    for y in 0..height {
-        for x in 0..width {
-            let intensity = ((x as f32 / width as f32) * 255.0) as u8;
-            img.put_pixel(x, y, Rgb([intensity, intensity, intensity]));
         }
     }
 

@@ -25,27 +25,39 @@ pub enum SplatEditOp {
 pub fn load_splat(path: &Path) -> Result<Vec<SplatPoint>> {
     let mut file = File::open(path)
         .with_context(|| format!("Failed to open splat file: {}", path.display()))?;
+    load_splat_from_reader(&mut file)
+}
+
+pub fn load_splat_from_reader<R: Read>(mut reader: R) -> Result<Vec<SplatPoint>> {
     let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
+    reader.read_to_end(&mut data)?;
     parse_splat_bytes(&data)
 }
 
 pub fn save_splat(path: &Path, points: &[SplatPoint]) -> Result<()> {
     let mut file = File::create(path)
         .with_context(|| format!("Failed to write splat file: {}", path.display()))?;
+    save_splat_to_writer(&mut file, points)
+}
+
+pub fn save_splat_to_writer<W: Write>(mut writer: W, points: &[SplatPoint]) -> Result<()> {
     let data = build_splat_bytes(points);
-    file.write_all(&data)?;
+    writer.write_all(&data)?;
     Ok(())
 }
 
 pub fn save_spz(path: &Path, points: &[SplatPoint]) -> Result<()> {
     let mut file = File::create(path)
         .with_context(|| format!("Failed to write spz file: {}", path.display()))?;
+    save_spz_to_writer(&mut file, points)
+}
+
+pub fn save_spz_to_writer<W: Write>(mut writer: W, points: &[SplatPoint]) -> Result<()> {
     let payload = build_splat_bytes(points);
     let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-    file.write_all(b"SPZ1")?;
-    file.write_all(&(payload.len() as u32).to_le_bytes())?;
-    file.write_all(&compressed)?;
+    writer.write_all(b"SPZ1")?;
+    writer.write_all(&(payload.len() as u32).to_le_bytes())?;
+    writer.write_all(&compressed)?;
     Ok(())
 }
 
@@ -134,4 +146,25 @@ fn build_splat_bytes(points: &[SplatPoint]) -> Vec<u8> {
         data.extend_from_slice(&p.rotation);
     }
     data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_backed_splat_codec_round_trips() {
+        let points = vec![SplatPoint {
+            position: [1.0, 2.0, 3.0],
+            scale: [0.1, 0.2, 0.3],
+            color: [10, 20, 30, 40],
+            rotation: [1, 2, 3, 4],
+        }];
+        let mut encoded = Vec::new();
+        save_splat_to_writer(&mut encoded, &points).unwrap();
+        let decoded = load_splat_from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].position, points[0].position);
+        assert_eq!(decoded[0].color, points[0].color);
+    }
 }

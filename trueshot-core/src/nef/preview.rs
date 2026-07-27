@@ -50,7 +50,7 @@ impl PreviewExtractor {
         // Method 1: Look in IFD0 for JPEG Interchange Format (Z9 primary method)
         if let Ok(jpeg_data) = self.extract_from_ifd0(reader, &header) {
             if !jpeg_data.is_empty() {
-                tracing::info!(
+                tracing::debug!(
                     "Found preview JPEG in IFD0 (size: {} bytes)",
                     jpeg_data.len()
                 );
@@ -61,7 +61,7 @@ impl PreviewExtractor {
         // Method 2: Look in SubIFDs for additional previews
         if let Ok(jpeg_data) = self.extract_from_subifd(reader, &header) {
             if !jpeg_data.is_empty() {
-                tracing::info!(
+                tracing::debug!(
                     "Found preview JPEG in SubIFD (size: {} bytes)",
                     jpeg_data.len()
                 );
@@ -72,7 +72,7 @@ impl PreviewExtractor {
         // Method 3: Look in IFD1 (thumbnail directory)
         if let Ok(jpeg_data) = self.extract_from_ifd1(reader, &header) {
             if !jpeg_data.is_empty() {
-                tracing::info!(
+                tracing::debug!(
                     "Found preview JPEG in IFD1 (size: {} bytes)",
                     jpeg_data.len()
                 );
@@ -84,7 +84,7 @@ impl PreviewExtractor {
         if allow_full_scan {
             if let Ok(jpeg_data) = self.scan_for_jpeg_markers(reader) {
                 if !jpeg_data.is_empty() {
-                    tracing::info!(
+                    tracing::debug!(
                         "Found preview JPEG by scanning (size: {} bytes)",
                         jpeg_data.len()
                     );

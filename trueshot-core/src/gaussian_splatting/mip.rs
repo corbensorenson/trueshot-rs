@@ -62,7 +62,7 @@ pub struct MipFilter2D {
 
 impl MipFilter2D {
     /// Create 2D Mip filter for given image resolution
-    pub fn new(image_width: u32, image_height: u32) -> Self {
+    pub fn new(_image_width: u32, _image_height: u32) -> Self {
         // Standard pixel variance (0.3 pixels works well)
         let pixel_variance = 0.3;
 

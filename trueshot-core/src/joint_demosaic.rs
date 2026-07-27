@@ -671,6 +671,10 @@ fn interpolate_green_at_blue_edge_directed(
 // ============================================================================
 
 /// Interpolate green at red pixel (simple bilinear)
+#[expect(
+    dead_code,
+    reason = "deterministic bilinear benchmark baseline for edge-directed demosaic validation"
+)]
 fn interpolate_green_at_red_bilinear(
     frame: &Array3<f64>,
     y: usize,
@@ -691,6 +695,10 @@ fn interpolate_green_at_red_bilinear(
 }
 
 /// Interpolate blue at red pixel (simple bilinear)
+#[expect(
+    dead_code,
+    reason = "deterministic bilinear benchmark baseline for edge-directed demosaic validation"
+)]
 fn interpolate_blue_at_red_bilinear(
     frame: &Array3<f64>,
     y: usize,
@@ -711,6 +719,10 @@ fn interpolate_blue_at_red_bilinear(
 }
 
 /// Interpolate red at green pixel (simple bilinear)
+#[expect(
+    dead_code,
+    reason = "deterministic bilinear benchmark baseline for edge-directed demosaic validation"
+)]
 fn interpolate_red_at_green_bilinear(
     frame: &Array3<f64>,
     y: usize,
@@ -737,6 +749,10 @@ fn interpolate_red_at_green_bilinear(
 }
 
 /// Interpolate blue at green pixel (simple bilinear)
+#[expect(
+    dead_code,
+    reason = "deterministic bilinear benchmark baseline for edge-directed demosaic validation"
+)]
 fn interpolate_blue_at_green_bilinear(
     frame: &Array3<f64>,
     y: usize,
@@ -763,6 +779,10 @@ fn interpolate_blue_at_green_bilinear(
 }
 
 /// Interpolate red at blue pixel (simple bilinear)
+#[expect(
+    dead_code,
+    reason = "deterministic bilinear benchmark baseline for edge-directed demosaic validation"
+)]
 fn interpolate_red_at_blue_bilinear(
     frame: &Array3<f64>,
     y: usize,
@@ -793,6 +813,10 @@ fn interpolate_red_at_blue_bilinear(
 ///
 /// # Returns
 /// Always returns 1.0 (uniform weighting)
+#[expect(
+    dead_code,
+    reason = "uniform-weight benchmark baseline for calibrated HDR weighting"
+)]
 fn compute_pixel_mertens_weight(
     _frame: &Array3<f64>,
     _y: usize,
@@ -805,6 +829,10 @@ fn compute_pixel_mertens_weight(
 }
 
 /// Interpolate green at blue pixel (simple bilinear)
+#[expect(
+    dead_code,
+    reason = "deterministic bilinear benchmark baseline for edge-directed demosaic validation"
+)]
 fn interpolate_green_at_blue_bilinear(
     frame: &Array3<f64>,
     y: usize,

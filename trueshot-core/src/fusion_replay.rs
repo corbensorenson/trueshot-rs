@@ -252,6 +252,7 @@ mod tests {
                 },
                 source_frame: 0,
                 reason: FusionEditReason::Focus,
+                selector: crate::fusion_edit::FusionEditSelector::Rectangle,
                 note: None,
             }],
         };

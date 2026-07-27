@@ -167,6 +167,10 @@ Implemented:
 Not yet qualified:
 
 - Direct Helicon/Lightroom corpus results.
+- Mandatory dedicated-runner, energy/thermal, and cross-generation coverage for
+  full-sensor CPU/Metal parity. The retained 8256x5504 Apple M1 adversarial
+  nominal/HDR gate is green with zero direction mismatches and roundoff-scale
+  normalized output error; see `ROADMAP.md` R0.1.
 - Z9 camera-to-standard color matrix, ICC/DNG profile tagging, and DeltaE 2000
   release gate.
 - One-click server-side execution of saved edit documents and physically

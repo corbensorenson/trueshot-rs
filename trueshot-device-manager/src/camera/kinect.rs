@@ -595,10 +595,10 @@ mod tests {
     #[test]
     fn test_depth_colormap() {
         // Test colormap at various depths
-        let (r, g, b) = KinectCamera::depth_colormap(0);
+        let (r, _g, _b) = KinectCamera::depth_colormap(0);
         assert!(r > 200); // Should be red-ish for near
 
-        let (r, g, b) = KinectCamera::depth_colormap(255);
+        let (_r, _g, b) = KinectCamera::depth_colormap(255);
         assert!(b > 200); // Should be blue-ish for far
     }
 

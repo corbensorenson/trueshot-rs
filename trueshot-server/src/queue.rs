@@ -6,7 +6,7 @@ use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -33,15 +33,11 @@ pub struct QueueJobRecord {
 pub struct QueueJobPayload {
     pub id: Uuid,
     pub kind: String,
-    pub name: String,
     pub payload: Value,
-    pub attempts: i64,
-    pub max_attempts: i64,
 }
 
 pub struct JobQueue {
     pool: SqlitePool,
-    db_path: PathBuf,
 }
 
 impl JobQueue {
@@ -57,16 +53,9 @@ impl JobQueue {
             .max_connections(5)
             .connect_with(options)
             .await?;
-        let queue = Self {
-            pool,
-            db_path: db_path.to_path_buf(),
-        };
+        let queue = Self { pool };
         queue.ensure_schema().await?;
         Ok(queue)
-    }
-
-    pub fn db_path(&self) -> &Path {
-        &self.db_path
     }
 
     pub async fn enqueue(
@@ -157,7 +146,7 @@ impl JobQueue {
 
     pub async fn load_pending_jobs(&self) -> Result<Vec<QueueJobPayload>> {
         let rows = sqlx::query(
-            r#"SELECT id, kind, name, payload, attempt_count, max_attempts
+            r#"SELECT id, kind, payload
                FROM jobs WHERE status IN ('pending', 'running')"#,
         )
         .fetch_all(&self.pool)
@@ -167,7 +156,7 @@ impl JobQueue {
 
     pub async fn load_retry_jobs(&self) -> Result<Vec<QueueJobPayload>> {
         let rows = sqlx::query(
-            r#"SELECT id, kind, name, payload, attempt_count, max_attempts
+            r#"SELECT id, kind, payload
                FROM jobs WHERE status = 'failed' AND attempt_count < max_attempts"#,
         )
         .fetch_all(&self.pool)
@@ -312,13 +301,33 @@ impl QueueObserver {
     }
 
     fn should_notify(&self, job_id: Uuid, status: &str) -> bool {
-        let mut guard = self.webhook_state.lock().unwrap();
-        match guard.get(&job_id) {
-            Some(prev) if prev == status => false,
-            _ => {
-                guard.insert(job_id, status.to_string());
-                true
-            }
+        should_notify_state(&self.webhook_state, job_id, status)
+    }
+}
+
+fn should_notify_state(
+    webhook_state: &Mutex<HashMap<Uuid, String>>,
+    job_id: Uuid,
+    status: &str,
+) -> bool {
+    let mut guard = match webhook_state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(
+                state = "queue.webhook_dedup",
+                "recovering non-authoritative poisoned cache"
+            );
+            let mut guard = poisoned.into_inner();
+            guard.clear();
+            webhook_state.clear_poison();
+            guard
+        }
+    };
+    match guard.get(&job_id) {
+        Some(prev) if prev == status => false,
+        _ => {
+            guard.insert(job_id, status.to_string());
+            true
         }
     }
 }
@@ -428,10 +437,7 @@ fn row_to_payload(row: sqlx::sqlite::SqliteRow) -> Result<QueueJobPayload> {
     Ok(QueueJobPayload {
         id: Uuid::parse_str(&id)?,
         kind: row.try_get("kind")?,
-        name: row.try_get("name")?,
         payload: parsed,
-        attempts: row.try_get("attempt_count")?,
-        max_attempts: row.try_get("max_attempts")?,
     })
 }
 
@@ -470,4 +476,25 @@ fn build_webhook_payload(record: &QueueJobRecord, payload: &Value) -> Value {
         "payload": payload,
         "sent_at": Utc::now(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn poisoned_webhook_cache_recovers_without_dropping_notification() {
+        let state = Mutex::new(HashMap::new());
+        let job_id = Uuid::new_v4();
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let mut guard = state.lock().expect("initial lock");
+            guard.insert(job_id, "running".to_string());
+            panic!("poison dedup cache");
+        }));
+
+        assert!(should_notify_state(&state, job_id, "running"));
+        assert!(!should_notify_state(&state, job_id, "running"));
+        assert!(should_notify_state(&state, job_id, "completed"));
+    }
 }

@@ -1409,6 +1409,10 @@ fn merge_native_bayer(
 ///
 /// A-grade is super-resolved Bayer, B/C are native Bayer
 /// Need to upsample B/C in a Bayer-aware way (upsample each channel separately)
+#[expect(
+    dead_code,
+    reason = "legacy Bayer-space SR merge retained for reproducibility comparisons"
+)]
 fn merge_with_sr(
     a_result: &Array2<f64>, // Super-resolved Bayer
     b_result: &Array2<f64>, // Native Bayer
@@ -1749,6 +1753,10 @@ fn stack_frames_scalar(frames: &[Array3<f64>]) -> Result<Array3<f64>> {
 ///
 /// # Returns
 /// Modified weights where only the best exposure per plane has weight=1.0, others=0.0
+#[expect(
+    dead_code,
+    reason = "kept as a deterministic benchmark baseline against uncertainty-weighted HDR fusion"
+)]
 fn select_best_exposure_per_plane(weights: &[f64], num_exposures: usize) -> Vec<f64> {
     if num_exposures <= 1 {
         return weights.to_vec();

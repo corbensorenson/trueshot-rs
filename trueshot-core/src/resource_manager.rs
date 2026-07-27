@@ -674,17 +674,13 @@ async fn detect_gpu_async() -> Result<bool, Box<dyn std::error::Error>> {
             info.backend
         );
 
-        // Check if it supports compute shaders
-        let features = adapter.features();
-        let has_compute = true; // Basic compute is always available in WGPU
-
         // Prefer discrete GPUs
         let is_suitable = matches!(
             info.device_type,
             wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
         );
 
-        Ok(is_suitable && has_compute)
+        Ok(is_suitable)
     } else {
         Ok(false)
     }

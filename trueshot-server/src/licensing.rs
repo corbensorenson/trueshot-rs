@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use actix_web::{web, HttpResponse};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::sync::MutexGuard;
 use trueshot_core::licensing::{Feature, LicenseManager, LicenseStatus, LicenseTier};
 
 use crate::state::AppState;
@@ -20,12 +21,6 @@ pub struct LicenseSnapshot {
     pub tier: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub device_hash: Option<String>,
-    #[serde(skip_serializing)]
-    pub license_key_hash: Option<String>,
-    #[serde(skip_serializing)]
-    pub scans_per_month: Option<u32>,
-    #[serde(skip_serializing)]
-    pub max_resolution: Option<u32>,
     pub trial_active: bool,
     pub trial_expires_at: Option<DateTime<Utc>>,
     pub trial_days_remaining: Option<i64>,
@@ -106,9 +101,6 @@ impl LicenseGate {
         let mut tier = None;
         let mut expires_at = None;
         let mut device_hash = None;
-        let mut license_key_hash = None;
-        let mut scans_per_month = None;
-        let mut max_resolution = None;
         let mut trial_active = false;
         let mut trial_expires_at = None;
         let mut trial_days_remaining = None;
@@ -144,9 +136,6 @@ impl LicenseGate {
                 tier = manager.tier().map(tier_display_name);
             }
             device_hash = Some(manager.device_hash());
-            license_key_hash = manager.license_key_hash();
-            scans_per_month = manager.scans_per_month();
-            max_resolution = manager.max_resolution();
             if let Some(trial) = manager.trial_info() {
                 trial_active = trial.active;
                 trial_expires_at = trial.expires_at;
@@ -180,9 +169,6 @@ impl LicenseGate {
             tier,
             expires_at,
             device_hash,
-            license_key_hash,
-            scans_per_month,
-            max_resolution,
             trial_active,
             trial_expires_at,
             trial_days_remaining,
@@ -302,9 +288,16 @@ impl LicenseGate {
     }
 }
 
+pub fn lock_license_gate(
+    state: &web::Data<AppState>,
+) -> Result<MutexGuard<'_, LicenseGate>, HttpResponse> {
+    crate::sync_lock::lock(&state.license_gate, "license.gate")
+        .map_err(|_| HttpResponse::ServiceUnavailable().finish())
+}
+
 pub async fn enforce_scan_limit(state: &web::Data<AppState>) -> Result<(), HttpResponse> {
     let limit = {
-        let mut gate = state.license_gate.lock().unwrap();
+        let mut gate = lock_license_gate(state)?;
         gate.scan_limit()
     };
     let Some(limit) = limit else {
@@ -346,7 +339,7 @@ pub fn require_license_feature(
     feature: Feature,
     capability: &'static str,
 ) -> Result<(), HttpResponse> {
-    let mut gate = state.license_gate.lock().unwrap();
+    let mut gate = lock_license_gate(state)?;
     match gate.require_feature(feature) {
         Ok(()) => Ok(()),
         Err(err) => Err(HttpResponse::PaymentRequired().json(serde_json::json!({

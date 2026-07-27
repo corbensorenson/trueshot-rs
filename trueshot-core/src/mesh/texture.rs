@@ -67,6 +67,10 @@ impl TextureAtlasBuilder {
         }
     }
 
+    pub fn atlas_size(&self) -> u32 {
+        self.atlas_size
+    }
+
     /// Add a camera view with image
     pub fn add_view(&mut self, image: ImageBuffer<Rgb<u8>, Vec<u8>>, pose: CameraPose) {
         self.images.push(image);

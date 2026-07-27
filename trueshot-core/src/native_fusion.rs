@@ -12,7 +12,7 @@ use crate::focus_evidence::{
 };
 #[cfg(test)]
 use crate::focus_evidence::{compute_focus_metric_scalar, sorted_trimmed_focus_mean_at};
-use crate::fusion_edit::{FusionEditBinding, FusionEditDocument};
+use crate::fusion_edit::{FusionEditBinding, FusionEditDocument, FusionEditSelector};
 use crate::lens_psf::LensPsfProfile;
 use crate::sensor_correction::SensorCorrectionProfile;
 use crate::sensor_noise::{SensorNoiseModel, SensorNoiseProfile};
@@ -48,6 +48,9 @@ pub const BOUNDARY_TRIMAP_INTERIOR: u8 = 0;
 pub const BOUNDARY_TRIMAP_PSF_SUPPORT: u8 = 128;
 pub const BOUNDARY_TRIMAP_CROSSING_CORE: u8 = 255;
 pub const FUSION_EDIT_MEASURED_SOURCE: u8 = 255;
+pub const FUSION_EDIT_GLARE_CONSTRAINED: u8 = 192;
+pub const FUSION_EDIT_BOUNDARY_CONSTRAINED: u8 = 128;
+pub const FUSION_EDIT_BOUNDARY_CORE_CONSTRAINED: u8 = 64;
 
 #[derive(Debug, Clone)]
 pub struct NativeFusionConfig {
@@ -1175,6 +1178,10 @@ pub fn fuse_native_group_with_id(
             &mut fusion_flags,
             &mut frequency_flags,
             &mut sensor_correction_map,
+            &glare_map,
+            &boundary_trimap,
+            glare_physical_scale,
+            trimap_physical_scale,
             &mut edit_map,
         )?;
         (Some(edit_map), edited)
@@ -1313,6 +1320,10 @@ fn apply_measured_source_edits(
     fusion_flags: &mut [u8],
     frequency_flags: &mut [u8],
     sensor_correction_map: &mut [u8],
+    glare_map: &[u8],
+    boundary_trimap: &[u8],
+    glare_physical_scale: bool,
+    trimap_physical_scale: bool,
     edit_map: &mut [u8],
 ) -> Result<usize> {
     let width = group.width;
@@ -1321,13 +1332,41 @@ fn apply_measured_source_edits(
     let mut edited = 0usize;
 
     for operation in &edit.operations {
+        match operation.selector {
+            FusionEditSelector::GlareAffected if !glare_physical_scale => anyhow::bail!(
+                "Fusion edit {} requires verified sensor-pitch glare support; pixel fallback is not physically qualified",
+                operation.id
+            ),
+            FusionEditSelector::BoundaryAffected | FusionEditSelector::BoundaryCrossingCore
+                if !trimap_physical_scale =>
+            {
+                anyhow::bail!(
+                    "Fusion edit {} requires a verified aperture/PSF boundary trimap",
+                    operation.id
+                )
+            }
+            _ => {}
+        }
         let frame_index = usize::from(operation.source_frame);
         let focus_plane = frame_index / exposures_per_focus;
         let frame_start = focus_plane * exposures_per_focus;
         let x1 = usize::try_from(operation.rect.x + operation.rect.width)?;
         let y1 = usize::try_from(operation.rect.y + operation.rect.height)?;
+        let mut operation_pixels = 0usize;
         for y in usize::try_from(operation.rect.y)?..y1 {
             for x in usize::try_from(operation.rect.x)?..x1 {
+                let index = y * width + x;
+                let physical_focus_plane =
+                    (depth[index].clamp(0.0, 1.0) * depth_denominator).round() as usize;
+                if !fusion_edit_selector_matches(
+                    operation.selector,
+                    glare_map[index],
+                    boundary_trimap[index],
+                    focus_plane,
+                    physical_focus_plane,
+                ) {
+                    continue;
+                }
                 let observation = sample_hdr_frame(
                     group,
                     calibrations,
@@ -1354,7 +1393,6 @@ fn apply_measured_source_edits(
                         y
                     );
                 }
-                let index = y * width + x;
                 bayer[index] = sample.radiance;
                 depth[index] = focus_plane as f32 / depth_denominator;
                 // Algorithmic focus confidence no longer describes this
@@ -1374,12 +1412,49 @@ fn apply_measured_source_edits(
                 };
                 frequency_flags[index] = 0;
                 sensor_correction_map[index] = sample.correction_flags;
-                edit_map[index] = FUSION_EDIT_MEASURED_SOURCE;
+                edit_map[index] = fusion_edit_selector_map_value(operation.selector);
                 edited += 1;
+                operation_pixels += 1;
             }
+        }
+        if operation_pixels == 0 {
+            anyhow::bail!(
+                "Fusion edit {} selector {:?} matched no recomputed physical evidence inside its rectangle",
+                operation.id,
+                operation.selector
+            );
         }
     }
     Ok(edited)
+}
+
+fn fusion_edit_selector_matches(
+    selector: FusionEditSelector,
+    glare: u8,
+    boundary: u8,
+    selected_focus_plane: usize,
+    physical_focus_plane: usize,
+) -> bool {
+    match selector {
+        FusionEditSelector::Rectangle => true,
+        FusionEditSelector::GlareAffected => glare != 0,
+        FusionEditSelector::BoundaryAffected => {
+            boundary != BOUNDARY_TRIMAP_INTERIOR && selected_focus_plane == physical_focus_plane
+        }
+        FusionEditSelector::BoundaryCrossingCore => {
+            boundary == BOUNDARY_TRIMAP_CROSSING_CORE
+                && selected_focus_plane == physical_focus_plane
+        }
+    }
+}
+
+fn fusion_edit_selector_map_value(selector: FusionEditSelector) -> u8 {
+    match selector {
+        FusionEditSelector::Rectangle => FUSION_EDIT_MEASURED_SOURCE,
+        FusionEditSelector::GlareAffected => FUSION_EDIT_GLARE_CONSTRAINED,
+        FusionEditSelector::BoundaryAffected => FUSION_EDIT_BOUNDARY_CONSTRAINED,
+        FusionEditSelector::BoundaryCrossingCore => FUSION_EDIT_BOUNDARY_CORE_CONSTRAINED,
+    }
 }
 
 fn validate_group(
@@ -2236,6 +2311,7 @@ struct PatchAlignment {
     texture: f32,
 }
 
+#[cfg(test)]
 fn estimate_local_motion_field(
     reference: &Array2<f64>,
     frame: &Array2<f64>,
@@ -4822,7 +4898,7 @@ mod tests {
     use super::*;
     use crate::fusion_edit::{
         FusionEditDocument, FusionEditOperation, FusionEditReason, FusionEditRect,
-        FUSION_EDIT_SCHEMA,
+        FusionEditSelector, FUSION_EDIT_SCHEMA,
     };
     use crate::lens_psf::{LensPsfFocusKnot, LensPsfProfile, LENS_PSF_PROFILE_SCHEMA};
     use crate::nef::parser::{SensorGeometry, SensorLevels, Z9Metadata};
@@ -5645,6 +5721,124 @@ mod tests {
         assert_eq!(tiled.bayer, untiled.bayer);
         assert_eq!(bounded.glare_radius_pixels, 256);
         assert!(!bounded.glare_physical_scale);
+
+        let glare_rect = FusionEditRect {
+            x: (center_x + 4) as u32,
+            y: center_y as u32,
+            width: 24,
+            height: 1,
+        };
+        let glare_edit = FusionEditDocument {
+            schema: FUSION_EDIT_SCHEMA.to_string(),
+            capture_group_id: "e".repeat(64),
+            base_report_sha256: "f".repeat(64),
+            width: width as u32,
+            height: height as u32,
+            crop_origin_x: 0,
+            crop_origin_y: 0,
+            frame_count: 1,
+            operations: vec![FusionEditOperation {
+                id: "physical-glare".to_string(),
+                rect: glare_rect,
+                source_frame: 0,
+                reason: FusionEditReason::Glare,
+                selector: FusionEditSelector::GlareAffected,
+                note: None,
+            }],
+        };
+        let constrained = fuse_native_group_with_id(
+            &group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                regularize_depth: false,
+                fusion_edit: Some(glare_edit.clone()),
+                ..NativeFusionConfig::default()
+            },
+            Some(&"e".repeat(64)),
+        )
+        .unwrap();
+        let constrained_map = constrained.fusion_edit_map.as_ref().unwrap();
+        let expected_pixels = (glare_rect.x as usize..(glare_rect.x + glare_rect.width) as usize)
+            .filter(|x| tiled.glare_map[[center_y, *x]] != 0)
+            .count();
+        assert!(expected_pixels > 0);
+        assert!(expected_pixels < glare_rect.width as usize);
+        assert_eq!(constrained.operator_override_pixels, expected_pixels);
+        for x in 0..width {
+            let selected = x >= glare_rect.x as usize
+                && x < (glare_rect.x + glare_rect.width) as usize
+                && tiled.glare_map[[center_y, x]] != 0;
+            assert_eq!(
+                constrained_map[[center_y, x]],
+                if selected {
+                    FUSION_EDIT_GLARE_CONSTRAINED
+                } else {
+                    0
+                }
+            );
+        }
+
+        let fallback_error = fuse_native_group_with_id(
+            &group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                regularize_depth: false,
+                glare_spread_um: 2_000.0,
+                glare_fallback_radius_pixels: 256,
+                fusion_edit: Some(glare_edit),
+                ..NativeFusionConfig::default()
+            },
+            Some(&"e".repeat(64)),
+        )
+        .unwrap_err();
+        assert!(fallback_error
+            .to_string()
+            .contains("pixel fallback is not physically qualified"));
+
+        let empty_edit = FusionEditDocument {
+            schema: FUSION_EDIT_SCHEMA.to_string(),
+            capture_group_id: "e".repeat(64),
+            base_report_sha256: "f".repeat(64),
+            width: width as u32,
+            height: height as u32,
+            crop_origin_x: 0,
+            crop_origin_y: 0,
+            frame_count: 1,
+            operations: vec![FusionEditOperation {
+                id: "no-glare-evidence".to_string(),
+                rect: FusionEditRect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                source_frame: 0,
+                reason: FusionEditReason::Glare,
+                selector: FusionEditSelector::GlareAffected,
+                note: None,
+            }],
+        };
+        empty_edit.validate().unwrap();
+        let empty_error = fuse_native_group_with_id(
+            &group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                regularize_depth: false,
+                fusion_edit: Some(empty_edit),
+                ..NativeFusionConfig::default()
+            },
+            Some(&"e".repeat(64)),
+        )
+        .unwrap_err();
+        assert!(empty_error
+            .to_string()
+            .contains("matched no recomputed physical evidence"));
     }
 
     #[test]
@@ -6282,6 +6476,7 @@ mod tests {
                 tile_size: 32,
                 minimum_alignment_score: 2.0,
                 regularize_depth: false,
+                trimap_max_radius_pixels: 256,
                 ..Default::default()
             },
         )
@@ -6295,6 +6490,7 @@ mod tests {
                 tile_size: 64,
                 minimum_alignment_score: 2.0,
                 regularize_depth: false,
+                trimap_max_radius_pixels: 256,
                 ..Default::default()
             },
         )
@@ -6309,6 +6505,7 @@ mod tests {
                 minimum_alignment_score: 2.0,
                 regularize_depth: false,
                 depth_consistent_refusion: false,
+                trimap_max_radius_pixels: 256,
                 ..Default::default()
             },
         )
@@ -6331,6 +6528,194 @@ mod tests {
             .filter(|flags| **flags & FUSION_FLAG_VISIBILITY_CORRECTED != 0)
             .count();
         assert_eq!(flagged, physical_result.visibility_adjusted_pixels);
+
+        let boundary_revision = fuse_native_group_with_id(
+            &physical_group,
+            &meta(2, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                tile_size: 32,
+                minimum_alignment_score: 2.0,
+                regularize_depth: false,
+                trimap_max_radius_pixels: 256,
+                fusion_edit: Some(FusionEditDocument {
+                    schema: FUSION_EDIT_SCHEMA.to_string(),
+                    capture_group_id: "9".repeat(64),
+                    base_report_sha256: "8".repeat(64),
+                    width: width as u32,
+                    height: height as u32,
+                    crop_origin_x: 0,
+                    crop_origin_y: 0,
+                    frame_count: 2,
+                    operations: vec![FusionEditOperation {
+                        id: "physical-boundary".to_string(),
+                        rect: FusionEditRect {
+                            x: 0,
+                            y: 0,
+                            width: width as u32,
+                            height: height as u32,
+                        },
+                        source_frame: 0,
+                        reason: FusionEditReason::Boundary,
+                        selector: FusionEditSelector::BoundaryAffected,
+                        note: None,
+                    }],
+                }),
+                ..Default::default()
+            },
+            Some(&"9".repeat(64)),
+        )
+        .unwrap();
+        let expected_boundary_pixels = physical_result
+            .boundary_trimap
+            .iter()
+            .zip(&physical_result.depth)
+            .filter(|(state, depth)| {
+                **state != BOUNDARY_TRIMAP_INTERIOR && depth.round() as usize == 0
+            })
+            .count();
+        assert!(expected_boundary_pixels > 0);
+        assert_eq!(
+            boundary_revision.operator_override_pixels,
+            expected_boundary_pixels
+        );
+        for (edit_state, (boundary_state, depth)) in boundary_revision
+            .fusion_edit_map
+            .as_ref()
+            .unwrap()
+            .iter()
+            .zip(
+                physical_result
+                    .boundary_trimap
+                    .iter()
+                    .zip(&physical_result.depth),
+            )
+        {
+            assert_eq!(
+                *edit_state,
+                if *boundary_state != BOUNDARY_TRIMAP_INTERIOR && depth.round() as usize == 0 {
+                    FUSION_EDIT_BOUNDARY_CONSTRAINED
+                } else {
+                    0
+                }
+            );
+        }
+
+        let incompatible_focus_error = fuse_native_group_with_id(
+            &physical_group,
+            &meta(2, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                tile_size: 32,
+                minimum_alignment_score: 2.0,
+                regularize_depth: false,
+                trimap_max_radius_pixels: 256,
+                fusion_edit: Some(FusionEditDocument {
+                    schema: FUSION_EDIT_SCHEMA.to_string(),
+                    capture_group_id: "5".repeat(64),
+                    base_report_sha256: "4".repeat(64),
+                    width: width as u32,
+                    height: height as u32,
+                    crop_origin_x: 0,
+                    crop_origin_y: 0,
+                    frame_count: 2,
+                    operations: vec![FusionEditOperation {
+                        id: "incompatible-boundary-focus".to_string(),
+                        rect: FusionEditRect {
+                            x: 0,
+                            y: 0,
+                            width: width as u32,
+                            height: height as u32,
+                        },
+                        source_frame: 1,
+                        reason: FusionEditReason::Boundary,
+                        selector: FusionEditSelector::BoundaryAffected,
+                        note: None,
+                    }],
+                }),
+                ..Default::default()
+            },
+            Some(&"5".repeat(64)),
+        )
+        .unwrap_err();
+        assert!(incompatible_focus_error
+            .to_string()
+            .contains("matched no recomputed physical evidence"));
+
+        let boundary_core_revision = fuse_native_group_with_id(
+            &physical_group,
+            &meta(2, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                tile_size: 32,
+                minimum_alignment_score: 2.0,
+                regularize_depth: false,
+                trimap_max_radius_pixels: 256,
+                fusion_edit: Some(FusionEditDocument {
+                    schema: FUSION_EDIT_SCHEMA.to_string(),
+                    capture_group_id: "7".repeat(64),
+                    base_report_sha256: "6".repeat(64),
+                    width: width as u32,
+                    height: height as u32,
+                    crop_origin_x: 0,
+                    crop_origin_y: 0,
+                    frame_count: 2,
+                    operations: vec![FusionEditOperation {
+                        id: "physical-boundary-core".to_string(),
+                        rect: FusionEditRect {
+                            x: 0,
+                            y: 0,
+                            width: width as u32,
+                            height: height as u32,
+                        },
+                        source_frame: 0,
+                        reason: FusionEditReason::Boundary,
+                        selector: FusionEditSelector::BoundaryCrossingCore,
+                        note: None,
+                    }],
+                }),
+                ..Default::default()
+            },
+            Some(&"7".repeat(64)),
+        )
+        .unwrap();
+        let expected_core_pixels = physical_result
+            .boundary_trimap
+            .iter()
+            .zip(&physical_result.depth)
+            .filter(|(state, depth)| {
+                **state == BOUNDARY_TRIMAP_CROSSING_CORE && depth.round() as usize == 0
+            })
+            .count();
+        assert!(expected_core_pixels > 0);
+        assert_eq!(
+            boundary_core_revision.operator_override_pixels,
+            expected_core_pixels
+        );
+        for (edit_state, (boundary_state, depth)) in boundary_core_revision
+            .fusion_edit_map
+            .as_ref()
+            .unwrap()
+            .iter()
+            .zip(
+                physical_result
+                    .boundary_trimap
+                    .iter()
+                    .zip(&physical_result.depth),
+            )
+        {
+            assert_eq!(
+                *edit_state,
+                if *boundary_state == BOUNDARY_TRIMAP_CROSSING_CORE && depth.round() as usize == 0 {
+                    FUSION_EDIT_BOUNDARY_CORE_CONSTRAINED
+                } else {
+                    0
+                }
+            );
+        }
     }
 
     fn box_blur(input: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
@@ -6837,6 +7222,7 @@ mod tests {
                 },
                 source_frame: 1,
                 reason: FusionEditReason::Motion,
+                selector: FusionEditSelector::Rectangle,
                 note: None,
             }],
         };
@@ -6907,6 +7293,7 @@ mod tests {
                     },
                     source_frame: 0,
                     reason: FusionEditReason::Glare,
+                    selector: FusionEditSelector::GlareAffected,
                     note: None,
                 }],
             }),

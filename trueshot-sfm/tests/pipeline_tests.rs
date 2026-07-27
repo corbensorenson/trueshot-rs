@@ -4,9 +4,7 @@
 
 use std::path::PathBuf;
 use tempfile::TempDir;
-use trueshot_sfm::{
-    CameraIntrinsics, DistortionModel, FeatureType, SfmConfig, SfmPipeline, SparseReconstruction,
-};
+use trueshot_sfm::{DistortionModel, FeatureType, SfmConfig, SfmPipeline, SparseReconstruction};
 
 /// Create synthetic test images
 fn create_test_images(dir: &std::path::Path, count: usize) -> Vec<PathBuf> {
@@ -179,7 +177,6 @@ fn test_camera_intrinsics_to_matrix() {
 
 #[test]
 fn test_camera_pose_identity() {
-    use nalgebra as na;
     use trueshot_sfm::CameraPose;
 
     let pose = CameraPose::identity();

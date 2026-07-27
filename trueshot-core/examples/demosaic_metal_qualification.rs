@@ -3,7 +3,9 @@ use ndarray::Array3;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trueshot_core::demosaic_ahd::{ahd_demosaic_f32_owned, ahd_normalization_scale};
+use trueshot_core::demosaic_ahd::{
+    ahd_demosaic_f32_owned, ahd_direction_map_f32, ahd_normalization_scale,
+};
 use trueshot_core::gpu::{GpuAhdEngine, GpuContext, METAL_AHD_RELEASE_QUALIFICATION_TOLERANCE};
 
 const RGB_CAM: [[f32; 4]; 3] = [
@@ -76,7 +78,18 @@ fn main() -> Result<()> {
     }
 
     let cpu = cpu_output.context("CPU qualification produced no output")?;
-    let gpu = gpu_output.context("Metal qualification produced no output")?;
+    let mut gpu = gpu_output.context("Metal qualification produced no output")?;
+    let cpu_directions = ahd_direction_map_f32(&bayer, &RGB_CAM)?;
+    let diagnostic_gpu = engine.demosaic_with_diagnostics(&bayer, &RGB_CAM)?;
+    let gpu_directions = diagnostic_gpu
+        .direction_map
+        .context("Metal qualification omitted its direction diagnostics")?;
+    let direction_mismatches = cpu_directions
+        .iter()
+        .zip(gpu_directions.iter())
+        .filter(|(left, right)| left != right)
+        .count();
+    gpu.direction_map = None;
     let mut maximum_error = 0.0f32;
     let mut squared_error = 0.0f64;
     let mut values_over_tolerance = 0usize;
@@ -110,7 +123,18 @@ fn main() -> Result<()> {
     let gpu_p50 = percentile_ms(&gpu_times, 0.50);
     let gpu_p95 = percentile_ms(&gpu_times, 0.95);
     let artifact = json!({
-        "schema": "trueshot.demosaic-metal-qualification.v1",
+        "schema": "trueshot.demosaic-metal-qualification.v2",
+        "fixture": {
+            "schema": "trueshot.ahd-adversarial-composite.v1",
+            "features": [
+                "chroma_checker_edges",
+                "siemens_star",
+                "resolution_wedge",
+                "saturated_primaries",
+                "dark_detail",
+                "band_seam_crossings"
+            ]
+        },
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "adapter": gpu.adapter,
         "width": width,
@@ -140,6 +164,9 @@ fn main() -> Result<()> {
             "psnr_db": parity_psnr_db,
             "normalized_tolerance": METAL_AHD_RELEASE_QUALIFICATION_TOLERANCE,
             "values_over_tolerance": values_over_tolerance,
+            "direction_selection_mismatches": direction_mismatches,
+            "direction_checksum_cpu": direction_checksum(&cpu_directions),
+            "direction_checksum_metal": direction_checksum(&gpu_directions),
             "measured_cfa_exact": measured_cfa_exact(&bayer, &gpu.image),
             "first_mismatches": mismatches,
         }
@@ -148,6 +175,7 @@ fn main() -> Result<()> {
 
     if maximum_error > absolute_tolerance
         || values_over_tolerance != 0
+        || direction_mismatches != 0
         || !measured_cfa_exact(&bayer, &gpu.image)
     {
         anyhow::bail!("Metal AHD failed the retained parity contract");
@@ -178,23 +206,52 @@ fn synthetic_bayer(width: usize, height: usize) -> Result<Array3<f32>> {
     let mut values = Vec::with_capacity(pixels);
     for y in 0..height {
         for x in 0..width {
-            let edge = if (x / 37 + y / 53) & 1 == 0 {
-                0.18
-            } else {
-                0.72
-            };
             let channel_scale = match cfa_channel(y, x) {
                 0 => 1.07,
                 1 => 1.0,
                 2 => 0.91,
                 _ => unreachable!(),
             };
-            values.push(
-                (edge * channel_scale
-                    + 0.08 * (x as f32 * 0.031).sin()
-                    + 0.06 * (y as f32 * 0.017).cos())
-                .clamp(0.0, 1.0),
-            );
+            let zone = (y.saturating_mul(6) / height).min(5);
+            let x_centered = x as f32 - width as f32 * 0.5;
+            let zone_center = (zone as f32 + 0.5) * height as f32 / 6.0;
+            let y_centered = y as f32 - zone_center;
+            let signal = match zone {
+                0 => {
+                    let checker = if (x / 19 + y / 23) & 1 == 0 {
+                        0.03
+                    } else {
+                        0.97
+                    };
+                    checker * channel_scale
+                }
+                1 => {
+                    let angle = y_centered.atan2(x_centered);
+                    let radius = x_centered.hypot(y_centered);
+                    0.5 + 0.46 * (48.0 * angle + 0.021 * radius).sin()
+                }
+                2 => {
+                    let normalized_x = x as f32 / width.max(1) as f32;
+                    let phase = x as f32 * (0.01 + 2.7 * normalized_x * normalized_x);
+                    0.5 + 0.46 * phase.sin()
+                }
+                3 => {
+                    let edge = if (x / 31 + y / 29) & 1 == 0 { 0.0 } else { 1.0 };
+                    edge * channel_scale
+                }
+                4 => 0.011 + 0.008 * (x as f32 * 0.19).sin() + 0.006 * (y as f32 * 0.13).cos(),
+                _ => {
+                    let edge = if (x / 37 + y / 53) & 1 == 0 {
+                        0.18
+                    } else {
+                        0.72
+                    };
+                    edge * channel_scale
+                        + 0.08 * (x as f32 * 0.031).sin()
+                        + 0.06 * (y as f32 * 0.017).cos()
+                }
+            };
+            values.push(signal.clamp(0.0, 1.0));
         }
     }
     Array3::from_shape_vec((height, width, 1), values)
@@ -222,6 +279,18 @@ fn checksum(image: &Array3<f32>) -> String {
             .enumerate()
             .fold(0u64, |accumulator, (index, value)| {
                 accumulator.wrapping_add(u64::from(value.to_bits()).wrapping_mul(index as u64 + 1))
+            })
+    )
+}
+
+fn direction_checksum(directions: &ndarray::Array2<u8>) -> String {
+    format!(
+        "{:016x}",
+        directions
+            .iter()
+            .enumerate()
+            .fold(0u64, |accumulator, (index, value)| {
+                accumulator.wrapping_add(u64::from(*value).wrapping_mul(index as u64 + 1))
             })
     )
 }

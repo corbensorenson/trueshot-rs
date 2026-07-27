@@ -44,6 +44,7 @@ pub struct AppState {
     pub intervalometer: Arc<AsyncMutex<IntervalometerState>>,
     pub adaptive_capture: Arc<AsyncMutex<crate::api::adaptive_capture::AdaptiveCaptureSessions>>,
     pub calibration_session: Arc<AsyncMutex<CalibrationSession>>,
+    pub project_file_mutations: Arc<AsyncMutex<()>>,
     pub audit: Arc<AuditLog>,
     pub license_gate: Arc<Mutex<crate::licensing::LicenseGate>>,
     pub redis_pool: Option<Arc<RedisPool>>,

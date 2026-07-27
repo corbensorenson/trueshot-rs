@@ -109,10 +109,13 @@ async fn handle_ws_session(
     {
         let tt = state.turntable.lock().await;
         if tt.is_some() {
+            let moving = crate::sync_lock::lock(&state.turntable_moving, "turntable.moving")
+                .map(|moving| *moving)
+                .unwrap_or(true);
             let event = SystemEvent::TurntableStatus {
                 connected: true,
                 angle: 0.0,
-                moving: *state.turntable_moving.lock().unwrap(),
+                moving,
             };
             if let Ok(json) = serde_json::to_string(&event) {
                 let _ = session.text(json).await;

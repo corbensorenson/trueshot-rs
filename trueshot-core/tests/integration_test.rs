@@ -2,7 +2,6 @@
 //!
 //! These tests verify the core hierarchical processing pipeline works correctly.
 
-use anyhow::Result;
 use ndarray::{Array2, Array3};
 use trueshot_core::hierarchical_collapse::{
     collapse_b_grade, collapse_c_grade, CollapseResult, HierarchicalParams, SRFactor,

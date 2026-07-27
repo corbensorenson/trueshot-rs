@@ -329,7 +329,7 @@ impl IKSolver {
         &self,
         chain: &IKChain,
         positions: &mut [na::Point3<f32>],
-        rotations: &mut [na::UnitQuaternion<f32>],
+        _rotations: &mut [na::UnitQuaternion<f32>],
         target: &IKTarget,
     ) -> bool {
         if chain.bone_indices.len() < 3 || chain.bone_lengths.len() < 2 {

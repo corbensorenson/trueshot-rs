@@ -9,6 +9,12 @@ This document describes the first‑class automation endpoints and CLI wrappers 
 Use an API token created via the dashboard:
 
 - Header: `X-API-Token: <token>`
+- New tokens default to the least-privilege `read` scope.
+- Canonical scopes are `read`, `capture`, `process`, `export`, `license`, and
+  `admin`. The wildcard `*` grants every capability and must be used alone.
+- Job submission requires `process`; listing and reading jobs require `read`.
+- API tokens retain their owner's current role and are rejected immediately
+  when expired, revoked, orphaned, or owned by an inactive account.
 
 Tokens are required for all `/api/jobs` endpoints.
 

@@ -5,59 +5,6 @@
 use nalgebra as na;
 use trueshot_sfm::geometry::{ransac_essential, ransac_homography, RansacConfig};
 
-/// Generate synthetic correspondences from a known homography
-fn generate_homography_correspondences(
-    H: &na::Matrix3<f64>,
-    num_points: usize,
-    noise_std: f64,
-) -> (Vec<na::Point2<f64>>, Vec<na::Point2<f64>>) {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-
-    let mut pts1 = Vec::with_capacity(num_points);
-    let mut pts2 = Vec::with_capacity(num_points);
-
-    for _ in 0..num_points {
-        let x = rng.gen_range(100.0..500.0);
-        let y = rng.gen_range(100.0..400.0);
-
-        let p1 = na::Point2::new(x, y);
-
-        // Apply homography
-        let p1h = na::Vector3::new(x, y, 1.0);
-        let p2h = H * p1h;
-
-        let mut p2 = na::Point2::new(p2h.x / p2h.z, p2h.y / p2h.z);
-
-        // Add noise
-        p2.x += rng.gen_range(-noise_std..noise_std);
-        p2.y += rng.gen_range(-noise_std..noise_std);
-
-        pts1.push(p1);
-        pts2.push(p2);
-    }
-
-    (pts1, pts2)
-}
-
-/// Generate synthetic correspondences with outliers
-fn generate_with_outliers(
-    pts1: &mut Vec<na::Point2<f64>>,
-    pts2: &mut Vec<na::Point2<f64>>,
-    outlier_ratio: f64,
-) {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-
-    let n = pts1.len();
-    let num_outliers = (n as f64 * outlier_ratio) as usize;
-
-    for i in 0..num_outliers {
-        // Replace with random correspondence
-        pts2[i] = na::Point2::new(rng.gen_range(0.0..640.0), rng.gen_range(0.0..480.0));
-    }
-}
-
 #[test]
 fn test_ransac_homography_finds_correct_model() {
     // Create a simple identity homography (no transformation)

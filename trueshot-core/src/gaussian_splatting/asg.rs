@@ -205,7 +205,7 @@ pub struct SpecularGaussian {
 
 impl SpecularGaussian {
     /// Compute color for given viewing direction
-    pub fn color(&self, view_dir: &na::Vector3<f32>, normal: &na::Vector3<f32>) -> [f32; 3] {
+    pub fn color(&self, view_dir: &na::Vector3<f32>, _normal: &na::Vector3<f32>) -> [f32; 3] {
         // Diffuse from SH (DC term only for now)
         let c0 = 0.28209479f32;
         let diffuse = [

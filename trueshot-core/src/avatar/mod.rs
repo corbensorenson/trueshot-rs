@@ -1057,7 +1057,7 @@ impl AvatarCaptureSession {
         })
     }
 
-    fn create_attachment_points(&self, skeleton: &Skeleton) -> Vec<AttachmentPoint> {
+    fn create_attachment_points(&self, _skeleton: &Skeleton) -> Vec<AttachmentPoint> {
         vec![
             AttachmentPoint {
                 name: "head_top".to_string(),

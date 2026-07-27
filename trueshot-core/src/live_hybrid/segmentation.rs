@@ -60,7 +60,7 @@ impl TrackedObject {
         }
     }
 
-    pub fn update(&mut self, segment: SegmentedObject, gaussians: Vec<Gaussian4D>) {
+    pub fn update(&mut self, segment: SegmentedObject, _gaussians: Vec<Gaussian4D>) {
         self.previous_gaussians = self.get_current_gaussians_clone();
         self.current = segment;
         self.track_history.push(self.current.centroid);

@@ -227,7 +227,7 @@ impl SmartLoader {
     pub fn sequence_crop_plan(
         &self,
         sequence: &Sequence,
-        timer: &mut HierarchicalTimer,
+        _timer: &mut HierarchicalTimer,
     ) -> Result<SequenceCropPlan> {
         if sequence.paths.is_empty() {
             anyhow::bail!("Cannot load an empty capture sequence");

@@ -1082,20 +1082,43 @@ fn scopes_allow(ctx: &AuthContext, scope: &str) -> bool {
     request_body = FocusPointRequest,
     responses(
         (status = 200, description = "Focus point set", body = serde_json::Value),
-        (status = 401, description = "Unauthorized")
+        (status = 400, description = "Coordinates outside normalized image bounds"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Camera not connected"),
+        (status = 501, description = "Camera does not support focus-point control")
     )
 )]
 #[post("/api/cameras/{id}/focus_point")]
 pub async fn camera_focus_point(
     req: HttpRequest,
-    _path: web::Path<String>,
-    _json: web::Json<FocusPointRequest>,
-    _state: web::Data<AppState>,
+    path: web::Path<String>,
+    json: web::Json<FocusPointRequest>,
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    HttpResponse::NotImplemented().body("Camera focus point not supported yet")
+    if !json.x.is_finite()
+        || !json.y.is_finite()
+        || !(0.0..=1.0).contains(&json.x)
+        || !(0.0..=1.0).contains(&json.y)
+    {
+        return HttpResponse::BadRequest().body("Focus coordinates must be within [0, 1]");
+    }
+
+    let id = path.into_inner();
+    let cm = state.camera_manager.lock().await;
+    let Some(camera) = cm.get_camera_by_id(&id) else {
+        return HttpResponse::NotFound().body("Camera not connected");
+    };
+    if camera.set_focus_point(json.x, json.y).is_err() {
+        return HttpResponse::NotImplemented().body("Focus-point control unsupported");
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "set",
+        "x": json.x,
+        "y": json.y
+    }))
 }
 
 #[utoipa::path(
@@ -1105,19 +1128,29 @@ pub async fn camera_focus_point(
     params(("id" = String, Path, description = "Camera id")),
     responses(
         (status = 200, description = "Autofocus triggered", body = serde_json::Value),
-        (status = 401, description = "Unauthorized")
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Camera not connected"),
+        (status = 501, description = "Camera does not support autofocus")
     )
 )]
 #[post("/api/cameras/{id}/autofocus")]
 pub async fn camera_autofocus(
     req: HttpRequest,
-    _path: web::Path<String>,
-    _state: web::Data<AppState>,
+    path: web::Path<String>,
+    state: web::Data<AppState>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    HttpResponse::NotImplemented().body("Camera autofocus not supported yet")
+    let id = path.into_inner();
+    let cm = state.camera_manager.lock().await;
+    let Some(camera) = cm.get_camera_by_id(&id) else {
+        return HttpResponse::NotFound().body("Camera not connected");
+    };
+    if camera.trigger_autofocus().is_err() {
+        return HttpResponse::NotImplemented().body("Autofocus unsupported");
+    }
+    HttpResponse::Ok().json(serde_json::json!({"status": "triggered"}))
 }
 
 #[utoipa::path(
@@ -1179,8 +1212,12 @@ pub async fn camera_stream(
         return HttpResponse::Forbidden().body("Origin not allowed");
     }
 
-    let auth_ctx = if let Some(ctx) = req.extensions().get::<AuthContext>() {
-        ctx.clone()
+    let extension_context = {
+        let extensions = req.extensions();
+        extensions.get::<AuthContext>().cloned()
+    };
+    let auth_ctx = if let Some(ctx) = extension_context {
+        ctx
     } else {
         let token = query
             .token
@@ -1192,7 +1229,7 @@ pub async fn camera_stream(
             Some(token) => token,
             None => return HttpResponse::Unauthorized().body("Missing auth token"),
         };
-        match state.auth.verify_token(&token) {
+        match state.auth.verify_token(&token).await {
             Ok(ctx) => ctx,
             Err(_) => return HttpResponse::Unauthorized().body("Invalid auth token"),
         }
@@ -1301,7 +1338,10 @@ pub async fn get_turntable_status(req: HttpRequest, state: web::Data<AppState>) 
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    let status_str = state.turntable_status.lock().unwrap().clone();
+    let status_str = match crate::sync_lock::lock(&state.turntable_status, "turntable.status") {
+        Ok(status) => status.clone(),
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
     let tt = state.turntable.lock().await;
     let connected = tt.is_some();
     let angle = if let Some(t) = tt.as_ref() {
@@ -1309,7 +1349,10 @@ pub async fn get_turntable_status(req: HttpRequest, state: web::Data<AppState>) 
     } else {
         0.0
     };
-    let moving = *state.turntable_moving.lock().unwrap();
+    let moving = match crate::sync_lock::lock(&state.turntable_moving, "turntable.moving") {
+        Ok(moving) => *moving,
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
 
     HttpResponse::Ok().json(serde_json::json!({
         "connected": connected,
@@ -1336,7 +1379,9 @@ pub async fn turntable_home(req: HttpRequest, state: web::Data<AppState>) -> imp
     let mut tt_lock = state.turntable.lock().await;
     if let Some(tt) = tt_lock.as_mut() {
         // Set moving = true
-        *state.turntable_moving.lock().unwrap() = true;
+        if crate::sync_lock::replace(&state.turntable_moving, "turntable.moving", true).is_err() {
+            return HttpResponse::ServiceUnavailable().finish();
+        }
         state.event_bus.publish(SystemEvent::TurntableStatus {
             connected: true,
             angle: tt.get_rotation(),
@@ -1346,7 +1391,9 @@ pub async fn turntable_home(req: HttpRequest, state: web::Data<AppState>) -> imp
         let result = tt.home().await;
 
         // Set moving = false
-        *state.turntable_moving.lock().unwrap() = false;
+        if crate::sync_lock::replace(&state.turntable_moving, "turntable.moving", false).is_err() {
+            return HttpResponse::ServiceUnavailable().finish();
+        }
         state.event_bus.publish(SystemEvent::TurntableStatus {
             connected: true,
             angle: tt.get_rotation(),
@@ -1388,7 +1435,9 @@ pub async fn turntable_rotate(
     let mut tt_lock = state.turntable.lock().await;
     if let Some(tt) = tt_lock.as_mut() {
         // Set moving = true
-        *state.turntable_moving.lock().unwrap() = true;
+        if crate::sync_lock::replace(&state.turntable_moving, "turntable.moving", true).is_err() {
+            return HttpResponse::ServiceUnavailable().finish();
+        }
         state.event_bus.publish(SystemEvent::TurntableStatus {
             connected: true,
             angle: tt.get_rotation(),
@@ -1398,7 +1447,9 @@ pub async fn turntable_rotate(
         let result = tt.rotate(json.degrees).await;
 
         // Set moving = false
-        *state.turntable_moving.lock().unwrap() = false;
+        if crate::sync_lock::replace(&state.turntable_moving, "turntable.moving", false).is_err() {
+            return HttpResponse::ServiceUnavailable().finish();
+        }
         state.event_bus.publish(SystemEvent::TurntableStatus {
             connected: true,
             angle: tt.get_rotation(),

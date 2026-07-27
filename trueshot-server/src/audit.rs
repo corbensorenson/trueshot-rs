@@ -91,7 +91,8 @@ impl AuditLog {
     }
 
     pub fn append(&self, event: AuditEvent) -> Result<AuditRecord> {
-        let mut guard = self.last_hash.lock().unwrap();
+        let mut guard = crate::sync_lock::lock(&self.last_hash, "audit.last_hash")
+            .map_err(|_| anyhow::anyhow!("Audit hash state unavailable"))?;
         let prev_hash = guard.clone();
         let mut record = AuditRecord {
             event,
@@ -322,7 +323,8 @@ impl AuditLog {
 
     pub fn refresh_last_hash(&self) -> Result<()> {
         let last_hash = read_last_hash(&self.path).unwrap_or_else(|| "genesis".to_string());
-        let mut guard = self.last_hash.lock().unwrap();
+        let mut guard = crate::sync_lock::lock(&self.last_hash, "audit.last_hash")
+            .map_err(|_| anyhow::anyhow!("Audit hash state unavailable"))?;
         *guard = last_hash;
         Ok(())
     }
@@ -617,4 +619,33 @@ fn read_last_hash(path: &Path) -> Option<String> {
     let last_line = last_line?;
     let record: AuditRecord = serde_json::from_str(&last_line).ok()?;
     Some(record.hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn poisoned_audit_chain_rejects_append_without_writing() {
+        let directory = tempfile::tempdir().expect("temporary audit directory");
+        let path = directory.path().join("audit.log");
+        let log = AuditLog::new(path.clone(), None).expect("audit log");
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = log.last_hash.lock().expect("initial lock");
+            panic!("poison audit chain");
+        }));
+
+        let event = AuditEvent::new(
+            "tester".to_string(),
+            "Admin".to_string(),
+            "test.append",
+            "test",
+            "attempt",
+            None,
+            serde_json::json!({}),
+        );
+        assert!(log.append(event).is_err());
+        assert!(!path.exists() || std::fs::metadata(path).expect("audit metadata").len() == 0);
+    }
 }

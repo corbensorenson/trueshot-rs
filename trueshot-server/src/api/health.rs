@@ -3,6 +3,7 @@
 //! Provides `/health` and `/ready` endpoints for load balancers,
 //! container orchestration (K8s), and monitoring systems.
 
+use crate::licensing::lock_license_gate;
 use crate::state::AppState;
 use actix_web::{web, HttpResponse, Responder};
 use serde::Serialize;
@@ -82,7 +83,10 @@ pub async fn health() -> impl Responder {
 pub async fn ready(state: web::Data<AppState>) -> impl Responder {
     let gpu_available = true; // GPU always assumed available
     let (license_valid, license_status) = {
-        let mut gate = state.license_gate.lock().unwrap();
+        let mut gate = match lock_license_gate(&state) {
+            Ok(gate) => gate,
+            Err(response) => return response,
+        };
         let snapshot = gate.status_snapshot();
         (snapshot.license_valid, snapshot.status)
     };

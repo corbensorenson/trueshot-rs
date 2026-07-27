@@ -235,7 +235,7 @@ impl Skeleton {
             ..Default::default()
         });
 
-        let head = skeleton.add_bone(Bone {
+        let _head = skeleton.add_bone(Bone {
             name: BoneName::Head,
             local_position: na::Vector3::new(0.0, 0.1, 0.0),
             parent_index: Some(neck),
@@ -534,6 +534,14 @@ impl AvatarTracker {
 
     /// Update bound avatar with new pose
     pub fn update_pose(&mut self, person_id: Uuid, pose: DetectedPose) {
+        let mean_confidence = if pose.confidences.is_empty() {
+            0.0
+        } else {
+            pose.confidences.values().sum::<f32>() / pose.confidences.len() as f32
+        };
+        if mean_confidence < self.confidence_threshold {
+            return;
+        }
         if let Some(bound) = self.bound.get_mut(&person_id) {
             bound.apply_pose(&pose, self.smoothing);
         }
@@ -582,7 +590,7 @@ impl PoseEstimator {
     /// Estimate pose from 4DGS Gaussians
     pub fn estimate_pose(
         &self,
-        gaussians: &[crate::gaussian_splatting::gaussian_4d::Gaussian4D],
+        _gaussians: &[crate::gaussian_splatting::gaussian_4d::Gaussian4D],
         bounds: &super::segmentation::BoundingBox3D,
     ) -> Option<DetectedPose> {
         // Estimate joint positions based on Gaussian distribution
@@ -671,6 +679,12 @@ impl PoseEstimator {
         );
         confidences.insert(BoneName::LeftFoot, 0.6);
         confidences.insert(BoneName::RightFoot, 0.6);
+
+        if confidences.values().copied().sum::<f32>() / (confidences.len() as f32)
+            < self.confidence_threshold
+        {
+            return None;
+        }
 
         Some(DetectedPose {
             joint_positions: joints,

@@ -85,10 +85,15 @@ pub struct SeekableEncryptedFile {
 
 impl SeekableEncryptedFile {
     pub fn open(path: &Path, key: &[u8; 32]) -> Result<Self> {
-        let mut file =
+        let file =
             File::open(path).with_context(|| format!("Open encrypted asset {}", path.display()))?;
-        let (header, cipher) = read_header(&mut file, key)
-            .with_context(|| format!("Authenticate encrypted asset {}", path.display()))?;
+        Self::from_file(file, key)
+            .with_context(|| format!("Authenticate encrypted asset {}", path.display()))
+    }
+
+    pub fn from_file(mut file: File, key: &[u8; 32]) -> Result<Self> {
+        file.seek(SeekFrom::Start(0))?;
+        let (header, cipher) = read_header(&mut file, key)?;
         let actual_len = file.metadata()?.len();
         let expected_len = header.encoded_len()?;
         if actual_len != expected_len {
@@ -245,6 +250,38 @@ pub fn encrypt_bytes(
     )?;
     destination.sync_all()?;
     Ok(stats)
+}
+
+/// Encrypts bytes into an already-open destination.
+///
+/// This allows callers to keep publication authority descriptor-relative and
+/// atomically reveal the completed TSE2 file only after encryption succeeds.
+pub fn encrypt_bytes_to_writer<W: Write>(
+    destination: &mut W,
+    key: &[u8; 32],
+    bytes: &[u8],
+    chunk_size: usize,
+) -> Result<EncryptionStats> {
+    validate_chunk_size(chunk_size)?;
+    let mut source = std::io::Cursor::new(bytes);
+    encrypt_reader(
+        &mut source,
+        destination,
+        bytes.len() as u64,
+        key,
+        chunk_size,
+    )
+}
+
+pub fn encrypt_reader_to_writer<R: Read, W: Write>(
+    source: &mut R,
+    destination: &mut W,
+    plaintext_len: u64,
+    key: &[u8; 32],
+    chunk_size: usize,
+) -> Result<EncryptionStats> {
+    validate_chunk_size(chunk_size)?;
+    encrypt_reader(source, destination, plaintext_len, key, chunk_size)
 }
 
 pub fn decrypt_file(input: &Path, output: &Path, key: &[u8; 32]) -> Result<EncryptionStats> {

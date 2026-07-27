@@ -1,8 +1,10 @@
 [server]
 host = "0.0.0.0"
 port = 3000
+# hmac_secret_path = "/etc/trueshot/hmac.key"
 cookie_secure = true
 allowed_origins = ["https://dashboard.example.com"]
+# trusted_proxy_cidrs = ["10.0.0.0/24"]
 public_base_url = "https://api.example.com"
 frontend_base_url = "https://dashboard.example.com"
 tls_proxy = true

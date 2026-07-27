@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 struct CachedBayer {
     data: Array3<f64>,
-    size_bytes: usize,
 }
 
 /// Thread-safe Bayer data cache
@@ -60,13 +59,7 @@ impl BayerCache {
             }
 
             // Add new entry
-            cache.insert(
-                path.clone(),
-                CachedBayer {
-                    data: data.clone(),
-                    size_bytes,
-                },
-            );
+            cache.insert(path.clone(), CachedBayer { data: data.clone() });
             *current_size += size_bytes;
 
             tracing::debug!(

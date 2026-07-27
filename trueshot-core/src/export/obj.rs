@@ -10,13 +10,19 @@ use std::path::Path;
 
 /// Export mesh to OBJ format
 pub fn export_obj(mesh: &Mesh, path: &Path) -> Result<()> {
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("Failed to create OBJ file: {}", path.display()))?;
+    export_obj_to_writer(mesh, file)?;
+    write_provenance_for_export(path)?;
+    Ok(())
+}
+
+pub fn export_obj_to_writer<W: Write>(mesh: &Mesh, writer: W) -> Result<()> {
     if mesh.is_empty() {
         anyhow::bail!("Cannot export empty mesh");
     }
 
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("Failed to create OBJ file: {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::new(writer);
 
     writeln!(writer, "# TrueShot OBJ export")?;
     writeln!(writer, "# Vertices: {}", mesh.vertices.len())?;
@@ -62,6 +68,5 @@ pub fn export_obj(mesh: &Mesh, path: &Path) -> Result<()> {
     }
 
     writer.flush()?;
-    write_provenance_for_export(path)?;
     Ok(())
 }

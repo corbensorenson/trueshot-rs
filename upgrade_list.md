@@ -239,7 +239,17 @@ Scope: full repository (core, server, dashboard, CLI, docs)
   - Add bandwidth/latency diagnostics in dashboard.
 - Acceptance criteria:
   - Live view latency < 250ms on LAN with reconnection resilience.
-- Status: Open
+- Status: In Progress (2026-07-27).
+  - Repaired the pinned `trueshot-calibration` OpenCV 0.88 source contract:
+    added its missing tracing dependency, replaced unavailable mutable-Mat
+    extraction, updated `project_points`, rejected non-UTF-8 paths, and
+    validated checkerboard geometry. The feature now compiles against the
+    installed macOS OpenCV/Xcode `libclang` toolchain.
+  - Added a reproducible Xcode-libclang qualification script and a dedicated
+    Homebrew-OpenCV macOS CI check for the calibration feature.
+  - Remaining: converge calibration/device-manager/vision on one OpenCV
+    generation, provision and pin native dependencies on advertised platforms,
+    and add physical calibration/conversion/discovery smoke tests.
 
 18. Telemetry exists but is not wired into the server runtime
 - Evidence:
@@ -463,7 +473,14 @@ Scope: full repository (core, server, dashboard, CLI, docs)
 - Acceptance criteria:
   - Unauthorized WS connections return 401/403 with no stream data.
   - Authenticated connections are bound to project/role and logged.
-- Status: Done (2026-02-08) — LiveHybrid WS now enforces auth token verification, scope checks, and origin validation hooks via configurable router state; unauthorized connections return 401/403.
+- Status: Open (re-audited 2026-07-27).
+  - The Axum LiveHybrid directory is not part of the server module graph and
+    its router is never mounted by the Actix product server, so the prior
+    "Done" claim had no executable evidence.
+  - Its source now references the shared persistent `AuthManager` rather than a
+    signature-only verifier, but it must be ported/mounted intentionally or
+    removed, then receive end-to-end unauthorized/origin/project-scope/audit
+    tests before this item can close.
 
 ## P1: Launch Readiness
 
@@ -491,7 +508,10 @@ Scope: full repository (core, server, dashboard, CLI, docs)
 - Acceptance criteria:
   - Stress tests with slow clients do not crash or stall the server.
   - Metrics show bounded memory and stable latency under load.
-- Status: Done (2026-02-08) — added message-size caps, bounded per-client outbound queues, broadcast lag handling, and drop thresholds to protect server stability.
+- Status: Open (re-audited 2026-07-27).
+  - Bounded queue and drop-policy code exists only in the dormant, unmounted
+    Axum LiveHybrid source. It has no compiled stress gate and is not a product
+    capability until the architecture decision in item 36 is completed.
 
 ## P2: Moat-Building Upgrades
 
@@ -2204,8 +2224,8 @@ Scope: local-first product architecture + monetization operations reconciliation
   - Replaced panic-prone scale coordinates and unnormalized scoring with signed bilinear zero-mean NCC; a private 4612x2776 Z9 crop now completes decode, fusion, and demosaic without the former alignment panic.
   - Removed joint-demosaic per-pixel exposure allocations, added structural/calibration validation, and replaced zero edge padding with same-CFA-parity boundary sampling.
   - Added bounded optics-specific `trueshot.sensor-correction.v1` profiles and production native-fusion application. The paired flat fitter reuses already decoded calibration NEFs, estimates a per-CFA log-domain gain grid, records the measured focus envelope, independently gates held-out p95 error and improvement, and maps only persistent pair-agreeing defects. Runtime rejects camera/sensor/lens/aperture/focal-length/focus-envelope or odd-origin crop mismatches, repairs defects from nondefective same-CFA neighbors before interpolation, applies gain after black subtraction, retains sensor-domain clipping, propagates variance by gain squared, and exports exact digest-bound correction provenance.
-  - Added a production multi-pass Apple Metal AHD path with exact CPU-derived Lab LUTs, directional interpolation/homogeneity/3x3 selection, 6-row halos, adapter-limited 512-row bands, one reusable bounded scratch set, deterministic CPU fallback, unified-memory admission, and digest-bound backend/adapter/band/fallback provenance. A one-count robust homogeneity margin removes backend-sensitive direction flips while improving synthetic red/blue PSNR to 44.087/43.920 dB and retaining green at 47.285 dB. Shared power-of-two normalization keeps HDR classification bounded while preserving every measured `f32` CFA value exactly through normalization and rescaling; one reusable host band eliminates the former full-frame HDR temporary and is included in admission.
-  - The retained Apple M1 release gate records exact measured CFA samples, 123.965 dB CPU/Metal parity, 5.29e-4 maximum normalized reconstructed-channel error against a 1e-3 limit, zero violations, 77.14 MB admitted scratch, and 1.30x/1.27x p50/p95 speedup at 1310x1304. Its mandatory 6.25x HDR stress uses an exact 8x scale, preserves CFA samples, reaches 127.54 dB parity with 5.63e-5 maximum normalized error, uses 90.41 MB admitted scratch, and remains 1.30x/1.30x faster. The fail-closed runner rejects non-Apple adapters, debug builds, parity drift, or any nominal/HDR p50/p95 speedup below 1.10x.
+  - Added a production multi-pass Apple Metal AHD path with directional interpolation, 6-row halos, adapter-limited 512-row bands, bounded scratch, deterministic CPU fallback, unified-memory admission, and digest-bound backend/adapter/band/fallback provenance. CPU and WGSL now classify homogeneity from the same integer Bayer-derived directional reconstruction, fixed-point camera-to-XYZ/Lab transform, and overflow-bounded chroma distance. The former one-count margin is removed; full-float candidates are retained only for final output after an exact direction decision. Shared power-of-two normalization preserves every measured HDR `f32` CFA value.
+  - The retained Apple M1 release gate now uses an adversarial 8256x5504, 11-band full-frame composite for both nominal and 6.25x HDR. Both report zero direction mismatches, identical direction checksums, exact CFA samples, zero values over 1e-3, and 4.17e-7/2.98e-7 maximum normalized error. Nominal/HDR p50 speedups are 2.28x/2.45x and p95 speedups are 2.10x/2.94x with 484,790,336 bytes admitted scratch. The fail-closed default no longer certifies only the former ~1 MP geometry.
   - A production debug qualification on the private 21-frame Z9 stack reused one preview and 1310x1304 crop, initialized the global Apple M1 Metal context, admitted exactly 77,143,488 scratch bytes including bounded host staging, executed three AHD bands without fallback, and atomically exported the TIFF, preview, source/flag/correction/glare/trimap/overlay maps, and digest-bound report. Provenance records exact measured-CFA policy and `generative_reconstruction: false`; this is real-path evidence, not a release timing or redistributable-corpus claim.
   - Added full-sensor production qualification and lifecycle admission. Oversized native arenas are dropped before RGB/Metal/export allocation, while ordinary ROI arenas remain reusable; a direct before/after smoke reduced peak physical footprint from 4.845 GB to 3.356 GB. Adaptive workers now discount one expected mmap-backed pass over the source corpus and react only to amplified page-ins, and ordinary processing no longer emits per-frame TIFF/NEF structure and Bayer-grid diagnostics at INFO.
   - Three clean-revision Apple M1 production runs decoded all 21 8280x5520 Z9 frames (959.818 megapixels), released the 1.920 GB arena, and produced 11 byte-identical artifacts plus identical semantic provenance. Wall p50/p95 was 88.556/91.206 seconds; maximum RSS/physical footprint/energy/page-in amplification was 3.637 GB/3.403 GB/609.782 J/0.946x with nominal thermals and no Metal fallback. Retained evidence is `docs/benchmarks/apple_nef_full_sensor_qualification_2026-07-27.json`.
@@ -2333,3 +2353,292 @@ Scope: local-first product architecture + monetization operations reconciliation
   - Added project RAW inventory, durable aperture persistence, destination-scoped camera capture, exact candidate-option round-trip tests, project/scope/traversal/symlink gates, optical-option tests, cancellation-safe lease tests, and the sixth adaptive API route. Core planner and server adaptive suites pass (11 and 12 tests). The dashboard production bundle now splits React, Three, MediaPipe, and general vendors; PWA precaching succeeds with a 386.5 KB app chunk instead of the rejected 2.10 MB monolith.
   - Completed authenticated seekable encrypted-RAW reference, observation, and refusion input decoding with the versioned `TSE2` container. A 128-bit file identity derives an independent AES-256-GCM subkey through HKDF-SHA256; an authenticated fixed header binds plaintext length/chunk geometry, and every fixed-offset chunk binds file header, chunk index, and exact plaintext length as AAD. Open rejects wrong keys, header mutation, chunk swapping, truncation, and appended bytes before exposing unauthenticated content. Plain NEFs keep the mmap fast path; encrypted TIFF/EXIF/preview reads decrypt only touched chunks, direct bounded TIFF EXIF avoids generic full-container traversal, encrypted preview fallback cannot scan the entire file, encrypted calibration profiles remain bounded and digest-bound, and the one-time project key crosses the server/CLI boundary only through a zeroized anonymous stdin payload. Atomic create-new publication and authenticated byte-for-byte crash recovery prevent partial, wrong, or same-length conflicting envelopes from authorizing plaintext deletion; bounded `TSE1` reads remain backward compatible but legacy files cannot masquerade as seekable `TSE2`. Storage has five adversarial format gates and at-rest has six compatibility/crash/publication gates. Five release runs on a private 47.3 MB Z9 file produced byte-identical plaintext/encrypted 512x512 native Bayer ROIs without a plaintext sibling; encrypted parse p50/p95 was 0.018/0.019 seconds and encrypted parse+decode p50/p95 was 0.555/0.556 seconds. The redacted evidence is `docs/benchmarks/encrypted_nef_parity_2026-07-27.json`.
   - Remaining: retained real per-ISO Z9 dark/flat/integrating-sphere capture and real-sensor posterior/spatial qualification across focus distance, temperature, and exposure duration; retained real extraction plans and profiles by lens/aperture/focal length/focus/wavelength; real physical-depth, hair/fur/transparency halo-energy/MTF, glossy-glare, and dynamic-motion/disocclusion qualification; physically constrained glare/trimap edit semantics; calibrated absolute lens actuation/readback plus retained live-camera adaptive timing/interrupt/quality qualification; a redistributable NEF performance fixture; equivalent release gates on additional Apple Silicon generations; explicit bulk `TSE1` to `TSE2` migration UX and multi-generation encrypted-RAW throughput gates.
+
+# TrueShot Red-Team Upgrade List (v23)
+
+Date: 2026-07-27
+Scope: reconciliation of `REVIEW_2026-07-27.md` and `CODEX_REVIEW_ROUND2.md`
+
+`ROADMAP.md` is now the authoritative execution order. This section retains the
+verified external-review findings and acceptance evidence without treating the
+review text itself as a specification.
+
+## P0: Paid-Pilot Blockers
+
+159. Full-sensor Metal AHD violates its retained parity contract
+- Original evidence:
+  - The current 1310x1304 retained gate passes, but it covers roughly 1/26 of a production full sensor and three rather than eleven bands.
+  - An independent Apple M1 release rerun at 8256x5504 on 2026-07-27 reproduced the same nonzero exit, CPU/Metal checksums, mismatch coordinates, ten values over tolerance, and 0.0369818807 maximum error against a 0.001 limit reported by both external reviews.
+  - The rerun measured 1.66x/1.56x p50/p95 speedup and 484,790,336 bytes of admitted scratch.
+  - Float/FMA-sensitive XYZ-to-Lab LUT indexing can change an integer homogeneity decision and select a materially different interpolation direction.
+  - CPU and WGSL chroma-distance squaring uses signed arithmetic that can overflow on extreme chroma edges.
+- Risk: production can emit materially different reconstructed color while provenance and qualification language imply parity.
+- Upgrade actions:
+  - Implement one bit-deterministic fixed-point camera-RGB-to-Lab index path on CPU and WGSL.
+  - Use overflow-safe, representation-identical chroma distance.
+  - Revert or independently justify the one-count homogeneity margin; do not widen it to hide parity drift.
+  - Add adversarial chroma, Siemens-star, wedge, saturated-edge, low-light, HDR, and band-seam fixtures.
+  - Make every supported full-sensor geometry a mandatory Apple Silicon release gate and disable unqualified Metal regimes.
+- Acceptance criteria:
+  - Zero direction-selection mismatches and no value over the declared tolerance at supported production geometries.
+  - Exact measured CFA samples and no quality, seam, memory, thermal, or performance regression.
+- Status: In Progress (2026-07-27).
+  - Replaced float/FMA-sensitive classifier inputs with a Bayer-derived integer
+    directional reconstruction shared semantically by CPU and WGSL.
+  - Quantized camera-to-XYZ/Lab coefficients fail closed outside the proven
+    range; Lab uses one shared LUT and signed-rounding contract.
+  - Chroma differences cannot overflow, and the unqualified one-count direction
+    margin was removed.
+  - Added explicit CPU/Metal direction maps and checksums; any direction mismatch
+    is a hard qualification failure.
+  - Raised default nominal and HDR gates to 8256x5504/11 bands and added a
+    full-frame adversarial composite covering chroma checker edges, Siemens-star
+    spokes, a resolution wedge, saturated primaries, dark detail, and band seams.
+  - Retained Apple M1 nominal/HDR evidence has zero direction mismatches, exact
+    CFA samples, zero tolerance violations, and roundoff-scale normalized error.
+  - Remaining: dedicated mandatory Apple CI, energy/thermal capture, every
+    advertised sensor geometry and Apple generation, and fail-closed production
+    allowlisting for unqualified regimes.
+
+160. Authentication middleware blocks inside the Actix request runtime
+- Evidence:
+  - `trueshot-server/src/auth/mod.rs` uses `block_in_place` plus `Handle::current().block_on` for bootstrap and API-token checks inside `Service::call`.
+  - API-key and API-token request branches are reachable under the `#[actix_web::main]` server.
+- Risk: production token requests can panic, stall a worker, or deadlock under the current-thread Actix runtime.
+- Upgrade actions:
+  - Move storage-backed authentication into the returned async middleware future.
+  - Add production-runtime integration tests for API-key bootstrap, API tokens, storage failure, and concurrent requests.
+- Acceptance criteria:
+  - No synchronous runtime bridge remains in request handling and token-bearing requests stay bounded under load.
+- Status: Complete (2026-07-27).
+  - Removed `block_in_place`/`Handle::block_on`; bootstrap and API-token storage
+    work now runs in the returned Actix middleware future through an
+    `Rc<Service>`.
+  - Added clean-database creation, bootstrap transition, unavailable-storage,
+    invalid-token-state, and 16-concurrent-request Actix tests.
+  - Five focused auth tests and strict server Clippy pass.
+
+161. API-token scopes do not constrain authority
+- Evidence:
+  - `verify_api_token` assigns `Role::Admin` to every valid token.
+  - `require_scope` bypasses scope checks for Admin and many mutation routes use only `require_admin`.
+  - Token creation is admin-only, so the concrete defect is unrestricted admin-token authority rather than the review's hypothetical guest self-escalation.
+- Risk: a token labeled read-only can perform writes and administration, defeating least privilege and safe Python/API automation.
+- Upgrade actions:
+  - Add an explicit API-token principal kind and route-scope policy.
+  - Resolve active owner state while enforcing token scopes even for an Admin owner.
+  - Generate a route matrix covering anonymous, guest, interactive admin, and narrow API-token principals.
+- Acceptance criteria:
+  - Read-only tokens fail every mutation route; revoked/expired/disabled-owner tokens fail immediately.
+- Status: Complete (2026-07-27).
+  - Added explicit Session/API-token/bootstrap principal kinds and active-owner
+    role resolution.
+  - Added centralized fail-closed `read`, `capture`, `process`, `export`,
+    `license`, and `admin` route policy enforced in middleware and
+    `require_admin`.
+  - New tokens default to `read`; scope sets are bounded, normalized, and
+    validated, and wildcard cannot be combined with narrower authority.
+  - Read-versus-process, revoked, expired, inactive-owner, missing-owner,
+    storage-failure, and concurrent Actix gates pass.
+  - A generated matrix now walks the compiled OpenAPI document and all 158
+    Actix route declarations, rejects undocumented API handlers, and evaluates
+    public/anonymous, guest, interactive Admin invariants, wildcard, and every
+    narrow token scope. Catch-all templates are normalized and the two
+    intentionally browser-only handlers are pinned public.
+  - Tracked by `ROADMAP.md` R0.3.
+
+162. Project file reads are not uniformly symlink safe
+- Evidence:
+  - `resolve_project_file` and `resolve_project_child_file` normalize paths lexically but do not canonicalize or open no-follow.
+  - The direct fusion-artifact route uses this resolver; inventory parsing rejects symlinked artifacts, but direct download does not inherit that check.
+- Risk: an allowed project filename can resolve through a symlink to a readable file outside the project root.
+- Upgrade actions:
+  - Introduce one canonical/no-follow rooted file-open primitive and migrate every raw/processed/output/download path.
+  - Test final and intermediate symlinks, swap races, hard links, encrypted files, and direct fusion downloads.
+- Acceptance criteria:
+  - No server file API can escape a project root through links or path races.
+- Status: In Progress (2026-07-27).
+  - Added canonical descriptor-rooted Unix reads using per-component `openat`,
+    `O_NOFOLLOW`, directory-only traversal, regular-file checks, and hard-link
+    rejection.
+  - Migrated raw, processed, output, fusion-artifact, bounded report/IMU/project
+    metadata, and public-share responses to descriptor-bound clear/TSE2
+    streaming with bounded range support and no plaintext staging.
+  - Added descriptor-relative atomic project-metadata replacement using
+    private create-new files, `fsync`, and `renameat`.
+  - Added exclusive mode-`0700` project creation and descriptor-held streaming
+    staging with atomic replace or no-replace commit, rooted cleanup, and
+    encrypted-before-publication output conversion.
+  - Migrated annotation layers, edit history and mesh/splat codecs, calibration
+    frames/color/profile I/O, multipart uploads, share LOD generation, queued
+    fusion report/edit reads, and wizard background/plan/burst/SD-import
+    artifacts. Encrypted assets no longer require plaintext LOD siblings.
+  - Added serialized project metadata mutations and descriptor-backed
+    mesh/splat/GLB plus point-LOD regressions. The full server suite and strict
+    server/storage clippy pass after these migrations.
+  - Final/intermediate symlink, hard-link, clear/encrypted post-open swap,
+    bounded range, and final-symlink write regressions pass.
+  - Added bounded Unix descriptor-rooted project/fusion inventory and
+    whole-project quota accounting. Metadata comes from opened single-link
+    files; links and redirected directories are omitted; excessive traversal
+    and size overflow fail closed. Fusion artifact presence consumes this
+    inventory rather than reopening paths.
+  - RAW purge now recursively uses descriptor-relative `unlinkat` and preserves
+    outside targets behind nested or final symlinks.
+  - Checkerboard calibration now opens project frames before the blocking task,
+    caps sessions at 64 frames/128 MiB each/2 GiB total, and gives OpenCV
+    encoded bytes for `imdecode`; there is no delayed filename reopen. Its
+    pinned OpenCV feature compiles on macOS with Xcode `libclang` after repairing
+    stale Mat extraction and `project_points` bindings.
+  - The direct Actix fusion-artifact regression serves a safe file and rejects
+    both final and intermediate symlink escapes. The complete server suite
+    passes 67 tests; strict all-target server and calibration Clippy passes.
+  - Queued fusion calibration profiles are opened descriptor-first, optionally
+    decrypted from the retained handle, size- and replay-digest checked, held
+    in zeroizing memory, and sent inline through bounded child stdin. The CLI
+    revalidates exact presence, size, digest, and typed schema; an encrypted
+    pathname-swap regression proves the original descriptor remains
+    authoritative and a wrong key fails.
+  - Remaining: descriptor-native RAW traversal and output publication across
+    the packaged fusion child boundary, plus cross-platform race-safe handles.
+    Tracked by `ROADMAP.md` R0.4.
+
+163. Standalone GPU feature builds are broken by feature unification
+- Evidence:
+  - `cargo check -p trueshot-core --examples` currently fails because the Metal qualification example imports the `gpu`-gated module.
+  - `trueshot-core` declares `gpu = []`, so the feature does not enable the optional WGPU dependency it uses.
+- Risk: documented single-crate builds and downstream consumers fail even when workspace CI is green.
+- Upgrade actions:
+  - Add the example's required feature declaration, make `gpu` enable its dependencies, and test isolated feature combinations without workspace unification.
+- Acceptance criteria:
+  - Default, no-default, WGPU, and GPU all-target builds pass independently on supported targets.
+- Status: Complete (2026-07-27).
+  - `gpu` now implies `wgpu`; the Metal-only example declares its required
+    feature; WGPU-only compute/live-hybrid modules are correctly gated; and the
+    CPU rasterizer fallback imports its higher-order SH constant.
+  - Added `scripts/check_core_feature_builds.sh` to CI. Default, no-default,
+    isolated WGPU, isolated GPU, all-target, and example checks pass.
+
+## P1: Paid-Beta Fidelity And Security
+
+164. Production demosaic uses an identity camera matrix and the burst architecture contradicts the joint-CFA path
+- Evidence:
+  - `trueshot-cli/src/main.rs` passes an identity `rgb_cam` into CPU/Metal AHD, making Lab homogeneity decisions in an uncalibrated camera-native space.
+  - `trueshot-core/src/joint_demosaic.rs` states that multi-frame focus/HDR data should accumulate measured CFA samples directly into RGB rather than demosaic a merged Bayer mosaic.
+  - The production native burst path currently fuses a Bayer mosaic and then runs AHD.
+- Risk: the largest available image-quality gains are blocked by an uncalibrated perceptual metric and an unresolved core architecture, while effort optimizes a 2005 single-frame fallback.
+- Upgrade actions:
+  - Calibrate and propagate camera-to-XYZ/working-space transforms through demosaic, preview, archive export, and provenance.
+  - Benchmark AHD, a strong non-generative single-frame fallback, and direct uncertainty-aware multi-frame CFA reconstruction on identical synthetic and legally usable real stacks.
+  - Select the production architecture from preregistered PSNR/SSIM/DeltaE/MTF/moire/halo/motion/resource evidence.
+- Acceptance criteria:
+  - One shared GUI/CLI/Python semantic core wins the preregistered suite and has calibrated color provenance.
+- Status: Open. Tracked by `ROADMAP.md` R1.1 and R1.2.
+
+165. Server security controls and test policy remain weaker than the API surface
+- Evidence:
+  - Client IP derivation trusts forwarded headers without a trusted-proxy allowlist; password login has no durable per-account lockout.
+  - API-key comparison uses ordinary string equality.
+  - Access-token revocation deletes refresh sessions but does not invalidate issued access JWTs.
+  - Public-gallery state retains raw share tokens.
+  - More than 100 API sites return internal error strings in 500 responses.
+  - Workspace lint policy globally allows dead code, unused variables, and unused imports.
+  - The macOS licensing anti-debug path performs an unsafe `sysctl` call but never checks `P_TRACED`.
+- Risk: brute-force throttling can be spoofed, secrets and internal paths can leak, revocation is delayed, and nominal strict-lint/security claims contain blind spots.
+- Upgrade actions:
+  - Implement trusted-proxy policy, account backoff, constant-time secret comparison, access-token version/JTI revocation, hashed public-token handling, typed opaque public errors, and a route authorization matrix.
+  - Narrow lint exceptions and remove or correctly implement the no-op anti-debug code.
+- Acceptance criteria:
+  - Adversarial proxy/login/revocation/database/error tests pass and every route has explicit principal/scope evidence.
+- Status: In Progress (2026-07-27).
+  - Completed the generated principal/scope route matrix and constant-time
+    bootstrap API-key comparison.
+  - Pairing and short-link codes now use unbiased uniform sampling.
+  - Added validated trusted-proxy CIDRs; untrusted peers cannot spoof the
+    rate-limit identity with forwarded headers, trusted chains are stripped
+    from the nearest hop, and malformed chains fall back to the socket peer.
+  - Added atomic, restart-persistent SQLite password-failure state keyed by a
+    domain-separated normalized-identity hash. Unknown accounts perform dummy
+    Argon2 verification; five failures trigger progressive 30-second-to-one-hour
+    lockout; successful authentication clears state; and generic `429`
+    responses include `Retry-After`. Threshold, progression, expiry-window,
+    restart, case-normalization, and reset regressions pass.
+  - Added persistent JTI revocation and per-subject session generations to
+    access JWTs. Logout revokes one JTI; logout-all advances the generation
+    before deleting refresh sessions; refresh tokens retain their issuance
+    generation and cannot cross that boundary. Actix middleware and direct
+    camera-stream verification enforce the database authority. Individual,
+    subject-wide, cross-subject, refresh, old-schema migration, middleware, and
+    restart regressions pass.
+  - Replaced raw public-gallery bearer persistence with deterministic
+    HMAC-SHA256 aliases. SQLite stores only private-token and alias hashes;
+    startup backfills aliases, uses secure deletion, clears the legacy column,
+    truncates WAL state, and vacuums changed databases before serving. Alias
+    lookup covers assets, metadata, usage limits, analytics, listings, and
+    short links. A database-byte regression proves a restored legacy bearer is
+    absent from DB/WAL/SHM/journal candidates after migration.
+  - Added an outer fail-closed 5xx response boundary. Every produced server
+    failure receives a UUID correlation ID and an exact opaque JSON envelope
+    with stable internal/unsupported/upstream/unavailable/timeout codes. Only
+    retry and CORS headers survive; arbitrary internal headers and bodies are
+    discarded.
+    Non-5xx responses retain their original body and status.
+  - Removed concrete URI paths from tracing because public share bearers occupy
+    path segments. Request diagnostics now use matched route templates, while
+    audit failures record only a static operation, method, template, and
+    correlation ID. Sensitive share database and Google/Dropbox/OneDrive OAuth
+    paths no longer construct provider, filesystem, or persistence details as
+    response bodies.
+  - Exact-schema regressions cover text/JSON/handler failures, SQL, absolute
+    paths, tokens, provider payloads, unsafe headers, CORS/Retry-After, valid
+    UUID correlation, and unchanged 400 bodies. All 77 server tests and strict
+    server/CLI all-target Clippy pass.
+  - The workspace root now enforces dead code, unused variables, and unused
+    imports as warnings, and all-target strict Clippy promotes them to errors.
+    The core crate blanket suppressions are removed; retained deterministic
+    benchmark baselines use narrow explained `#[expect]` annotations that fail
+    when no longer needed. The forced-lint sweep exposed three
+    implemented but unmounted routes and two camera placeholders.
+    Scale-anchor GET/POST and scan coverage are now mounted and covered by the
+    generated authorization matrix; normalized focus-point and autofocus calls
+    dispatch through the real camera adapter. Redundant queue and hidden
+    license snapshot state was removed.
+  - Production server mutexes no longer panic on poisoned lock acquisition.
+    License, audit-chain, rate-limit, system-stat, and turntable authority
+    fails closed; the non-authoritative webhook dedup cache clears and resets
+    poison before resuming. Dedicated fault-injection regressions pass.
+  - Validation on macOS: all 81 server tests and all 523 workspace tests and
+    doctests passed with zero failures (6 explicitly ignored), and
+    `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - Remaining: complete behavioral success/failure coverage for every public
+    operation and make the anti-debug decision. Typed opaque public errors are
+    complete under `ROADMAP.md` R2.2; remaining work is tracked by R2.3.
+
+166. HMAC secret sourcing does not match the hardened at-rest key policy
+- Evidence:
+  - At-rest master keys use environment/file/keyring precedence and fail closed in production.
+  - JWT HMAC startup still uses only the OS keyring and auto-generation.
+- Risk: advertised headless/container operation can fail to boot or lose session continuity when no persistent keyring backend exists.
+- Upgrade actions:
+  - Add environment/file/keyring precedence, minimum length, permission checks, and production no-ephemeral enforcement.
+  - If headless/container deployment is not a supported product surface, remove that path from release documentation instead of carrying an untested promise.
+- Acceptance criteria:
+  - Packaged macOS and every advertised headless deployment survive restart with stable sessions and fail clearly on missing/invalid secrets.
+- Status: In Progress (2026-07-27).
+  - Added `TRUESHOT_HMAC_SECRET`, `TRUESHOT_HMAC_SECRET_FILE`, and
+    `server.hmac_secret_path` precedence ahead of the OS keychain.
+  - File secrets must be regular, non-symlink, current-user-owned, `0600` or
+    stricter, bounded, and at least 32 decoded bytes.
+  - Production accepts a pre-provisioned persistent keychain entry but never
+    creates a missing secret implicitly.
+  - Remaining: clean packaged-macOS restart/rotation qualification and an
+    explicit decision on any advertised non-macOS headless surface. Tracked by
+    `ROADMAP.md` R2.1.
+
+## Rejected Or Already Resolved Review Findings
+
+- Replay `--quality` argument injection is closed: `FusionReplayCapsule::validate` allowlists `low`, `medium`, `high`, and `ultra` before subprocess construction.
+- At-rest master-key sourcing is closed; the external review correctly distinguished this from the still-open HMAC secret.
+- HDR measured-CFA round-trip is closed through exact power-of-two normalization; this does not close CPU/Metal reconstructed-channel parity.
+- TSE2 cryptographic structure and fusion-revision subprocess containment need no redesign based on these reviews. TSE2 cache changes remain measure-first optimization work.
+- The claim that current scratch accounting omits the reusable host normalization band is stale; the end-to-end full-sensor admission and footprint gates remain authoritative.

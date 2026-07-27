@@ -103,8 +103,6 @@ impl AdamOptimizer {
     /// Perform one optimization step
     pub fn step(&mut self, gaussians: &mut GaussianCloud, gradients: &GaussianGradients) {
         self.t += 1;
-        let t = self.t as f32;
-
         // Bias correction terms
         let bias_correction1 = 1.0 - self.beta1.powi(self.t as i32);
         let bias_correction2 = 1.0 - self.beta2.powi(self.t as i32);

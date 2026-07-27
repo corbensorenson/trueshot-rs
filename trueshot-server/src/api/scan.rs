@@ -19,7 +19,10 @@ use tracing::info;
 
 use crate::audit::AuditEvent;
 use crate::auth::require_admin;
-use crate::fs_safety::available_space_bytes;
+use crate::fs_safety::{
+    available_space_bytes, ensure_project_directory, open_project_file_read,
+    remove_project_file_if_exists, stage_project_file, write_project_file_atomic,
+};
 use crate::licensing::{enforce_scan_limit, require_license_feature};
 use crate::scan_types::{
     BackgroundStatus, BoundingBox, ComplexityInfo, ComputePlanRequest, CoverageStatus,
@@ -40,6 +43,8 @@ use trueshot_core::quality_analyzer::{Analyzer, Defect, ProcessingParams};
 use trueshot_core::vision::features::NativeFeatureExtractor;
 use trueshot_device_manager::{CameraConfig, CameraRole};
 use uuid::Uuid;
+
+const WIZARD_PROJECT_ID: &str = "_wizard";
 
 // ============================================================================
 // Background Calibration Endpoints
@@ -819,10 +824,23 @@ async fn capture_background_sequence(
         wizard.background_frames = frames.len() as u32;
     }
 
-    let base = state.config.paths.projects_dir.join("_wizard");
-    std::fs::create_dir_all(&base).ok();
+    let base = state.config.paths.projects_dir.join(WIZARD_PROJECT_ID);
+    ensure_project_directory(
+        &state.config.paths.projects_dir,
+        WIZARD_PROJECT_ID,
+        &base.join("state"),
+    )
+    .map_err(|response| anyhow::anyhow!("Create wizard state: {}", response.status()))?;
     let path = base.join("background.png");
-    let _ = DynamicImage::ImageRgb8(background).save(&path);
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(background).write_to(&mut encoded, image::ImageFormat::Png)?;
+    write_project_file_atomic(
+        &state.config.paths.projects_dir,
+        WIZARD_PROJECT_ID,
+        &path,
+        encoded.get_ref(),
+    )
+    .map_err(|response| anyhow::anyhow!("Write wizard background: {}", response.status()))?;
 
     Ok((frames.len() as u32, timestamp))
 }
@@ -1405,7 +1423,12 @@ async fn ensure_scan_session_dir(state: &AppState, session_id: &str) -> Result<P
         .join("_wizard")
         .join(session_id);
     let raw_dir = base.join("raw");
-    tokio::fs::create_dir_all(&raw_dir).await?;
+    ensure_project_directory(
+        &state.config.paths.projects_dir,
+        WIZARD_PROJECT_ID,
+        &raw_dir,
+    )
+    .map_err(|response| anyhow::anyhow!("Create scan session: {}", response.status()))?;
     Ok(raw_dir)
 }
 
@@ -1416,7 +1439,7 @@ async fn ensure_manual_capture_dir(state: &AppState) -> PathBuf {
         .projects_dir
         .join("_wizard")
         .join("manual");
-    let _ = tokio::fs::create_dir_all(&base).await;
+    let _ = ensure_project_directory(&state.config.paths.projects_dir, WIZARD_PROJECT_ID, &base);
     base
 }
 
@@ -1733,10 +1756,18 @@ async fn persist_plan_history(state: &AppState, session_id: &str) -> Result<()> 
         .projects_dir
         .join("_wizard")
         .join(session_id);
-    tokio::fs::create_dir_all(&base).await?;
+    ensure_project_directory(&state.config.paths.projects_dir, WIZARD_PROJECT_ID, &base).map_err(
+        |response| anyhow::anyhow!("Create plan history directory: {}", response.status()),
+    )?;
     let path = base.join("plan_history.json");
     let payload = serde_json::to_vec_pretty(&history)?;
-    tokio::fs::write(&path, payload).await?;
+    write_project_file_atomic(
+        &state.config.paths.projects_dir,
+        WIZARD_PROJECT_ID,
+        &path,
+        &payload,
+    )
+    .map_err(|response| anyhow::anyhow!("Write plan history: {}", response.status()))?;
     Ok(())
 }
 
@@ -1792,13 +1823,13 @@ async fn perform_capture(
             .ok()
             .flatten()
         {
-            let _ = write_camera_calibration(output_dir, "calibration.json", &cal).await;
+            let _ = write_camera_calibration(state, output_dir, "calibration.json", &cal).await;
         }
     }
     for (id, _) in &active {
         if let Some(cal) = state.inventory.get_camera_calibration(id).ok().flatten() {
             let filename = format!("calibration_{}.json", sanitize_camera_id(id));
-            let _ = write_camera_calibration(output_dir, &filename, &cal).await;
+            let _ = write_camera_calibration(state, output_dir, &filename, &cal).await;
         }
     }
 
@@ -1830,8 +1861,8 @@ async fn perform_capture(
                             path.file_name().unwrap_or_default().to_string_lossy()
                         );
                         let dest = output_dir.join(filename);
-                        if tokio::fs::copy(&path, &dest).await.is_ok() {
-                            let score = score_capture_image(&dest).await.unwrap_or(0.0);
+                        if copy_into_wizard_project(state, &path, &dest, false).is_ok() {
+                            let score = score_capture_image(state, &dest).await.unwrap_or(0.0);
                             burst_paths.push((dest, score));
                             burst_total += 1;
                         }
@@ -1856,7 +1887,11 @@ async fn perform_capture(
 
         if !keep_all {
             for (path, _) in burst_paths.iter().skip(1) {
-                let _ = tokio::fs::remove_file(path).await;
+                let _ = remove_project_file_if_exists(
+                    &state.config.paths.projects_dir,
+                    WIZARD_PROJECT_ID,
+                    path,
+                );
             }
         }
     }
@@ -1864,7 +1899,7 @@ async fn perform_capture(
     if captured == 0 {
         anyhow::bail!("All camera captures failed");
     }
-    let (verified, hashes) = verify_capture_files(&captured_paths).await?;
+    let (verified, hashes) = verify_capture_files(state, &captured_paths).await?;
     if verified < expected {
         anyhow::bail!(
             "Capture verification incomplete: expected {}, verified {}",
@@ -1884,12 +1919,15 @@ async fn perform_capture(
     })
 }
 
-async fn verify_capture_files(paths: &[PathBuf]) -> Result<(usize, Vec<String>)> {
+async fn verify_capture_files(state: &AppState, paths: &[PathBuf]) -> Result<(usize, Vec<String>)> {
     let mut hashes = Vec::new();
     let mut verified = 0usize;
     for path in paths {
-        wait_for_stable_file(path, 5, std::time::Duration::from_millis(200)).await?;
-        let mut file = tokio::fs::File::open(path).await?;
+        wait_for_stable_project_file(state, path, 5, std::time::Duration::from_millis(200)).await?;
+        let file =
+            open_project_file_read(&state.config.paths.projects_dir, WIZARD_PROJECT_ID, path)
+                .map_err(|response| anyhow::anyhow!("Open capture: {}", response.status()))?;
+        let mut file = tokio::fs::File::from_std(file);
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -1923,6 +1961,51 @@ async fn wait_for_stable_file(
     Ok(())
 }
 
+async fn wait_for_stable_project_file(
+    state: &AppState,
+    path: &Path,
+    attempts: usize,
+    delay: std::time::Duration,
+) -> Result<()> {
+    let mut last_size = None;
+    for _ in 0..attempts {
+        let file =
+            open_project_file_read(&state.config.paths.projects_dir, WIZARD_PROJECT_ID, path)
+                .map_err(|response| anyhow::anyhow!("Open capture: {}", response.status()))?;
+        let size = file.metadata()?.len();
+        if last_size == Some(size) && size > 0 {
+            return Ok(());
+        }
+        last_size = Some(size);
+        tokio::time::sleep(delay).await;
+    }
+    Ok(())
+}
+
+fn copy_into_wizard_project(
+    state: &AppState,
+    source_path: &Path,
+    destination_path: &Path,
+    replace: bool,
+) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(source_path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("Capture source is not a regular file");
+    }
+    let mut source = std::fs::File::open(source_path)?;
+    let mut staged = stage_project_file(
+        &state.config.paths.projects_dir,
+        WIZARD_PROJECT_ID,
+        destination_path,
+        replace,
+    )
+    .map_err(|response| anyhow::anyhow!("Stage capture: {}", response.status()))?;
+    std::io::copy(&mut source, staged.file_mut())?;
+    staged
+        .commit()
+        .map_err(|response| anyhow::anyhow!("Commit capture: {}", response.status()))
+}
+
 fn capture_burst_count() -> usize {
     let count = std::env::var("TRUESHOT_CAPTURE_BURST")
         .ok()
@@ -1938,8 +2021,16 @@ fn capture_burst_keep_all() -> bool {
         .unwrap_or(false)
 }
 
-async fn score_capture_image(path: &Path) -> Result<f32> {
-    let bytes = tokio::fs::read(path).await?;
+async fn score_capture_image(state: &AppState, path: &Path) -> Result<f32> {
+    let mut file =
+        open_project_file_read(&state.config.paths.projects_dir, WIZARD_PROJECT_ID, path)
+            .map_err(|response| anyhow::anyhow!("Open burst capture: {}", response.status()))?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes)?;
+        Ok::<_, std::io::Error>(bytes)
+    })
+    .await??;
     let image = image::load_from_memory(&bytes)?;
     Ok(compute_burst_score(&image))
 }
@@ -2006,11 +2097,17 @@ fn compute_laplacian_sharpness(image: &DynamicImage) -> f32 {
 }
 
 async fn write_camera_calibration(
+    state: &AppState,
     output_dir: &Path,
     filename: &str,
     cal: &CameraCalibration,
 ) -> Result<()> {
-    tokio::fs::create_dir_all(output_dir).await?;
+    ensure_project_directory(
+        &state.config.paths.projects_dir,
+        WIZARD_PROJECT_ID,
+        output_dir,
+    )
+    .map_err(|response| anyhow::anyhow!("Create capture directory: {}", response.status()))?;
     let payload = serde_json::json!({
         "camera_id": cal.camera_id,
         "camera_matrix": cal.camera_matrix,
@@ -2021,7 +2118,14 @@ async fn write_camera_calibration(
         "updated_at": cal.updated_at.to_rfc3339(),
     });
     let path = output_dir.join(filename);
-    tokio::fs::write(path, serde_json::to_string_pretty(&payload)?).await?;
+    let bytes = serde_json::to_vec_pretty(&payload)?;
+    write_project_file_atomic(
+        &state.config.paths.projects_dir,
+        WIZARD_PROJECT_ID,
+        &path,
+        &bytes,
+    )
+    .map_err(|response| anyhow::anyhow!("Write camera calibration: {}", response.status()))?;
     Ok(())
 }
 
@@ -2247,7 +2351,8 @@ async fn ensure_sdcard_import_dir(state: &AppState, session_id: &str) -> Result<
         .join("_wizard")
         .join("sdcard")
         .join(session_id);
-    tokio::fs::create_dir_all(&base).await?;
+    ensure_project_directory(&state.config.paths.projects_dir, WIZARD_PROJECT_ID, &base)
+        .map_err(|response| anyhow::anyhow!("Create SD import directory: {}", response.status()))?;
     Ok(base)
 }
 
@@ -2384,7 +2489,7 @@ pub async fn stop_scan(req: HttpRequest, state: web::Data<AppState>) -> impl Res
 
 async fn enforce_capture_resolution(state: &web::Data<AppState>) -> Result<(), HttpResponse> {
     let max_resolution = {
-        let mut gate = state.license_gate.lock().unwrap();
+        let mut gate = crate::licensing::lock_license_gate(state)?;
         gate.max_resolution()
     };
     let Some(max_resolution) = max_resolution else {
@@ -2770,26 +2875,34 @@ pub async fn import_from_sdcard(req: HttpRequest, state: web::Data<AppState>) ->
         return HttpResponse::PayloadTooLarge().body("Project quota exceeded");
     }
     let manifest_path = dest_root.join("sdcard_manifest.json");
-    let _ = tokio::fs::write(
+    let manifest_payload = serde_json::to_vec_pretty(&serde_json::json!({
+        "verified_at": chrono::Utc::now().to_rfc3339(),
+        "file_count": verification.count,
+        "manifest_hash": verification.manifest_hash,
+        "hashes": verification.hashes,
+    }))
+    .unwrap_or_default();
+    if let Err(response) = write_project_file_atomic(
+        &state.config.paths.projects_dir,
+        WIZARD_PROJECT_ID,
         &manifest_path,
-        serde_json::to_string_pretty(&serde_json::json!({
-            "verified_at": chrono::Utc::now().to_rfc3339(),
-            "file_count": verification.count,
-            "manifest_hash": verification.manifest_hash,
-            "hashes": verification.hashes,
-        }))
-        .unwrap_or_default(),
-    )
-    .await;
+        &manifest_payload,
+    ) {
+        return response;
+    }
 
     let mut imported = 0u32;
     for file in files {
         let rel = file.strip_prefix(&info.root).unwrap_or(&file);
         let dest = dest_root.join(rel);
         if let Some(parent) = dest.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
+            if ensure_project_directory(&state.config.paths.projects_dir, WIZARD_PROJECT_ID, parent)
+                .is_err()
+            {
+                continue;
+            }
         }
-        if tokio::fs::copy(&file, &dest).await.is_ok() {
+        if copy_into_wizard_project(&state, &file, &dest, false).is_ok() {
             imported = imported.saturating_add(1);
         }
     }
@@ -2898,10 +3011,11 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state
+    if state
         .audit
         .append_with_redaction(event, &state.config.privacy)
+        .is_err()
     {
-        tracing::warn!("audit log failed for {}: {}", req.path(), err);
+        crate::public_error::log_redacted_failure(req, "audit.append");
     }
 }

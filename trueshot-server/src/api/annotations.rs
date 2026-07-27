@@ -5,9 +5,12 @@ use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::api::project_asset::{write_project_asset_bytes, OpenedProjectAsset};
 use crate::auth::require_admin;
-use crate::fs_safety::resolve_project_child;
+use crate::fs_safety::{ensure_project_directory, resolve_project_child_file};
 use crate::state::AppState;
+
+const MAX_ANNOTATION_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
 pub struct AnnotationPoint {
@@ -113,17 +116,20 @@ pub async fn save_project_annotations(
         .get::<crate::auth::AuthContext>()
         .map(|ctx| ctx.sub.clone());
 
-    let saved = match save_annotations_for_asset(
-        &state,
-        &project_id,
-        &payload.asset_path,
-        &layer,
-        payload.annotations.clone(),
-        payload.merge.unwrap_or(true),
-        author,
-    ) {
-        Ok(layer) => layer,
-        Err(resp) => return resp,
+    let saved = {
+        let _guard = state.project_file_mutations.lock().await;
+        match save_annotations_for_asset(
+            &state,
+            &project_id,
+            &payload.asset_path,
+            &layer,
+            payload.annotations.clone(),
+            payload.merge.unwrap_or(true),
+            author,
+        ) {
+            Ok(layer) => layer,
+            Err(resp) => return resp,
+        }
     };
     HttpResponse::Ok().json(saved)
 }
@@ -150,19 +156,21 @@ pub(crate) fn load_annotations_for_asset(
         asset_path,
         layer,
     )?;
-    if !annotations_path.exists() {
-        let now = unix_timestamp();
-        return Ok(AnnotationLayer {
-            asset_path: asset_path.to_string(),
-            layer: layer.to_string(),
-            created_at: now,
-            updated_at: now,
-            annotations: Vec::new(),
-        });
-    }
-    let payload = std::fs::read_to_string(&annotations_path)
-        .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-    let parsed: AnnotationLayer = serde_json::from_str(&payload)
+    let payload = match OpenedProjectAsset::open(state, project_id, &annotations_path) {
+        Ok(asset) => asset.read_to_end_bounded(MAX_ANNOTATION_BYTES)?,
+        Err(response) if response.status() == actix_web::http::StatusCode::NOT_FOUND => {
+            let now = unix_timestamp();
+            return Ok(AnnotationLayer {
+                asset_path: asset_path.to_string(),
+                layer: layer.to_string(),
+                created_at: now,
+                updated_at: now,
+                annotations: Vec::new(),
+            });
+        }
+        Err(response) => return Err(response),
+    };
+    let parsed: AnnotationLayer = serde_json::from_slice(&payload)
         .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
     Ok(parsed)
 }
@@ -187,22 +195,18 @@ pub(crate) fn save_annotations_for_asset(
         asset_path,
         layer,
     )?;
-    if let Some(parent) = annotations_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-    }
+    let annotations_dir = annotations_path
+        .parent()
+        .ok_or_else(|| HttpResponse::BadRequest().body("Invalid annotation path"))?;
+    ensure_project_directory(
+        &state.config.paths.projects_dir,
+        project_id,
+        annotations_dir,
+    )?;
 
     let now = unix_timestamp();
-    let existing = if merge && annotations_path.exists() {
-        let payload = std::fs::read_to_string(&annotations_path)
-            .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-        serde_json::from_str::<AnnotationLayer>(&payload).unwrap_or_else(|_| AnnotationLayer {
-            asset_path: asset_path.to_string(),
-            layer: layer.to_string(),
-            created_at: now,
-            updated_at: now,
-            annotations: Vec::new(),
-        })
+    let existing = if merge {
+        load_annotations_for_asset(state, project_id, asset_path, layer)?
     } else {
         AnnotationLayer {
             asset_path: asset_path.to_string(),
@@ -241,10 +245,9 @@ pub(crate) fn save_annotations_for_asset(
         updated_at: now,
         annotations: merged,
     };
-    let payload = serde_json::to_string_pretty(&layer_out)
+    let payload = serde_json::to_vec_pretty(&layer_out)
         .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
-    std::fs::write(&annotations_path, payload)
-        .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?;
+    write_project_asset_bytes(state, project_id, &annotations_path, &payload)?;
     Ok(layer_out)
 }
 
@@ -254,13 +257,16 @@ fn annotation_file_path(
     asset_path: &str,
     layer: &str,
 ) -> Result<std::path::PathBuf, HttpResponse> {
-    let output_dir = resolve_project_child(projects_dir, project_id, "output")?;
-    let annotations_dir = output_dir.join("annotations");
     let key = format!("{}|{}", asset_path, layer);
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     let hash = hex::encode(hasher.finalize());
-    Ok(annotations_dir.join(format!("{hash}.json")))
+    resolve_project_child_file(
+        projects_dir,
+        project_id,
+        "output",
+        &format!("annotations/{hash}.json"),
+    )
 }
 
 fn unix_timestamp() -> i64 {

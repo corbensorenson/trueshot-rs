@@ -24,30 +24,18 @@ pub struct GpuMeshifier {
     // Compute pipelines
     voxel_accumulate_pipeline: wgpu::ComputePipeline,
     marching_cubes_pipeline: wgpu::ComputePipeline,
-    normal_estimation_pipeline: wgpu::ComputePipeline,
+    _normal_estimation_pipeline: wgpu::ComputePipeline,
 
     // Bind group layouts
     voxel_bind_group_layout: wgpu::BindGroupLayout,
     marching_cubes_bind_group_layout: wgpu::BindGroupLayout,
-    normal_bind_group_layout: wgpu::BindGroupLayout,
+    _normal_bind_group_layout: wgpu::BindGroupLayout,
 
     // Lookup tables
     marching_cubes_lut: wgpu::Buffer,
-    edge_table: wgpu::Buffer,
+    _edge_table: wgpu::Buffer,
 
     config: MeshificationConfig,
-}
-
-/// GPU buffers for a meshification job
-struct GpuMeshBuffers {
-    gaussians: wgpu::Buffer,
-    voxel_density: wgpu::Buffer,
-    voxel_color: wgpu::Buffer,
-    voxel_counts: wgpu::Buffer,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    vertex_count: wgpu::Buffer,
-    index_count: wgpu::Buffer,
 }
 
 impl GpuMeshifier {
@@ -293,12 +281,12 @@ impl GpuMeshifier {
             queue,
             voxel_accumulate_pipeline,
             marching_cubes_pipeline,
-            normal_estimation_pipeline,
+            _normal_estimation_pipeline: normal_estimation_pipeline,
             voxel_bind_group_layout,
             marching_cubes_bind_group_layout,
-            normal_bind_group_layout,
+            _normal_bind_group_layout: normal_bind_group_layout,
             marching_cubes_lut,
-            edge_table,
+            _edge_table: edge_table,
             config,
         })
     }

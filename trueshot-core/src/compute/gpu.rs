@@ -87,22 +87,7 @@ impl GpuCompute {
             mapped_at_creation: false,
         });
 
-        // Uniforms
-        let uniforms = [
-            min.x,
-            min.y,
-            min.z,
-            0.0, // min_bound + pad
-            max.x,
-            max.y,
-            max.z,
-            0.0, // max_bound + pad (unused but kept for align)
-            grid_size_x as f32,
-            grid_size_y as f32,
-            grid_size_z as f32,
-            0.0, // sizes cast to f32 for easier padding, shader expects u32 though. Let's send u32
-        ];
-        // Correction: Shader expects:
+        // Shader expects:
         // vec3<f32> min;
         // vec3<f32> max;
         // vec3<u32> size;

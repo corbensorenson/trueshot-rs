@@ -2,20 +2,31 @@ use actix_web::{delete, get, post, web, HttpMessage, HttpRequest, HttpResponse, 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::audit::AuditEvent;
 use crate::auth::require_admin;
 use crate::config::AppConfig;
+use crate::fs_safety::{
+    ensure_project_directory, open_project_file_read, remove_project_file_if_exists,
+    stage_project_file, write_project_file_atomic,
+};
 use crate::state::{AppState, CalibrationSession};
 use image::ImageReader;
 use ndarray::Array3;
+use std::io::BufReader;
 use trueshot_core::color_chart::ColorChartDetector;
 use trueshot_core::inventory::{
     CameraCalibration as InventoryCalibration, CameraColorCalibration as InventoryColorCalibration,
 };
 use trueshot_device_manager::{CalibrationData, CameraConfig, ColorCalibrationData};
+
+const CALIBRATION_PROJECT_ID: &str = "_calibration";
+const MAX_CALIBRATION_FRAMES: usize = 64;
+const MAX_CALIBRATION_FRAME_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_CALIBRATION_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Deserialize, IntoParams)]
 struct CaptureParams {
@@ -120,13 +131,25 @@ async fn capture_calibration_frame(
         };
 
     let mut session = state.calibration_session.lock().await;
-    reset_session_if_needed(&mut session, &camera_id);
+    reset_session_if_needed(&mut session, &camera_id, &state.config.paths.projects_dir);
+    if session.captured_frames.len() >= MAX_CALIBRATION_FRAMES {
+        return HttpResponse::PayloadTooLarge().json(serde_json::json!({
+            "error": format!(
+                "Calibration session is limited to {} frames",
+                MAX_CALIBRATION_FRAMES
+            )
+        }));
+    }
 
     let frame_id = session.captured_frames.len();
     let calib_dir = calibration_dir(&state.config.paths.projects_dir, &camera_id);
-    if let Err(err) = std::fs::create_dir_all(&calib_dir) {
+    if let Err(response) = ensure_project_directory(
+        &state.config.paths.projects_dir,
+        CALIBRATION_PROJECT_ID,
+        &calib_dir,
+    ) {
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Failed to create calibration dir: {}", err)
+            "error": format!("Failed to create calibration dir: {}", response.status())
         }));
     }
 
@@ -135,7 +158,11 @@ async fn capture_calibration_frame(
         sanitize_id(&camera_id),
         frame_id
     ));
-    if let Err(err) = move_capture_file(&capture_path, &target_path) {
+    if let Err(err) = move_capture_file(
+        &state.config.paths.projects_dir,
+        &capture_path,
+        &target_path,
+    ) {
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": format!("Failed to store calibration frame: {}", err)
         }));
@@ -225,8 +252,76 @@ async fn compute_calibration(
     let cols = params.cols.unwrap_or(6);
     let square_size = params.square_size_mm.unwrap_or(25.0);
 
+    let mut opened_frames = Vec::with_capacity(paths.len());
+    let mut total_bytes = 0_u64;
+    for path in &paths {
+        let file = match open_project_file_read(
+            &state.config.paths.projects_dir,
+            CALIBRATION_PROJECT_ID,
+            path,
+        ) {
+            Ok(file) => file,
+            Err(response) => return response,
+        };
+        let bytes = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(_) => {
+                return HttpResponse::InternalServerError().json(CalibrationResult {
+                    success: false,
+                    rms_error: None,
+                    camera_id: Some(camera_id),
+                    message: "Failed to inspect calibration frame".to_string(),
+                    calibration_path: None,
+                });
+            }
+        };
+        if bytes == 0 || bytes > MAX_CALIBRATION_FRAME_BYTES {
+            return HttpResponse::PayloadTooLarge().json(CalibrationResult {
+                success: false,
+                rms_error: None,
+                camera_id: Some(camera_id),
+                message: format!(
+                    "Calibration frame must be 1..={} bytes",
+                    MAX_CALIBRATION_FRAME_BYTES
+                ),
+                calibration_path: None,
+            });
+        }
+        total_bytes = match total_bytes.checked_add(bytes) {
+            Some(total) if total <= MAX_CALIBRATION_TOTAL_BYTES => total,
+            _ => {
+                return HttpResponse::PayloadTooLarge().json(CalibrationResult {
+                    success: false,
+                    rms_error: None,
+                    camera_id: Some(camera_id),
+                    message: format!(
+                        "Calibration session exceeds {} bytes",
+                        MAX_CALIBRATION_TOTAL_BYTES
+                    ),
+                    calibration_path: None,
+                });
+            }
+        };
+        opened_frames.push(file);
+    }
+
     let calibration = match tokio::task::spawn_blocking(move || {
-        trueshot_core::calibration::lens::calibrate_checkerboard(&paths, rows, cols, square_size)
+        let mut encoded = Vec::with_capacity(opened_frames.len());
+        for file in opened_frames {
+            let mut bytes = Vec::new();
+            file.take(MAX_CALIBRATION_FRAME_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_CALIBRATION_FRAME_BYTES {
+                anyhow::bail!("Calibration frame changed beyond its size limit");
+            }
+            encoded.push(bytes);
+        }
+        trueshot_core::calibration::lens::calibrate_checkerboard_encoded(
+            &encoded,
+            rows,
+            cols,
+            square_size,
+        )
     })
     .await
     {
@@ -399,8 +494,9 @@ async fn compute_color_calibration(
     };
 
     let frame_path_clone = frame_path.clone();
+    let projects_dir = state.config.paths.projects_dir.clone();
     let detection = match tokio::task::spawn_blocking(move || {
-        let rgb = load_rgb_array(&frame_path_clone)?;
+        let rgb = load_rgb_array(&projects_dir, &frame_path_clone)?;
         ColorChartDetector::detect_and_calibrate(&rgb).map_err(|e| anyhow::anyhow!(e))
     })
     .await
@@ -520,7 +616,11 @@ async fn clear_calibration_session_impl(
     }
     let mut session = state.calibration_session.lock().await;
     for path in &session.captured_frames {
-        let _ = std::fs::remove_file(path);
+        let _ = remove_project_file_if_exists(
+            &state.config.paths.projects_dir,
+            CALIBRATION_PROJECT_ID,
+            path,
+        );
     }
     session.captured_frames.clear();
     session.camera_id = None;
@@ -859,9 +959,11 @@ async fn select_camera(
     Ok((cam.clone(), id))
 }
 
-fn reset_session_if_needed(session: &mut CalibrationSession, camera_id: &str) {
+fn reset_session_if_needed(session: &mut CalibrationSession, camera_id: &str, projects_dir: &Path) {
     if session.camera_id.as_deref() != Some(camera_id) {
-        session.captured_frames.clear();
+        for path in session.captured_frames.drain(..) {
+            let _ = remove_project_file_if_exists(projects_dir, CALIBRATION_PROJECT_ID, &path);
+        }
         session.camera_id = Some(camera_id.to_string());
     }
 }
@@ -873,7 +975,7 @@ fn calibration_dir(projects_dir: &Path, camera_id: &str) -> PathBuf {
 }
 
 fn sanitize_id(value: &str) -> String {
-    value
+    let sanitized: String = value
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -882,21 +984,28 @@ fn sanitize_id(value: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
+    }
 }
 
-fn move_capture_file(src: &Path, dst: &Path) -> Result<()> {
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)?;
+fn move_capture_file(projects_dir: &Path, src: &Path, dst: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(src)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("Camera capture is not a regular file");
     }
-    match std::fs::rename(src, dst) {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            std::fs::copy(src, dst)?;
-            std::fs::remove_file(src)?;
-            Ok(())
-        }
-    }
+    let mut source = std::fs::File::open(src)?;
+    let mut staged = stage_project_file(projects_dir, CALIBRATION_PROJECT_ID, dst, false)
+        .map_err(|response| anyhow::anyhow!("Stage calibration frame: {}", response.status()))?;
+    std::io::copy(&mut source, staged.file_mut())?;
+    staged
+        .commit()
+        .map_err(|response| anyhow::anyhow!("Commit calibration frame: {}", response.status()))?;
+    std::fs::remove_file(src)?;
+    Ok(())
 }
 
 fn write_calibration_file(
@@ -908,7 +1017,9 @@ fn write_calibration_file(
     square_size_mm: f32,
 ) -> Result<PathBuf> {
     let calib_dir = calibration_dir(projects_dir, camera_id);
-    std::fs::create_dir_all(&calib_dir)?;
+    ensure_project_directory(projects_dir, CALIBRATION_PROJECT_ID, &calib_dir).map_err(
+        |response| anyhow::anyhow!("Create calibration directory: {}", response.status()),
+    )?;
     let path = calib_dir.join("calibration.json");
     let payload = serde_json::json!({
         "camera_id": camera_id,
@@ -922,7 +1033,13 @@ fn write_calibration_file(
         "square_size_mm": square_size_mm,
         "updated_at": Utc::now().to_rfc3339(),
     });
-    std::fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
+    write_project_file_atomic(
+        projects_dir,
+        CALIBRATION_PROJECT_ID,
+        &path,
+        serde_json::to_string_pretty(&payload)?.as_bytes(),
+    )
+    .map_err(|response| anyhow::anyhow!("Write calibration profile: {}", response.status()))?;
     Ok(path)
 }
 
@@ -932,16 +1049,27 @@ fn write_color_calibration_file(
     calibration: &ColorCalibrationData,
 ) -> Result<PathBuf> {
     let calib_dir = calibration_dir(projects_dir, camera_id);
-    std::fs::create_dir_all(&calib_dir)?;
+    ensure_project_directory(projects_dir, CALIBRATION_PROJECT_ID, &calib_dir).map_err(
+        |response| anyhow::anyhow!("Create calibration directory: {}", response.status()),
+    )?;
     let path = calib_dir.join(format!("color_calibration_{}.json", sanitize_id(camera_id)));
     let payload = serde_json::to_string_pretty(calibration)?;
-    std::fs::write(&path, payload)?;
+    write_project_file_atomic(
+        projects_dir,
+        CALIBRATION_PROJECT_ID,
+        &path,
+        payload.as_bytes(),
+    )
+    .map_err(|response| anyhow::anyhow!("Write color calibration: {}", response.status()))?;
     Ok(path)
 }
 
-fn load_rgb_array(path: &Path) -> Result<Array3<f64>> {
-    let image = ImageReader::open(path)
-        .with_context(|| format!("Failed to open image: {}", path.display()))?
+fn load_rgb_array(projects_dir: &Path, path: &Path) -> Result<Array3<f64>> {
+    let file = open_project_file_read(projects_dir, CALIBRATION_PROJECT_ID, path)
+        .map_err(|response| anyhow::anyhow!("Open calibration frame: {}", response.status()))?;
+    let image = ImageReader::new(BufReader::new(file))
+        .with_guessed_format()
+        .with_context(|| format!("Failed to identify image: {}", path.display()))?
         .decode()
         .with_context(|| format!("Failed to decode image: {}", path.display()))?;
     let rgb = image.to_rgb32f();
@@ -967,10 +1095,11 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state
+    if state
         .audit
         .append_with_redaction(event, &state.config.privacy)
+        .is_err()
     {
-        tracing::warn!("audit log failed for {}: {}", req.path(), err);
+        crate::public_error::log_redacted_failure(req, "audit.append");
     }
 }

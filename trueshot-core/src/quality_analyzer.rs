@@ -82,7 +82,6 @@ pub struct Assessment {
 
 pub struct Analyzer {
     thresholds: HashMap<Defect, f64>,
-    params: Arc<Mutex<ProcessingParams>>,
 }
 
 /// Raw Histogram Analysis
@@ -95,7 +94,7 @@ pub struct RawHistogram {
 }
 
 impl Analyzer {
-    pub fn new(params: Arc<Mutex<ProcessingParams>>) -> Self {
+    pub fn new(_params: Arc<Mutex<ProcessingParams>>) -> Self {
         let mut thresholds = HashMap::new();
         thresholds.insert(Defect::EdgeBanding, 3.0);
         thresholds.insert(Defect::BackgroundLeak, 0.1);
@@ -106,7 +105,7 @@ impl Analyzer {
         thresholds.insert(Defect::BlackDots, 0.01);
         thresholds.insert(Defect::RawUnderexposed, 0.2); // >20% pixels too dark
 
-        Self { thresholds, params }
+        Self { thresholds }
     }
 
     // ... assess ...

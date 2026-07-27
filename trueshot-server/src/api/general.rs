@@ -98,11 +98,12 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state
+    if state
         .audit
         .append_with_redaction(event, &state.config.privacy)
+        .is_err()
     {
-        tracing::warn!("audit log failed for {}: {}", req.path(), err);
+        crate::public_error::log_redacted_failure(req, "audit.append");
     }
 }
 

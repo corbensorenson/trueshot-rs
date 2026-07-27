@@ -6,10 +6,10 @@
 //! RAW input and make every emitted interior pixel independent of band edges.
 
 use super::gpu_context::GpuContext;
-use crate::demosaic_ahd::ahd_normalization_scale;
+use crate::demosaic_ahd::{ahd_normalization_scale, cielab_cbrt_lut, quantized_xyz_camera_matrix};
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
-use ndarray::Array3;
+use ndarray::{Array2, Array3};
 use std::sync::Arc;
 
 const WORKGROUP_EDGE: u32 = 16;
@@ -26,6 +26,7 @@ pub struct GpuAhdOutput {
     pub image: Array3<f32>,
     pub bands: usize,
     pub adapter: String,
+    pub direction_map: Option<Array2<u8>>,
 }
 
 pub struct GpuAhdEngine {
@@ -89,7 +90,7 @@ impl GpuAhdEngine {
             anyhow::bail!("Metal AHD pipeline validation failed: {error}");
         }
 
-        let cbrt = exact_cbrt_lut();
+        let cbrt = cielab_cbrt_lut();
         let cbrt_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TrueShot AHD Lab cbrt LUT"),
             size: byte_len::<i32>(cbrt.len())?,
@@ -128,7 +129,17 @@ impl GpuAhdEngine {
         if pixels < MIN_GPU_PIXELS {
             return Ok(None);
         }
-        self.execute(image, rgb_cam).map(Some)
+        self.execute(image, rgb_cam, false).map(Some)
+    }
+
+    /// Run the production path while retaining its exact direction decisions for
+    /// an offline CPU/Metal qualification comparison.
+    pub fn demosaic_with_diagnostics(
+        &self,
+        image: &Array3<f32>,
+        rgb_cam: &[[f32; 4]; 3],
+    ) -> Result<GpuAhdOutput> {
+        self.execute(image, rgb_cam, true)
     }
 
     /// Exact upper bound for the temporary buffers retained while a group is
@@ -180,7 +191,12 @@ impl GpuAhdEngine {
         Ok(output_rows)
     }
 
-    fn execute(&self, image: &Array3<f32>, rgb_cam: &[[f32; 4]; 3]) -> Result<GpuAhdOutput> {
+    fn execute(
+        &self,
+        image: &Array3<f32>,
+        rgb_cam: &[[f32; 4]; 3],
+        capture_directions: bool,
+    ) -> Result<GpuAhdOutput> {
         let (height, width, channels) = image.dim();
         if channels != 1 || height == 0 || width == 0 {
             anyhow::bail!("Metal AHD requires a non-empty single-channel Bayer image");
@@ -199,7 +215,7 @@ impl GpuAhdEngine {
         }
 
         let range_scale = ahd_normalization_scale(input.iter().copied().fold(1.0f32, f32::max))?;
-        let xyz_cam = xyz_camera_matrix(rgb_cam);
+        let xyz_cam = quantized_xyz_camera_matrix(rgb_cam)?;
 
         let output_rows = self.output_rows_for_width(width)?;
         let allocation_rows = (output_rows + BAND_HALO * 2).min(height);
@@ -248,6 +264,7 @@ impl GpuAhdEngine {
             });
 
         let mut output = Array3::<f32>::zeros((height, width, 3));
+        let mut direction_map = capture_directions.then(|| Array2::<u8>::zeros((height, width)));
         let output_slice = output
             .as_slice_mut()
             .context("Metal AHD output must be contiguous")?;
@@ -340,6 +357,14 @@ impl GpuAhdEngine {
                 {
                     target.copy_from_slice(&pixel[..3]);
                 }
+                if let Some(directions) = direction_map.as_mut() {
+                    for (x, pixel) in source_row[OUTPUT_BORDER..width - OUTPUT_BORDER]
+                        .iter()
+                        .enumerate()
+                    {
+                        directions[[sensor_y, x + OUTPUT_BORDER]] = pixel[3] as u8;
+                    }
+                }
             }
             drop(mapped);
             buffers.readback.unmap();
@@ -357,6 +382,7 @@ impl GpuAhdEngine {
             image: output,
             bands: band_count,
             adapter: self.context.adapter_info.name.clone(),
+            direction_map,
         })
     }
 }
@@ -423,9 +449,9 @@ struct AhdParams {
     band_height: u32,
     sensor_y0: u32,
     full_height: u32,
-    xyz_row_0: [f32; 4],
-    xyz_row_1: [f32; 4],
-    xyz_row_2: [f32; 4],
+    xyz_row_0: [i32; 4],
+    xyz_row_1: [i32; 4],
+    xyz_row_2: [i32; 4],
 }
 
 fn storage_layout_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -477,39 +503,6 @@ fn map_readback<'a>(
         .with_context(|| format!("{label} mapping callback was dropped"))?
         .with_context(|| format!("{label} readback mapping failed"))?;
     Ok(slice.get_mapped_range())
-}
-
-fn exact_cbrt_lut() -> Vec<i32> {
-    (0..CBR_T_ENTRIES)
-        .map(|index| {
-            let value = index as f32 / 65_535.0;
-            let transformed = if value > 0.008_856 {
-                value.powf(1.0 / 3.0)
-            } else {
-                7.787 * value + 16.0 / 116.0
-            };
-            (transformed * 32_767.0).round() as i32
-        })
-        .collect()
-}
-
-fn xyz_camera_matrix(rgb_cam: &[[f32; 4]; 3]) -> [[f32; 4]; 3] {
-    const XYZ_RGB: [[f32; 3]; 3] = [
-        [0.412_453, 0.357_580, 0.180_423],
-        [0.212_671, 0.715_160, 0.072_169],
-        [0.019_334, 0.119_193, 0.950_227],
-    ];
-    const D65_WHITE: [f32; 3] = [0.950_456, 1.0, 1.088_754];
-    let mut output = [[0.0f32; 4]; 3];
-    for row in 0..3 {
-        for column in 0..4 {
-            for channel in 0..3 {
-                output[row][column] +=
-                    XYZ_RGB[row][channel] * rgb_cam[channel][column] / D65_WHITE[row];
-            }
-        }
-    }
-    output
 }
 
 fn fill_bilinear_border(bayer: &[f32], output: &mut [f32], width: usize, height: usize) {
@@ -587,9 +580,9 @@ struct Params {
     band_height: u32,
     sensor_y0: u32,
     full_height: u32,
-    xyz_row_0: vec4<f32>,
-    xyz_row_1: vec4<f32>,
-    xyz_row_2: vec4<f32>,
+    xyz_row_0: vec4<i32>,
+    xyz_row_1: vec4<i32>,
+    xyz_row_2: vec4<i32>,
 }
 
 @group(0) @binding(0) var<storage, read> bayer: array<f32>;
@@ -627,29 +620,173 @@ fn set_channel(value: vec4<f32>, channel: u32, sample: f32) -> vec4<f32> {
     return result;
 }
 
-fn round_away(value: f32) -> i32 {
-    if value < 0.0 { return i32(ceil(value - 0.5)); }
-    return i32(floor(value + 0.5));
+fn div_round_signed(numerator: i32, denominator: i32) -> i32 {
+    if numerator < 0 { return -((-numerator + denominator / 2) / denominator); }
+    return (numerator + denominator / 2) / denominator;
 }
 
-fn rgb_to_lab(rgb: vec3<f32>) -> vec4<i32> {
-    let xyz = vec3<f32>(
-        params.xyz_row_0.x * rgb.x + params.xyz_row_0.y * rgb.y + params.xyz_row_0.z * rgb.z,
-        params.xyz_row_1.x * rgb.x + params.xyz_row_1.y * rgb.y + params.xyz_row_1.z * rgb.z,
-        params.xyz_row_2.x * rgb.x + params.xyz_row_2.y * rgb.y + params.xyz_row_2.z * rgb.z
+fn matrix_term(coefficient: i32, sample: i32) -> i32 {
+    return coefficient * sample;
+}
+
+fn quantized_rgb_to_lab(rgb_u16: vec3<i32>) -> vec4<i32> {
+    let indexes = vec3<u32>(
+        u32(clamp(
+            div_round_signed(
+                matrix_term(params.xyz_row_0.x, rgb_u16.x)
+                    + matrix_term(params.xyz_row_0.y, rgb_u16.y)
+                    + matrix_term(params.xyz_row_0.z, rgb_u16.z),
+                2048
+            ),
+            0,
+            65535
+        )),
+        u32(clamp(
+            div_round_signed(
+                matrix_term(params.xyz_row_1.x, rgb_u16.x)
+                    + matrix_term(params.xyz_row_1.y, rgb_u16.y)
+                    + matrix_term(params.xyz_row_1.z, rgb_u16.z),
+                2048
+            ),
+            0,
+            65535
+        )),
+        u32(clamp(
+            div_round_signed(
+                matrix_term(params.xyz_row_2.x, rgb_u16.x)
+                    + matrix_term(params.xyz_row_2.y, rgb_u16.y)
+                    + matrix_term(params.xyz_row_2.z, rgb_u16.z),
+                2048
+            ),
+            0,
+            65535
+        ))
     );
-    let indexes = vec3<u32>(clamp(xyz, vec3<f32>(0.0), vec3<f32>(1.0)) * 65535.0);
-    let roots = vec3<f32>(
-        f32(cbrt_lut[indexes.x]),
-        f32(cbrt_lut[indexes.y]),
-        f32(cbrt_lut[indexes.z])
-    ) / 32767.0;
+    let roots = vec3<i32>(
+        cbrt_lut[indexes.x],
+        cbrt_lut[indexes.y],
+        cbrt_lut[indexes.z]
+    );
     return vec4<i32>(
-        round_away((116.0 * roots.y - 16.0) * 64.0),
-        round_away(500.0 * (roots.x - roots.y) * 64.0),
-        round_away(200.0 * (roots.y - roots.z) * 64.0),
+        div_round_signed((116 * roots.y - 16 * 32767) * 64, 32767),
+        div_round_signed(500 * (roots.x - roots.y) * 64, 32767),
+        div_round_signed(200 * (roots.y - roots.z) * 64, 32767),
         0
     );
+}
+
+fn classifier_sample(x: u32, y: u32) -> i32 {
+    return i32(clamp(bayer[pixel_index(x, y)], 0.0, 1.0) * 65535.0);
+}
+
+fn classifier_green(x: u32, y: u32, direction: u32) -> i32 {
+    let original = classifier_sample(x, y);
+    if cfa_rgb(x, y) == 1u { return original; }
+    let dark = original < 1310;
+    if direction == 0u && x > 1u && x + 2u < params.width {
+        let left = classifier_sample(x - 1u, y);
+        let right = classifier_sample(x + 1u, y);
+        var value = div_round_signed(left + right, 2);
+        if !dark {
+            value = div_round_signed(
+                2 * (left + original + right)
+                    - classifier_sample(x - 2u, y)
+                    - classifier_sample(x + 2u, y),
+                4
+            );
+        }
+        return clamp(value, min(left, right), max(left, right));
+    }
+    let global_y = sensor_y(y);
+    if direction == 1u
+        && y > 1u
+        && y + 2u < params.band_height
+        && global_y > 1u
+        && global_y + 2u < params.full_height
+    {
+        let up = classifier_sample(x, y - 1u);
+        let down = classifier_sample(x, y + 1u);
+        var value = div_round_signed(up + down, 2);
+        if !dark {
+            value = div_round_signed(
+                2 * (up + original + down)
+                    - classifier_sample(x, y - 2u)
+                    - classifier_sample(x, y + 2u),
+                4
+            );
+        }
+        return clamp(value, min(up, down), max(up, down));
+    }
+    return original;
+}
+
+fn classifier_rgb(x: u32, y: u32, direction: u32) -> vec3<i32> {
+    let channel = cfa_rgb(x, y);
+    let original = classifier_sample(x, y);
+    let dark = original < 1310;
+    let green = classifier_green(x, y, direction);
+    var rgb = vec3<i32>(0);
+    rgb[channel] = original;
+    rgb.y = green;
+    let global_y = sensor_y(y);
+    if channel == 1u
+        && x > 0u
+        && x + 1u < params.width
+        && y > 0u
+        && y + 1u < params.band_height
+        && global_y > 0u
+        && global_y + 1u < params.full_height
+    {
+        let adjacent_channel = cfa_rgb(x, y + 1u);
+        var horizontal = div_round_signed(
+            classifier_sample(x - 1u, y) + classifier_sample(x + 1u, y),
+            2
+        );
+        var vertical = div_round_signed(
+            classifier_sample(x, y - 1u) + classifier_sample(x, y + 1u),
+            2
+        );
+        if !dark {
+            horizontal = green + div_round_signed(
+                classifier_sample(x - 1u, y) + classifier_sample(x + 1u, y)
+                    - classifier_green(x - 1u, y, direction)
+                    - classifier_green(x + 1u, y, direction),
+                2
+            );
+            vertical = green + div_round_signed(
+                classifier_sample(x, y - 1u) + classifier_sample(x, y + 1u)
+                    - classifier_green(x, y - 1u, direction)
+                    - classifier_green(x, y + 1u, direction),
+                2
+            );
+        }
+        rgb[2u - adjacent_channel] = clamp(horizontal, 0, 65535);
+        rgb[adjacent_channel] = clamp(vertical, 0, 65535);
+    } else if channel != 1u
+        && x > 0u
+        && x + 1u < params.width
+        && y > 0u
+        && y + 1u < params.band_height
+        && global_y > 0u
+        && global_y + 1u < params.full_height
+    {
+        let source_sum =
+            classifier_sample(x - 1u, y - 1u)
+            + classifier_sample(x + 1u, y - 1u)
+            + classifier_sample(x - 1u, y + 1u)
+            + classifier_sample(x + 1u, y + 1u);
+        var other = div_round_signed(source_sum, 4);
+        if !dark {
+            let green_sum =
+                classifier_green(x - 1u, y - 1u, direction)
+                + classifier_green(x + 1u, y - 1u, direction)
+                + classifier_green(x - 1u, y + 1u, direction)
+                + classifier_green(x + 1u, y + 1u, direction);
+            other = green + div_round_signed(source_sum - green_sum, 4);
+        }
+        rgb[2u - channel] = clamp(other, 0, 65535);
+    }
+    return rgb;
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -672,11 +809,11 @@ fn interpolate_green(@builtin(global_invocation_id) id: vec3<u32>) {
             let right_1 = bayer[pixel_index(x + 1u, y)];
             var green = 0.5 * (left_1 + right_1);
             if !dark {
-                green = 0.25 * (
-                    2.0 * (left_1 + original + right_1)
-                    - bayer[pixel_index(x - 2u, y)]
+                let triple = (left_1 + original) + right_1;
+                green = (
+                    fma(2.0, triple, -bayer[pixel_index(x - 2u, y)])
                     - bayer[pixel_index(x + 2u, y)]
-                );
+                ) * 0.25;
             }
             horizontal.y = clamp(green, min(left_1, right_1), max(left_1, right_1));
         } else {
@@ -688,11 +825,11 @@ fn interpolate_green(@builtin(global_invocation_id) id: vec3<u32>) {
             let down_1 = bayer[pixel_index(x, y + 1u)];
             var green = 0.5 * (up_1 + down_1);
             if !dark {
-                green = 0.25 * (
-                    2.0 * (up_1 + original + down_1)
-                    - bayer[pixel_index(x, y - 2u)]
+                let triple = (up_1 + original) + down_1;
+                green = (
+                    fma(2.0, triple, -bayer[pixel_index(x, y - 2u)])
                     - bayer[pixel_index(x, y + 2u)]
-                );
+                ) * 0.25;
             }
             vertical.y = clamp(green, min(up_1, down_1), max(up_1, down_1));
         } else {
@@ -723,16 +860,18 @@ fn interpolate_rb_lab(@builtin(global_invocation_id) id: vec3<u32>) {
                 bayer[pixel_index(x, y - 1u)] + bayer[pixel_index(x, y + 1u)]
             );
             if !dark {
-                horizontal = rgb.y + 0.5 * (
+                let delta = (
                     bayer[pixel_index(x - 1u, y)] + bayer[pixel_index(x + 1u, y)]
                     - candidates[direction_index(direction, x - 1u, y)].y
                     - candidates[direction_index(direction, x + 1u, y)].y
                 );
-                vertical = rgb.y + 0.5 * (
+                horizontal = fma(delta, 0.5, rgb.y);
+                let vertical_delta = (
                     bayer[pixel_index(x, y - 1u)] + bayer[pixel_index(x, y + 1u)]
                     - candidates[direction_index(direction, x, y - 1u)].y
                     - candidates[direction_index(direction, x, y + 1u)].y
                 );
+                vertical = fma(vertical_delta, 0.5, rgb.y);
             }
             rgb = set_channel(rgb, 2u - adjacent_channel, clamp(horizontal, 0.0, 1.0));
             rgb = set_channel(rgb, adjacent_channel, clamp(vertical, 0.0, 1.0));
@@ -744,29 +883,34 @@ fn interpolate_rb_lab(@builtin(global_invocation_id) id: vec3<u32>) {
                 + bayer[pixel_index(x + 1u, y + 1u)]
             );
             if !dark {
-                other = rgb.y + 0.25 * (
-                    bayer[pixel_index(x - 1u, y - 1u)]
-                    + bayer[pixel_index(x + 1u, y - 1u)]
+                let source_sum = (
+                    (
+                        bayer[pixel_index(x - 1u, y - 1u)]
+                        + bayer[pixel_index(x + 1u, y - 1u)]
+                    )
                     + bayer[pixel_index(x - 1u, y + 1u)]
-                    + bayer[pixel_index(x + 1u, y + 1u)]
-                    - candidates[direction_index(direction, x - 1u, y - 1u)].y
-                    - candidates[direction_index(direction, x + 1u, y - 1u)].y
-                    - candidates[direction_index(direction, x - 1u, y + 1u)].y
-                    - candidates[direction_index(direction, x + 1u, y + 1u)].y
-                );
+                ) + bayer[pixel_index(x + 1u, y + 1u)];
+                let green_sum = (
+                    (
+                        candidates[direction_index(direction, x - 1u, y - 1u)].y
+                        + candidates[direction_index(direction, x + 1u, y - 1u)].y
+                    )
+                    + candidates[direction_index(direction, x - 1u, y + 1u)].y
+                ) + candidates[direction_index(direction, x + 1u, y + 1u)].y;
+                other = fma(source_sum - green_sum, 0.25, rgb.y);
             }
             rgb = set_channel(rgb, 2u - channel, clamp(other, 0.0, 1.0));
         }
         rgb = set_channel(rgb, channel, original);
         candidates[index] = rgb;
-        lab[index] = rgb_to_lab(rgb.xyz);
+        lab[index] = quantized_rgb_to_lab(classifier_rgb(x, y, direction));
     }
 }
 
 fn squared_chroma_difference(first: vec4<i32>, second: vec4<i32>) -> u32 {
-    let da = first.y - second.y;
-    let db = first.z - second.z;
-    return u32(da * da + db * db);
+    let da = u32(abs(first.y - second.y)) >> 1u;
+    let db = u32(abs(first.z - second.z)) >> 1u;
+    return da * da + db * db;
 }
 
 fn is_homogeneous(
@@ -867,9 +1011,9 @@ fn combine_directions(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let horizontal = candidates[direction_index(0u, x, y)];
     let vertical = candidates[direction_index(1u, x, y)];
-    var selected = 0.5 * (horizontal + vertical);
-    if sums.x > sums.y + 1u { selected = horizontal; }
-    if sums.y > sums.x + 1u { selected = vertical; }
+    var selected = vec4<f32>(0.5 * (horizontal.xyz + vertical.xyz), 0.0);
+    if sums.x > sums.y { selected = vec4<f32>(horizontal.xyz, 1.0); }
+    if sums.y > sums.x { selected = vec4<f32>(vertical.xyz, 2.0); }
     output[pixel_index(x, y)] = selected;
 }
 "#;
@@ -915,11 +1059,11 @@ mod tests {
         };
         let bayer = synthetic_bayer(128, 96);
         let first = engine
-            .execute(&bayer, &identity_camera_matrix())
+            .execute(&bayer, &identity_camera_matrix(), false)
             .unwrap()
             .image;
         let second = engine
-            .execute(&bayer, &identity_camera_matrix())
+            .execute(&bayer, &identity_camera_matrix(), false)
             .unwrap()
             .image;
         assert_eq!(first, second);
@@ -942,7 +1086,7 @@ mod tests {
         let bayer = synthetic_bayer(192, 160);
         let cpu = ahd_demosaic_f32_owned(bayer.clone(), &identity_camera_matrix()).unwrap();
         let gpu = engine
-            .execute(&bayer, &identity_camera_matrix())
+            .execute(&bayer, &identity_camera_matrix(), false)
             .unwrap()
             .image;
         let maximum_error = cpu
@@ -986,7 +1130,9 @@ mod tests {
         );
 
         let cpu = ahd_demosaic_f32_owned(bayer.clone(), &identity_camera_matrix()).unwrap();
-        let gpu_output = engine.execute(&bayer, &identity_camera_matrix()).unwrap();
+        let gpu_output = engine
+            .execute(&bayer, &identity_camera_matrix(), false)
+            .unwrap();
         assert_eq!(gpu_output.bands, 2);
         let maximum_error = cpu
             .iter()

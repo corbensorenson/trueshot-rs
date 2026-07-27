@@ -363,6 +363,10 @@ fn standard_collapse_frames(frames: &[Array3<f64>]) -> Result<Array2<f64>> {
 /// Apply median filter to focus plane map to smooth transitions
 ///
 /// This reduces speckle artifacts from hard focus plane boundaries.
+#[expect(
+    dead_code,
+    reason = "kept as a benchmark baseline for edge-aware focus-map refinement"
+)]
 fn median_filter_focus_plane(plane_map: &Array2<usize>, kernel_size: usize) -> Array2<usize> {
     let (height, width) = plane_map.dim();
     let mut filtered = plane_map.clone();

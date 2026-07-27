@@ -225,7 +225,7 @@ impl HdrMerger {
         let mut hdr = vec![[0.0f32; 3]; width * height];
         let mut weight_sum = vec![[0.0f32; 3]; width * height];
 
-        for (img_idx, (img, ev)) in images.iter().zip(evs).enumerate() {
+        for (img, ev) in images.iter().zip(evs) {
             let rgb = img.to_rgb8();
             let exposure_time = 2.0_f32.powf(-*ev); // Relative exposure
 
@@ -259,11 +259,6 @@ impl HdrMerger {
         }
 
         // Tone mapping (Reinhard global operator)
-        let max_lum = hdr
-            .iter()
-            .map(|p| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2])
-            .fold(0.0f32, |a, b| a.max(b));
-
         let mut output = ImageBuffer::new(width as u32, height as u32);
         for (i, pixel) in output.pixels_mut().enumerate() {
             let mut rgb = hdr[i];

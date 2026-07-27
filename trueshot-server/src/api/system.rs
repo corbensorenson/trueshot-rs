@@ -20,7 +20,10 @@ pub async fn get_system_stats(req: HttpRequest, state: web::Data<AppState>) -> i
     if let Err(resp) = require_scope(&req, "system:read") {
         return resp;
     }
-    let stats = state.system_stats.lock().unwrap();
+    let stats = match crate::sync_lock::lock(&state.system_stats, "system.stats") {
+        Ok(stats) => stats,
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
     HttpResponse::Ok().json(serde_json::json!({
         "cpu_usage": stats.cpu_usage,
         "memory_used_mb": stats.memory_used_mb,

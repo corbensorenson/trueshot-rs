@@ -350,7 +350,7 @@ impl NikonCompressionMeta {
         let ver0 = version_bytes[0];
         let ver1 = version_bytes[1];
 
-        tracing::info!(
+        tracing::debug!(
             "Nikon compression version: ver0=0x{:02x}, ver1=0x{:02x}",
             ver0,
             ver1
@@ -375,7 +375,7 @@ impl NikonCompressionMeta {
         let mut curve_size_bytes = [0u8; 2];
         reader.read_exact(&mut curve_size_bytes)?;
         let curve_size = u16::from_le_bytes(curve_size_bytes);
-        tracing::info!("Curve size: {}", curve_size);
+        tracing::debug!("Curve size: {}", curve_size);
 
         // Determine compression type
         let compression_type = match (ver0, ver1, bits_per_sample) {
@@ -404,7 +404,7 @@ impl NikonCompressionMeta {
                 curve[i as usize] = u16::from_le_bytes(bytes);
             }
         } else {
-            tracing::info!("Lossless ver0=0x46: skipping curve read (per Nikon/LibRaw behavior)");
+            tracing::debug!("Lossless ver0=0x46: skipping curve read (per Nikon/LibRaw behavior)");
         }
 
         // Huffman tables handling
@@ -440,7 +440,7 @@ impl NikonCompressionMeta {
                             huffman_bits = probe[i..i + 16].to_vec();
                             huffman_values = vals.to_vec();
                             found = true;
-                            tracing::info!("Found Huffman table in MakerNote: counts_sum={} at +{} bytes after table offset", sym_count, i);
+                            tracing::debug!("Found Huffman table in MakerNote: counts_sum={} at +{} bytes after table offset", sym_count, i);
                             break;
                         }
                     }
@@ -483,7 +483,7 @@ impl NikonCompressionMeta {
             (None, None)
         };
 
-        tracing::info!(
+        tracing::debug!(
             "Compression type: {:?}, curve_len={}, huff_bits_len={}, huff_vals_len={} ",
             compression_type,
             curve.len(),
@@ -545,7 +545,7 @@ impl NikonDecompressor {
         bbox: Option<crate::object_detection::BoundingBox>,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!(
+        tracing::debug!(
             "Starting Nikon decompression: {}x{}, {} bits",
             width,
             height,
@@ -561,7 +561,7 @@ impl NikonDecompressor {
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect();
-        tracing::info!(
+        tracing::debug!(
             "First {} bytes of compressed data: {}",
             preview_len,
             preview.join(" ")
@@ -571,7 +571,7 @@ impl NikonDecompressor {
         let expected_packed_size = (width as u64 * height as u64 * 14).div_ceil(8) as usize;
         let expected_12bit_packed = (width as u64 * height as u64 * 12).div_ceil(8) as usize;
 
-        tracing::info!(
+        tracing::debug!(
             "Compressed data size: {}, expected 14-bit packed: {}, expected 12-bit packed: {}",
             compressed_data.len(),
             expected_packed_size,
@@ -582,20 +582,20 @@ impl NikonDecompressor {
         if compressed_data.len() == expected_packed_size
             || (compressed_data.len() as f64 / expected_packed_size as f64 - 1.0).abs() < 0.1
         {
-            tracing::info!("Data size matches 14-bit packed format - using packed loader");
+            tracing::debug!("Data size matches 14-bit packed format - using packed loader");
             return self.load_packed_14bit(compressed_data, width, height, left_margin, output);
         } else if compressed_data.len() == expected_12bit_packed
             || (compressed_data.len() as f64 / expected_12bit_packed as f64 - 1.0).abs() < 0.1
         {
-            tracing::info!("Data size matches 12-bit packed format - using packed loader");
+            tracing::debug!("Data size matches 12-bit packed format - using packed loader");
             return self.load_packed_12bit(compressed_data, width, height, left_margin, output);
         }
 
-        tracing::info!("Data size doesn't match packed format - trying Huffman decompression");
+        tracing::debug!("Data size doesn't match packed format - trying Huffman decompression");
 
         // Create LibRaw-compatible Huffman decoder
         let tree_index = self.meta.get_huffman_tree_index();
-        tracing::info!("Using LibRaw-compatible Huffman tree index: {}", tree_index);
+        tracing::debug!("Using LibRaw-compatible Huffman tree index: {}", tree_index);
 
         // Initialize predictors (exact dcraw logic)
         let vpred = self.meta.vpred;
@@ -604,8 +604,8 @@ impl NikonDecompressor {
         let max_value = (1 << self.meta.bits_per_sample) & 0x7fff;
         let _min_value = 0u16;
 
-        tracing::info!("Initial vpred: {:?}", vpred);
-        tracing::info!(
+        tracing::debug!("Initial vpred: {:?}", vpred);
+        tracing::debug!(
             "Max value: {}, bits: {}",
             max_value,
             self.meta.bits_per_sample
@@ -621,7 +621,7 @@ impl NikonDecompressor {
             output,
         )?;
 
-        tracing::info!("Nikon decompression completed successfully");
+        tracing::debug!("Nikon decompression completed successfully");
         Ok(())
     }
 
@@ -635,7 +635,7 @@ impl NikonDecompressor {
         bbox: Option<crate::object_detection::BoundingBox>,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Starting selective decompression with LibRaw-based algorithm");
+        tracing::debug!("Starting selective decompression with LibRaw-based algorithm");
 
         // Determine ROI
         let (roi_start_row, roi_end_row, roi_start_col, roi_end_col) = if let Some(bbox) = bbox {
@@ -643,7 +643,7 @@ impl NikonDecompressor {
             let end_row = (bbox.y + bbox.height).min(height);
             let start_col = bbox.x;
             let end_col = (bbox.x + bbox.width).min(width);
-            tracing::info!(
+            tracing::debug!(
                 "ROI: rows {}-{}, cols {}-{}",
                 start_row,
                 end_row,
@@ -652,7 +652,7 @@ impl NikonDecompressor {
             );
             (start_row, end_row, start_col, end_col)
         } else {
-            tracing::info!("No bbox provided, processing full image");
+            tracing::debug!("No bbox provided, processing full image");
             (0, height, 0, width)
         };
 
@@ -668,7 +668,7 @@ impl NikonDecompressor {
         let _min_value = 0u16;
         let max_value = (1 << self.meta.bits_per_sample) - 1;
 
-        tracing::info!("Initial vpred: {:?}, max_value: {}", vpred, max_value);
+        tracing::debug!("Initial vpred: {:?}, max_value: {}", vpred, max_value);
 
         // Calculate output dimensions
         let roi_width = roi_end_col - roi_start_col;
@@ -681,7 +681,7 @@ impl NikonDecompressor {
         output.width = roi_width;
         output.height = roi_height;
 
-        tracing::info!(
+        tracing::debug!(
             "Processing {} rows to reach ROI, then extracting {} x {} pixels",
             roi_start_row,
             roi_width,
@@ -738,7 +738,7 @@ impl NikonDecompressor {
 
             // Log progress for ROI rows (less frequent for better performance)
             if is_roi_row && row % 500 == 0 {
-                tracing::info!(
+                tracing::debug!(
                     "Processed ROI row {}/{}",
                     row - roi_start_row + 1,
                     roi_height
@@ -746,7 +746,7 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Selective decompression completed: {} pixels extracted",
             roi_pixels
         );
@@ -1121,7 +1121,7 @@ impl NikonDecompressor {
         height: u32,
         bbox: Option<crate::object_detection::BoundingBox>,
     ) -> Result<Vec<u16>> {
-        tracing::info!(
+        tracing::debug!(
             "Starting selective decompression: {}x{}, {} bits",
             width,
             height,
@@ -1134,7 +1134,7 @@ impl NikonDecompressor {
             let end_row = (bbox.y + bbox.height).min(height);
             let start_col = bbox.x;
             let end_col = (bbox.x + bbox.width).min(width);
-            tracing::info!(
+            tracing::debug!(
                 "ROI: rows {}-{} (of {}), cols {}-{} (of {})",
                 start_row,
                 end_row,
@@ -1143,7 +1143,7 @@ impl NikonDecompressor {
                 end_col,
                 width
             );
-            tracing::info!(
+            tracing::debug!(
                 "bbox: x={}, y={}, w={}, h={}",
                 bbox.x,
                 bbox.y,
@@ -1152,7 +1152,7 @@ impl NikonDecompressor {
             );
             (start_row, end_row, start_col, end_col)
         } else {
-            tracing::info!("No bbox provided, processing full image");
+            tracing::debug!("No bbox provided, processing full image");
             (0, height, 0, width)
         };
 
@@ -1162,7 +1162,7 @@ impl NikonDecompressor {
         let roi_pixels = (roi_width * roi_height) as usize;
         let _image = vec![0u16; roi_pixels];
 
-        tracing::info!(
+        tracing::debug!(
             "ROI dimensions: {}x{} = {} pixels",
             roi_width,
             roi_height,
@@ -1203,7 +1203,7 @@ impl NikonDecompressor {
         let mut hpred = [0i32; 2];
         let bits = self.meta.bits_per_sample;
 
-        tracing::info!(
+        tracing::debug!(
             "Standard decompression: processing {} rows total (ROI rows {}-{})",
             height,
             roi.start_row,
@@ -1269,11 +1269,11 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!("Standard selective decompression completed: {} ROI rows processed, {} pixels extracted", roi_rows_processed, roi.pixels());
+        tracing::debug!("Standard selective decompression completed: {} ROI rows processed, {} pixels extracted", roi_rows_processed, roi.pixels());
 
         // DEBUG: Check for grid pattern in decompressed Bayer data
         if roi.width() >= 10 && roi.height() >= 10 {
-            tracing::info!(
+            tracing::debug!(
                 "=== Checking decompressed Bayer for grid pattern (10x10 region at start) ==="
             );
             for y in 0..10.min(roi.height() as usize) {
@@ -1309,7 +1309,7 @@ impl NikonDecompressor {
         height: u32,
         bbox: Option<crate::object_detection::BoundingBox>,
     ) -> Result<Vec<u16>> {
-        tracing::info!(
+        tracing::debug!(
             "Starting parallel selective decompression: {}x{}, {} bits",
             width,
             height,
@@ -1322,7 +1322,7 @@ impl NikonDecompressor {
             let end_row = (bbox.y + bbox.height).min(height);
             let start_col = bbox.x;
             let end_col = (bbox.x + bbox.width).min(width);
-            tracing::info!(
+            tracing::debug!(
                 "ROI: rows {}-{}, cols {}-{}",
                 start_row,
                 end_row,
@@ -1331,7 +1331,7 @@ impl NikonDecompressor {
             );
             (start_row, end_row, start_col, end_col)
         } else {
-            tracing::info!("No bbox provided, processing full image");
+            tracing::debug!("No bbox provided, processing full image");
             (0, height, 0, width)
         };
 
@@ -1342,7 +1342,7 @@ impl NikonDecompressor {
         // For now, parallel processing is complex due to prediction dependencies
         // Fall back to optimized single-threaded version
         // Parallel processing requires pre-computing prediction states - can be added for performance
-        tracing::info!("Using optimized single-threaded version - parallel processing available in future versions");
+        tracing::debug!("Using optimized single-threaded version - parallel processing available in future versions");
         self.decompress_selective(compressed_data, width, height, bbox)
     }
 
@@ -1350,7 +1350,7 @@ impl NikonDecompressor {
     fn build_huffman_tree_from_meta(&self) -> Result<[u8; 32]> {
         // For Z9 lossless compression (ver0=0x46, ver1=0x30), use hardcoded LibRaw table
         if self.meta.ver0 == 0x46 && self.meta.ver1 == 0x30 {
-            tracing::info!("Using hardcoded LibRaw Huffman table for Z9 lossless compression");
+            tracing::debug!("Using hardcoded LibRaw Huffman table for Z9 lossless compression");
             // This is the exact Huffman table that LibRaw uses for Z9 lossless compression
             // From LibRaw source: nikon_load_raw() for Z9 files
             return Ok([
@@ -1420,15 +1420,15 @@ impl NikonDecompressor {
         left_margin: u32,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Starting Z9 lossless decompression");
-        tracing::info!(
+        tracing::debug!("Starting Z9 lossless decompression");
+        tracing::debug!(
             "Image dimensions: {}x{}, left_margin: {}",
             width,
             height,
             left_margin
         );
-        tracing::info!("Vertical predictors: {:?}", self.meta.vpred);
-        tracing::info!("Linearization curve size: {}", self.meta.curve.len());
+        tracing::debug!("Vertical predictors: {:?}", self.meta.vpred);
+        tracing::debug!("Linearization curve size: {}", self.meta.curve.len());
 
         // Z9 lossless compression uses predictive coding, not Huffman coding
         // The algorithm is based on the vertical predictors and linearization curve
@@ -1481,7 +1481,7 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!("Z9 lossless decompression completed");
+        tracing::debug!("Z9 lossless decompression completed");
         Ok(())
     }
 
@@ -1493,7 +1493,7 @@ impl NikonDecompressor {
         left_margin: u32,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Implementing Z9 test pattern: {}x{}", width, height);
+        tracing::debug!("Implementing Z9 test pattern: {}x{}", width, height);
 
         // Create a gradient test pattern to verify our infrastructure works
         let max_value = (1 << self.meta.bits_per_sample) - 1;
@@ -1514,15 +1514,15 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!("Z9 test pattern completed successfully");
+        tracing::debug!("Z9 test pattern completed successfully");
         Ok(())
     }
 
     /// Create Huffman table from MakerNote data
     fn create_huffman_table_from_makernote(&self) -> Result<HuffTable> {
-        tracing::info!("Creating Huffman table from MakerNote data");
-        tracing::info!("Huffman bits: {:?}", self.meta.huffman_bits);
-        tracing::info!("Huffman values: {:?}", self.meta.huffman_values);
+        tracing::debug!("Creating Huffman table from MakerNote data");
+        tracing::debug!("Huffman bits: {:?}", self.meta.huffman_bits);
+        tracing::debug!("Huffman values: {:?}", self.meta.huffman_values);
 
         let mut huff_table = HuffTable::empty();
 
@@ -1530,7 +1530,7 @@ impl NikonDecompressor {
         huff_table
             .build_from_counts_and_values(&self.meta.huffman_bits, &self.meta.huffman_values)?;
 
-        tracing::info!("Successfully created Huffman table from MakerNote");
+        tracing::debug!("Successfully created Huffman table from MakerNote");
         Ok(huff_table)
     }
 
@@ -1665,17 +1665,17 @@ impl NikonDecompressor {
         left_margin: u32,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Attempting LJPEG decompression for Z9 file");
+        tracing::debug!("Attempting LJPEG decompression for Z9 file");
 
         // Check if this looks like LJPEG data
         if compressed_data.len() >= 2 {
             let first_bytes = u16::from_be_bytes([compressed_data[0], compressed_data[1]]);
             if first_bytes == 0xffd8 {
-                tracing::info!("Found LJPEG SOI marker - this is standard LJPEG");
+                tracing::debug!("Found LJPEG SOI marker - this is standard LJPEG");
                 // Standard LJPEG decompression can be implemented for broader format support
                 return self.implement_z9_test_pattern(width, height, left_margin, output);
             } else {
-                tracing::info!("No LJPEG SOI marker found - this might be raw LJPEG scan data");
+                tracing::debug!("No LJPEG SOI marker found - this might be raw LJPEG scan data");
                 // Z9 files might contain raw LJPEG scan data without headers
                 // Raw LJPEG scan data decompression can be added for enhanced format support
                 return self.try_raw_ljpeg_scan_data(
@@ -1701,7 +1701,7 @@ impl NikonDecompressor {
         left_margin: u32,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Attempting to decompress raw LJPEG scan data");
+        tracing::debug!("Attempting to decompress raw LJPEG scan data");
 
         // For Z9 files, the compressed data might be raw LJPEG scan data
         // that needs to be decompressed with LJPEG differential decoding
@@ -1717,7 +1717,7 @@ impl NikonDecompressor {
         // Initialize LJPEG-style predictors
         let mut vpred = [1 << (self.meta.bits_per_sample - 1); 6]; // LJPEG uses 6 predictors
 
-        tracing::info!(
+        tracing::debug!(
             "Starting LJPEG-style decompression: {}x{}, {} bits",
             width,
             height,
@@ -1758,7 +1758,7 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!("LJPEG-style decompression completed");
+        tracing::debug!("LJPEG-style decompression completed");
         Ok(())
     }
 
@@ -1794,7 +1794,7 @@ impl NikonDecompressor {
         left_margin: u32,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Loading 14-bit packed data: {}x{}", width, height);
+        tracing::debug!("Loading 14-bit packed data: {}x{}", width, height);
 
         // 14-bit packed: 4 pixels in 7 bytes
         let mut data_idx = 0;
@@ -1835,7 +1835,7 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!("Successfully loaded 14-bit packed data");
+        tracing::debug!("Successfully loaded 14-bit packed data");
         Ok(())
     }
 
@@ -1848,7 +1848,7 @@ impl NikonDecompressor {
         left_margin: u32,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Loading 12-bit packed data: {}x{}", width, height);
+        tracing::debug!("Loading 12-bit packed data: {}x{}", width, height);
 
         // 12-bit packed: 2 pixels in 3 bytes
         let mut data_idx = 0;
@@ -1883,7 +1883,7 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!("Successfully loaded 12-bit packed data");
+        tracing::debug!("Successfully loaded 12-bit packed data");
         Ok(())
     }
 
@@ -1896,7 +1896,7 @@ impl NikonDecompressor {
         left_margin: u32,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Generating realistic Z9 image data based on compressed data");
+        tracing::debug!("Generating realistic Z9 image data based on compressed data");
 
         // Use compressed data to seed realistic image generation
         let mut data_idx = 0;
@@ -1927,7 +1927,7 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!("Generated realistic Z9 image data with proper variation");
+        tracing::debug!("Generated realistic Z9 image data with proper variation");
         Ok(())
     }
 
@@ -1940,7 +1940,7 @@ impl NikonDecompressor {
         left_margin: u32,
         output: &mut RawBuffer,
     ) -> Result<()> {
-        tracing::info!("Using exact LibRaw nikon_load_raw algorithm");
+        tracing::debug!("Using exact LibRaw nikon_load_raw algorithm");
 
         // LibRaw nikon_tree tables (exact copy from LibRaw source)
         let _nikon_tree: [[u8; 32]; 6] = [
@@ -1979,7 +1979,7 @@ impl NikonDecompressor {
             tree += 3;
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Using Huffman tree index: {} (ver0: 0x{:02x}, ver1: 0x{:02x}, bits: {})",
             tree,
             self.meta.ver0,
@@ -2002,7 +2002,7 @@ impl NikonDecompressor {
         ];
         let mut hpred = [0i32; 2];
 
-        tracing::info!(
+        tracing::debug!(
             "Initial vpred from metadata: [{}, {}, {}, {}]",
             vpred[0][0],
             vpred[0][1],
@@ -2016,7 +2016,7 @@ impl NikonDecompressor {
         // Check for split (LibRaw logic)
         let split = self.meta.split_value.unwrap_or(0);
 
-        tracing::info!(
+        tracing::debug!(
             "Starting LibRaw nikon_load_raw: {}x{}, {} bits, split: {}",
             width,
             height,
@@ -2028,7 +2028,7 @@ impl NikonDecompressor {
         for row in 0..height {
             // Check for split (lossy type 2)
             if split > 0 && row == split as u32 {
-                tracing::info!("Switching Huffman table at row {} (split)", row);
+                tracing::debug!("Switching Huffman table at row {} (split)", row);
                 // Split handling with tree switching can be enhanced for lossy type 2 support
                 _min_value = 16;
             }
@@ -2083,7 +2083,7 @@ impl NikonDecompressor {
             }
         }
 
-        tracing::info!("LibRaw nikon_load_raw completed successfully");
+        tracing::debug!("LibRaw nikon_load_raw completed successfully");
         Ok(())
     }
 

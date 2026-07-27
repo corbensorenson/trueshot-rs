@@ -371,7 +371,7 @@ impl StreamEncoder {
     }
 
     /// Detect color changes (sparse update)
-    fn detect_color_changes(&self, _node_id: Uuid, colors: &[[f32; 3]]) -> Vec<(u32, [u8; 3])> {
+    fn detect_color_changes(&self, _node_id: Uuid, _colors: &[[f32; 3]]) -> Vec<(u32, [u8; 3])> {
         // In production, compare against reference frame
         // For now, return empty (no changes)
         Vec::new()

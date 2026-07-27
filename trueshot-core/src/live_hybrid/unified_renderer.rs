@@ -210,7 +210,7 @@ impl UnifiedRenderer {
                     stats.transitioning_objects += 1;
 
                     if self.config.enable_transitions {
-                        let blend = TransitionBlend::from_progress(*progress);
+                        let _blend = TransitionBlend::from_progress(*progress);
                         // Render both with blend (simplified)
                         // Full implementation would render both and alpha blend
                     }
@@ -240,7 +240,7 @@ impl UnifiedRenderer {
         _transform: &na::Matrix4<f32>,
         color_buffer: &mut [[f32; 4]],
         depth_buffer: &mut [f32],
-        width: usize,
+        _width: usize,
     ) {
         // Simple compositing (in production, would use GPU)
         for (i, (color, &depth)) in frame.color.iter().zip(frame.depth.iter()).enumerate() {

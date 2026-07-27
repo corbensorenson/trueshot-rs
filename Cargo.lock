@@ -10945,6 +10945,7 @@ dependencies = [
  "nalgebra 0.32.6",
  "opencv 0.88.9",
  "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -11158,8 +11159,10 @@ dependencies = [
  "hex",
  "image 0.25.6",
  "infer",
+ "ipnet",
  "jsonwebtoken",
  "keyring",
+ "libc",
  "mime_guess",
  "nalgebra 0.32.6",
  "ndarray 0.15.6",
@@ -11176,6 +11179,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "subtle",
  "sysinfo 0.37.2",
  "tantivy",
  "tar",

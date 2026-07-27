@@ -1,4 +1,4 @@
-use trueshot_device_manager::{CameraManager, CameraRole};
+use trueshot_device_manager::CameraManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

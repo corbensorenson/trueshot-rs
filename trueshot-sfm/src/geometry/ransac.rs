@@ -391,7 +391,7 @@ mod tests {
             na::Point2::new(200.0, 200.0),
         ];
 
-        let (norm, T) = normalize_points(&pts);
+        let (norm, _transform) = normalize_points(&pts);
 
         // Check centroid is at origin
         let cx: f64 = norm.iter().map(|p| p.x).sum::<f64>() / 4.0;

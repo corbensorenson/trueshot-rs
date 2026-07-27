@@ -25,7 +25,7 @@ jobs:
               sudo apt-get install -y libudev-dev libdbus-1-dev libgphoto2-dev libssl-dev pkg-config libasound2-dev cmake
           - os: macos-latest
             install_deps: |
-              brew install cmake openssl pkg-config
+              brew install cmake openssl pkg-config opencv
           - os: windows-latest
             install_deps: echo "No extra deps needed on Windows"
 
@@ -74,6 +74,13 @@ jobs:
 
     - name: Check Formatting
       run: cargo fmt --all -- --check
+
+    - name: Check TrueShot Core Feature Isolation
+      run: ./scripts/check_core_feature_builds.sh
+
+    - name: Check macOS OpenCV calibration feature
+      if: matrix.os == 'macos-latest'
+      run: ./scripts/check_macos_opencv_calibration.sh
 
     - name: Clippy (Linting)
       run: cargo clippy --workspace --all-targets -- -D warnings

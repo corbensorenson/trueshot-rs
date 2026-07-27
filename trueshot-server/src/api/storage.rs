@@ -577,7 +577,7 @@ pub async fn get_oauth_url(
     let configs = state.oauth_configs.read().await;
     let config = match configs.get(&provider) {
         Some(c) => c,
-        None => return HttpResponse::InternalServerError().body("OAuth not configured"),
+        None => return HttpResponse::InternalServerError().finish(),
     };
 
     let availability = oauth_config_availability(provider, config);
@@ -744,8 +744,8 @@ pub async fn oauth_callback(
         updated_at: Utc::now(),
     };
 
-    if let Err(e) = state.token_store.save_token(&stored) {
-        return HttpResponse::InternalServerError().body(format!("Failed to persist tokens: {e}"));
+    if state.token_store.save_token(&stored).is_err() {
+        return HttpResponse::InternalServerError().finish();
     }
 
     let connection = StorageConnection {
@@ -881,9 +881,8 @@ pub async fn add_storage(
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        if let Err(e) = state.token_store.save_token(&stored) {
-            return HttpResponse::InternalServerError()
-                .body(format!("Failed to persist credentials: {e}"));
+        if state.token_store.save_token(&stored).is_err() {
+            return HttpResponse::InternalServerError().finish();
         }
     }
 
@@ -1163,9 +1162,8 @@ pub async fn start_backup(
     {
         let mut jobs = state.backups.write().await;
         jobs.insert(job_id.clone(), job.clone());
-        if let Err(err) = persist_backups(&state.backups_path, &jobs) {
-            return HttpResponse::InternalServerError()
-                .body(format!("Failed to persist backup job: {err}"));
+        if persist_backups(&state.backups_path, &jobs).is_err() {
+            return HttpResponse::InternalServerError().finish();
         }
     }
 
@@ -1334,9 +1332,8 @@ pub async fn restore_backup(
     {
         let mut jobs = state.backups.write().await;
         jobs.insert(restore_job_id.clone(), restore_job.clone());
-        if let Err(err) = persist_backups(&state.backups_path, &jobs) {
-            return HttpResponse::InternalServerError()
-                .body(format!("Failed to persist restore job: {err}"));
+        if persist_backups(&state.backups_path, &jobs).is_err() {
+            return HttpResponse::InternalServerError().finish();
         }
     }
 
@@ -1425,8 +1422,12 @@ async fn update_backup_job_state<F>(
     let mut jobs = backups.write().await;
     if let Some(job) = jobs.get_mut(job_id) {
         update(job);
-        if let Err(err) = persist_backups(backups_path, &jobs) {
-            tracing::warn!("Failed to persist backup job {}: {}", job_id, err);
+        if persist_backups(backups_path, &jobs).is_err() {
+            tracing::warn!(
+                operation = "backup.persist_job",
+                job_id,
+                "background operation failed"
+            );
         }
     }
 }
@@ -1753,19 +1754,15 @@ fn persist_connections(
             region: conn.region.clone(),
         })
         .collect();
-    let json = serde_json::to_string_pretty(&stored).map_err(|e| {
-        HttpResponse::InternalServerError()
-            .body(format!("Failed to serialize storage connections: {e}"))
-    })?;
+    let json = serde_json::to_string_pretty(&stored)
+        .map_err(|_| HttpResponse::InternalServerError().finish())?;
     if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return Err(HttpResponse::InternalServerError()
-                .body(format!("Failed to create storage dir: {e}")));
+        if std::fs::create_dir_all(parent).is_err() {
+            return Err(HttpResponse::InternalServerError().finish());
         }
     }
-    if let Err(e) = std::fs::write(path, json) {
-        return Err(HttpResponse::InternalServerError()
-            .body(format!("Failed to persist storage connections: {e}")));
+    if std::fs::write(path, json).is_err() {
+        return Err(HttpResponse::InternalServerError().finish());
     }
     Ok(())
 }
@@ -1979,10 +1976,10 @@ async fn exchange_oauth_code(
     let configs = state.oauth_configs.read().await;
     let config = configs
         .get(&provider)
-        .ok_or_else(|| HttpResponse::InternalServerError().body("OAuth config missing"))?;
+        .ok_or_else(|| HttpResponse::InternalServerError().finish())?;
 
     if config.client_id.is_empty() || config.client_secret.is_empty() {
-        return Err(HttpResponse::InternalServerError().body("OAuth credentials not configured"));
+        return Err(HttpResponse::InternalServerError().finish());
     }
 
     match provider {
@@ -1999,16 +1996,12 @@ async fn exchange_oauth_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| {
-                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
-                })?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .error_for_status()
-                .map_err(|e| {
-                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
-                })?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .json::<GoogleTokenResponse>()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token parse failed: {e}")))?;
+                .map_err(|_| HttpResponse::BadGateway().finish())?;
 
             let email = state
                 .http_client
@@ -2016,9 +2009,9 @@ async fn exchange_oauth_code(
                 .bearer_auth(&token_resp.access_token)
                 .send()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("User info failed: {e}")))?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .error_for_status()
-                .map_err(|e| HttpResponse::BadGateway().body(format!("User info failed: {e}")))?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .json::<serde_json::Value>()
                 .await
                 .ok()
@@ -2053,16 +2046,12 @@ async fn exchange_oauth_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| {
-                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
-                })?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .error_for_status()
-                .map_err(|e| {
-                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
-                })?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .json::<DropboxTokenResponse>()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token parse failed: {e}")))?;
+                .map_err(|_| HttpResponse::BadGateway().finish())?;
 
             let email = state
                 .http_client
@@ -2071,9 +2060,9 @@ async fn exchange_oauth_code(
                 .json(&serde_json::json!({}))
                 .send()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("User info failed: {e}")))?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .error_for_status()
-                .map_err(|e| HttpResponse::BadGateway().body(format!("User info failed: {e}")))?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .json::<serde_json::Value>()
                 .await
                 .ok()
@@ -2108,16 +2097,12 @@ async fn exchange_oauth_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| {
-                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
-                })?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .error_for_status()
-                .map_err(|e| {
-                    HttpResponse::BadGateway().body(format!("Token exchange failed: {e}"))
-                })?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .json::<OneDriveTokenResponse>()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("Token parse failed: {e}")))?;
+                .map_err(|_| HttpResponse::BadGateway().finish())?;
 
             let profile = state
                 .http_client
@@ -2125,9 +2110,9 @@ async fn exchange_oauth_code(
                 .bearer_auth(&token_resp.access_token)
                 .send()
                 .await
-                .map_err(|e| HttpResponse::BadGateway().body(format!("User info failed: {e}")))?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .error_for_status()
-                .map_err(|e| HttpResponse::BadGateway().body(format!("User info failed: {e}")))?
+                .map_err(|_| HttpResponse::BadGateway().finish())?
                 .json::<serde_json::Value>()
                 .await
                 .ok();

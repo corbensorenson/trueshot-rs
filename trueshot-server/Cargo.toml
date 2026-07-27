@@ -53,6 +53,9 @@ dirs = "5.0"
 infer = "0.16"
 sha2 = "0.10"
 hex = "0.4"
+libc = "0.2"
+subtle = "2.6"
+ipnet = "2.11"
 rustls = "0.23"
 rustls-pemfile = "2"
 opentelemetry = "0.21"
@@ -63,6 +66,7 @@ tar = "0.4"
 flate2 = "1.0"
 redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
 zeroize = "1.7"
+
 [lints]
 workspace = true
 

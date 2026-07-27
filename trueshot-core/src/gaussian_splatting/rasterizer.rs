@@ -10,6 +10,8 @@
 //! 4. Per-tile alpha blending
 //! 5. Final compositing
 
+#[cfg(not(feature = "wgpu"))]
+use super::gaussian::SH_COEFFS_PER_CHANNEL;
 use super::gaussian::SH_COEFFS_TOTAL;
 use anyhow::Result;
 #[cfg(not(feature = "wgpu"))]
@@ -105,9 +107,10 @@ pub struct GpuRasterizer {
 
     // Buffers
     gaussian_buffer: wgpu::Buffer,
-    projected_buffer: wgpu::Buffer,
-    tile_buffer: wgpu::Buffer,
-    tile_config_buffer: wgpu::Buffer,
+    // Bind groups reference these buffers; retain ownership for their full lifetime.
+    _projected_buffer: wgpu::Buffer,
+    _tile_buffer: wgpu::Buffer,
+    _tile_config_buffer: wgpu::Buffer,
     camera_uniform_buffer: wgpu::Buffer,
     output_texture: wgpu::Texture,
     ground_truth_texture: wgpu::Texture,
@@ -527,9 +530,9 @@ impl GpuRasterizer {
             gradient_pipeline,
             render_pipeline,
             gaussian_buffer,
-            projected_buffer,
-            tile_buffer,
-            tile_config_buffer,
+            _projected_buffer: projected_buffer,
+            _tile_buffer: tile_buffer,
+            _tile_config_buffer: tile_config_buffer,
             camera_uniform_buffer,
             output_texture,
             ground_truth_texture,
@@ -1883,18 +1886,18 @@ impl GpuRasterizer {
             let cov3d = compute_cov3d(scale, g.rotation);
 
             let cam_pos = na::Vector3::new(
-                (self.camera.view[0][0] * world.x
+                self.camera.view[0][0] * world.x
                     + self.camera.view[0][1] * world.y
                     + self.camera.view[0][2] * world.z
-                    + self.camera.view[0][3]),
-                (self.camera.view[1][0] * world.x
+                    + self.camera.view[0][3],
+                self.camera.view[1][0] * world.x
                     + self.camera.view[1][1] * world.y
                     + self.camera.view[1][2] * world.z
-                    + self.camera.view[1][3]),
-                (self.camera.view[2][0] * world.x
+                    + self.camera.view[1][3],
+                self.camera.view[2][0] * world.x
                     + self.camera.view[2][1] * world.y
                     + self.camera.view[2][2] * world.z
-                    + self.camera.view[2][3]),
+                    + self.camera.view[2][3],
             );
 
             if cam_pos.z <= 1e-6 {

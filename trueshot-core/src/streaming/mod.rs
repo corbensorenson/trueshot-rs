@@ -606,11 +606,13 @@ mod tests {
         assert!(!is_delta);
         assert!(indices.is_empty());
         assert_eq!(pos.len(), 6);
+        assert_eq!(col.len(), 6);
 
         // Second call with same data - no changes
         let (indices, pos, col, is_delta) = encoder.encode_point_cloud(&positions, &colors, 2);
         assert!(is_delta);
         assert!(indices.is_empty());
         assert!(pos.is_empty());
+        assert!(col.is_empty());
     }
 }

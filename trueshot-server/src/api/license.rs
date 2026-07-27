@@ -6,8 +6,19 @@ use utoipa::ToSchema;
 
 use crate::audit::AuditEvent;
 use crate::auth::{require_admin, require_guest_or_admin, AuthContext};
-use crate::licensing::{bundle_catalog, sync_trial_env, tier_catalog, LicenseSnapshot};
+use crate::licensing::{
+    bundle_catalog, lock_license_gate, sync_trial_env, tier_catalog, LicenseSnapshot,
+};
 use crate::state::AppState;
+
+macro_rules! license_gate_or_return {
+    ($state:expr) => {
+        match lock_license_gate($state) {
+            Ok(gate) => gate,
+            Err(response) => return response,
+        }
+    };
+}
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LicenseStatusResponse {
@@ -115,7 +126,7 @@ pub async fn get_license_status(req: HttpRequest, state: web::Data<AppState>) ->
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    let mut gate = state.license_gate.lock().unwrap();
+    let mut gate = license_gate_or_return!(&state);
     HttpResponse::Ok().json(snapshot_to_response(gate.status_snapshot()))
 }
 
@@ -165,7 +176,7 @@ pub async fn get_license_entitlements(
         return resp;
     }
     let snapshot = {
-        let mut gate = state.license_gate.lock().unwrap();
+        let mut gate = license_gate_or_return!(&state);
         gate.status_snapshot()
     };
     sync_trial_env(&snapshot);
@@ -264,7 +275,7 @@ pub async fn get_license_devices(req: HttpRequest, state: web::Data<AppState>) -
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    let mut gate = state.license_gate.lock().unwrap();
+    let mut gate = license_gate_or_return!(&state);
     match gate.list_activated_devices() {
         Ok(devices) => HttpResponse::Ok().json(
             devices
@@ -304,7 +315,7 @@ pub async fn activate_license_device(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    let mut gate = state.license_gate.lock().unwrap();
+    let mut gate = license_gate_or_return!(&state);
     match gate.activate_current_device(payload.device_name.clone()) {
         Ok(snapshot) => {
             let (actor, role, ip) = audit_actor(&req);
@@ -354,7 +365,7 @@ pub async fn activate_license_key(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    let mut gate = state.license_gate.lock().unwrap();
+    let mut gate = license_gate_or_return!(&state);
     match gate.activate_with_key(&payload.license_key, payload.device_name.clone()) {
         Ok(snapshot) => {
             let (actor, role, ip) = audit_actor(&req);
@@ -404,7 +415,7 @@ pub async fn deactivate_license_device(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    let mut gate = state.license_gate.lock().unwrap();
+    let mut gate = license_gate_or_return!(&state);
     match gate.deactivate_device(&payload.fingerprint_hash) {
         Ok(snapshot) => {
             let (actor, role, ip) = audit_actor(&req);
@@ -483,7 +494,7 @@ pub async fn create_license_trial(
     }
     let duration_days = payload.duration_days.unwrap_or(14).clamp(1, 90);
     let bundles = payload.bundles.clone().unwrap_or_default();
-    let mut gate = state.license_gate.lock().unwrap();
+    let mut gate = license_gate_or_return!(&state);
     match gate.create_trial(duration_days, &bundles) {
         Ok(snapshot) => HttpResponse::Ok().json(LicenseActionResponse {
             ok: true,
@@ -519,7 +530,7 @@ pub async fn create_license_trial_self(
         return resp;
     }
     let snapshot = {
-        let mut gate = state.license_gate.lock().unwrap();
+        let mut gate = license_gate_or_return!(&state);
         gate.status_snapshot()
     };
     if snapshot.license_valid {
@@ -568,7 +579,7 @@ pub async fn create_license_trial_self(
     let duration_days = payload.duration_days.unwrap_or(14).clamp(1, 30);
     let bundles = payload.bundles.clone().unwrap_or_default();
     let trial_result = {
-        let mut gate = state.license_gate.lock().unwrap();
+        let mut gate = license_gate_or_return!(&state);
         gate.create_trial(duration_days, &bundles)
     };
     match trial_result {
@@ -619,7 +630,7 @@ pub async fn import_license(
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
-    let mut gate = state.license_gate.lock().unwrap();
+    let mut gate = license_gate_or_return!(&state);
     match gate.import_license_json(&payload.license_json) {
         Ok(()) => {
             let (actor, role, ip) = audit_actor(&req);
@@ -685,10 +696,11 @@ fn audit_actor(req: &HttpRequest) -> (String, String, Option<String>) {
 }
 
 fn log_audit(req: &HttpRequest, state: &web::Data<AppState>, event: AuditEvent) {
-    if let Err(err) = state
+    if state
         .audit
         .append_with_redaction(event, &state.config.privacy)
+        .is_err()
     {
-        tracing::warn!("audit log failed for {}: {}", req.path(), err);
+        crate::public_error::log_redacted_failure(req, "audit.append");
     }
 }

@@ -282,7 +282,7 @@ impl Z9NefParser {
         loop {
             // Read the current IFD
             let ifd = self.tiff_parser.read_ifd(&mut reader, current_ifd_offset)?;
-            tracing::info!("IFD{} contains {} entries", ifd_index, ifd.len());
+            tracing::debug!("IFD{} contains {} entries", ifd_index, ifd.len());
 
             // Check if this IFD contains RAW data by looking for specific tags
             let has_strip_offsets = ifd.contains_key(&273); // StripOffsets
@@ -293,7 +293,7 @@ impl Z9NefParser {
             let has_compression = ifd.contains_key(&259); // Compression
             let has_photometric = ifd.contains_key(&262); // PhotometricInterpretation
 
-            tracing::info!("IFD{}: strips={}, strip_bytes={}, tiles={}, jpeg={}, jpeg_bytes={}, compression={}, photometric={}",
+            tracing::debug!("IFD{}: strips={}, strip_bytes={}, tiles={}, jpeg={}, jpeg_bytes={}, compression={}, photometric={}",
                       ifd_index, has_strip_offsets, has_strip_byte_counts, has_tile_offsets,
                       has_jpeg_offsets, has_jpeg_byte_counts, has_compression, has_photometric);
 
@@ -304,13 +304,13 @@ impl Z9NefParser {
                 // First, look for EXIF IFD and MakerNote
                 if let Some(exif_entry) = ifd.get(&34665) {
                     // EXIF IFD
-                    tracing::info!("EXIF IFD found at offset: {}", exif_entry.value_offset);
+                    tracing::debug!("EXIF IFD found at offset: {}", exif_entry.value_offset);
                     // Try to read the EXIF IFD
                     if let Ok(exif_ifd) = self
                         .tiff_parser
                         .read_ifd(&mut reader, exif_entry.value_offset as u64)
                     {
-                        tracing::info!("EXIF IFD contains {} entries", exif_ifd.len());
+                        tracing::debug!("EXIF IFD contains {} entries", exif_ifd.len());
                         match self.extract_direct_exif(&mut reader, &ifd, &exif_ifd) {
                             Ok(exif) => self.exif_data = Some(exif),
                             Err(error) => {
@@ -321,7 +321,7 @@ impl Z9NefParser {
                         // Look for MakerNote in EXIF IFD
                         if let Some(makernote_entry) = exif_ifd.get(&37500) {
                             // MakerNote tag
-                            tracing::info!(
+                            tracing::debug!(
                                 "MakerNote found in EXIF IFD at offset: {}, size: {}",
                                 makernote_entry.value_offset,
                                 makernote_entry.count
@@ -366,7 +366,7 @@ impl Z9NefParser {
                     }
                     if tag == 330 {
                         // SubIFDs tag
-                        tracing::info!(
+                        tracing::debug!(
                             "SubIFDs tag found: offset={}, count={}",
                             entry.value_offset,
                             entry.count
@@ -383,7 +383,11 @@ impl Z9NefParser {
                                 if let Ok(subifd) =
                                     self.tiff_parser.read_ifd(&mut reader, subifd_offset as u64)
                                 {
-                                    tracing::info!("SubIFD{} contains {} entries", i, subifd.len());
+                                    tracing::debug!(
+                                        "SubIFD{} contains {} entries",
+                                        i,
+                                        subifd.len()
+                                    );
 
                                     let sub_has_strips = subifd.contains_key(&273);
                                     let sub_has_tiles = subifd.contains_key(&324);
@@ -391,14 +395,14 @@ impl Z9NefParser {
                                     let sub_has_compression = subifd.contains_key(&259);
 
                                     if let Some(comp_entry) = subifd.get(&259) {
-                                        tracing::info!(
+                                        tracing::debug!(
                                             "SubIFD{} compression: {}",
                                             i,
                                             comp_entry.value_offset
                                         );
                                     }
 
-                                    tracing::info!(
+                                    tracing::debug!(
                                         "SubIFD{}: strips={}, tiles={}, jpeg={}, compression={}",
                                         i,
                                         sub_has_strips,
@@ -409,7 +413,7 @@ impl Z9NefParser {
 
                                     // If this SubIFD has RAW data, use it
                                     if sub_has_strips || sub_has_tiles {
-                                        tracing::info!("Found RAW data in SubIFD{}!", i);
+                                        tracing::debug!("Found RAW data in SubIFD{}!", i);
                                         let metadata = self.extract_metadata(
                                             &mut reader,
                                             &subifd,
@@ -436,7 +440,7 @@ impl Z9NefParser {
             // If this looks like the RAW data IFD, use it
             if has_strip_offsets || has_tile_offsets || has_jpeg_offsets {
                 if let Some(compression_entry) = ifd.get(&259) {
-                    tracing::info!(
+                    tracing::debug!(
                         "IFD{} compression type: {}",
                         ifd_index,
                         compression_entry.value_offset
@@ -445,7 +449,7 @@ impl Z9NefParser {
 
                 // Use this IFD for RAW data if it's not IFD0 (which is usually metadata/preview)
                 if ifd_index > 0 {
-                    tracing::info!("Using IFD{} for RAW data extraction", ifd_index);
+                    tracing::debug!("Using IFD{} for RAW data extraction", ifd_index);
                     let metadata = self.extract_metadata(
                         &mut reader,
                         &ifd,
@@ -465,7 +469,7 @@ impl Z9NefParser {
             ))?;
             let next_offset = self.tiff_parser.read_next_ifd_offset(&mut reader)?;
 
-            tracing::info!("Next IFD offset: {}", next_offset);
+            tracing::debug!("Next IFD offset: {}", next_offset);
 
             if next_offset == 0 {
                 break;
@@ -702,7 +706,7 @@ impl Z9NefParser {
                 .collect()
         } else if let Some(entry) = ifd.get(&TIFF_TAG_JPEG_INTERCHANGE_FORMAT) {
             // Z9 NEF uses JPEG Interchange Format for RAW data
-            tracing::info!("Using JPEG Interchange Format for RAW data");
+            tracing::debug!("Using JPEG Interchange Format for RAW data");
             vec![u64::from(
                 self.tiff_parser
                     .read_unsigned_scalar(reader, entry)
@@ -721,7 +725,7 @@ impl Z9NefParser {
                 .collect()
         } else if let Some(entry) = ifd.get(&TIFF_TAG_JPEG_INTERCHANGE_FORMAT_LENGTH) {
             // Z9 NEF uses JPEG Interchange Format Length for RAW data size
-            tracing::info!("Using JPEG Interchange Format Length for RAW data size");
+            tracing::debug!("Using JPEG Interchange Format Length for RAW data size");
             vec![u64::from(
                 self.tiff_parser
                     .read_unsigned_scalar(reader, entry)
@@ -786,7 +790,7 @@ impl Z9NefParser {
         // Try to extract WB from MakerNote
         match self.parse_makernote_white_balance() {
             Ok(wb) => {
-                tracing::info!(
+                tracing::debug!(
                     "Extracted WB from MakerNote: [{:.3}, {:.3}, {:.3}, {:.3}]",
                     wb[0],
                     wb[1],
@@ -809,7 +813,7 @@ impl Z9NefParser {
     fn extract_wb_from_exif(&self) -> Result<[f32; 4]> {
         // Extract WB directly from NEF MakerNote (no dcraw dependency)
         if let Ok(wb) = self.parse_makernote_white_balance() {
-            tracing::info!(
+            tracing::debug!(
                 "Using WB from NEF MakerNote: [{:.3}, {:.3}, {:.3}, {:.3}]",
                 wb[0],
                 wb[1],
@@ -1006,10 +1010,10 @@ impl Z9NefParser {
         }
 
         // First, analyze all strips to understand the data layout
-        tracing::info!("Total strips: {}", metadata.strip_offsets.len());
+        tracing::debug!("Total strips: {}", metadata.strip_offsets.len());
         for i in 0..metadata.strip_offsets.len().min(3) {
             let byte_count = metadata.strip_byte_counts.get(i).copied().unwrap_or(0);
-            tracing::info!(
+            tracing::debug!(
                 "Strip {}: offset={}, size={}",
                 i,
                 metadata.strip_offsets[i],
@@ -1021,13 +1025,13 @@ impl Z9NefParser {
         let start_strip = (roi.y / metadata.rows_per_strip) as usize;
         let end_strip = ((roi.y + roi.height - 1) / metadata.rows_per_strip) as usize;
 
-        tracing::info!(
+        tracing::debug!(
             "ROI y={}, height={}, rows_per_strip={}",
             roi.y,
             roi.height,
             metadata.rows_per_strip
         );
-        tracing::info!(
+        tracing::debug!(
             "ROI requires strips {} to {} (total {} strips)",
             start_strip,
             end_strip,
@@ -1110,7 +1114,7 @@ impl Z9NefParser {
             // BUT: For Z9 files, LibRaw uses packed_load_raw, not lossless_jpeg_load_raw!
             // Check if this is a Z9 file based on maker and model
             if self.is_z9_camera() {
-                tracing::info!("Z9 camera detected with compression tag 6 - using packed format instead of LJPEG");
+                tracing::debug!("Z9 camera detected with compression tag 6 - using packed format instead of LJPEG");
                 return self
                     .extract_roi_from_packed_strip(strip_data, strip_idx, roi, metadata, output);
             } else {
@@ -1119,23 +1123,23 @@ impl Z9NefParser {
             }
         } else if metadata.compression == 34713 {
             // Compression tag 34713 = Nikon NEF compression (the actual RAW data!)
-            tracing::info!(
+            tracing::debug!(
                 "Found Nikon NEF compression 34713 - this is the actual RAW sensor data"
             );
-            tracing::info!("Strip size: {} MB", strip_data.len() / 1_000_000);
+            tracing::debug!("Strip size: {} MB", strip_data.len() / 1_000_000);
 
             // LibRaw Z9-specific handling: check for "CONTACT_INTOPIX" signature at offset 6
             if strip_data.len() >= 21 {
                 let signature = &strip_data[6..21];
                 if signature == b"CONTACT_INTOPIX" {
-                    tracing::info!(
+                    tracing::debug!(
                         "Found CONTACT_INTOPIX signature - Z9 uses High Efficiency compression"
                     );
                     return self.extract_roi_from_z9_he_strip(
                         strip_data, strip_idx, roi, metadata, output,
                     );
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         "No CONTACT_INTOPIX signature - using standard Nikon compression"
                     );
                 }
@@ -1191,11 +1195,11 @@ impl Z9NefParser {
         metadata: &Z9Metadata,
         output: &mut dyn RawOutput,
     ) -> Result<()> {
-        tracing::info!(
+        tracing::debug!(
             "Extracting ROI from packed format strip {} (LibRaw packed_load_raw equivalent)",
             strip_idx
         );
-        tracing::info!(
+        tracing::debug!(
             "Strip size: {} bytes, bits per sample: {}",
             strip_data.len(),
             metadata.bits_per_sample
@@ -1258,7 +1262,7 @@ impl Z9NefParser {
 
     /// Unpack 14-bit packed data (LibRaw style)
     fn unpack_14bit_data(&self, data: &[u8], roi: &Roi, output: &mut dyn RawOutput) -> Result<()> {
-        tracing::info!("Unpacking 14-bit packed data");
+        tracing::debug!("Unpacking 14-bit packed data");
 
         // 14-bit packed format: 4 pixels in 7 bytes
         // Pixel 0: byte 0 + 6 bits of byte 6
@@ -1301,13 +1305,13 @@ impl Z9NefParser {
             }
         }
 
-        tracing::info!("Successfully unpacked 14-bit data");
+        tracing::debug!("Successfully unpacked 14-bit data");
         Ok(())
     }
 
     /// Unpack 12-bit packed data (LibRaw style)
     fn unpack_12bit_data(&self, data: &[u8], roi: &Roi, output: &mut dyn RawOutput) -> Result<()> {
-        tracing::info!("Unpacking 12-bit packed data");
+        tracing::debug!("Unpacking 12-bit packed data");
 
         // 12-bit packed format: 2 pixels in 3 bytes
         // Pixel 0: byte 0 + 4 bits of byte 2
@@ -1342,7 +1346,7 @@ impl Z9NefParser {
             }
         }
 
-        tracing::info!("Successfully unpacked 12-bit data");
+        tracing::debug!("Successfully unpacked 12-bit data");
         Ok(())
     }
 
@@ -1355,7 +1359,7 @@ impl Z9NefParser {
         metadata: &Z9Metadata,
         output: &mut dyn RawOutput,
     ) -> Result<()> {
-        tracing::info!(
+        tracing::debug!(
             "Extracting ROI from Z9 High Efficiency compressed strip {} (CONTACT_INTOPIX)",
             strip_idx
         );
@@ -1370,7 +1374,7 @@ impl Z9NefParser {
 
         // Z9 HE decompression requires specialized handling
         // For now, use the Nikon compression 34713 path which should work for Z9
-        tracing::info!("Falling back to Nikon compression 34713 for Z9 HE data");
+        tracing::debug!("Falling back to Nikon compression 34713 for Z9 HE data");
         self.extract_roi_from_nikon_34713(strip_data, strip_idx, roi, metadata, output)
     }
 
@@ -1383,9 +1387,9 @@ impl Z9NefParser {
         output: &mut dyn RawOutput,
     ) -> Result<()> {
         // Debug: Check what the strip data looks like
-        tracing::info!("Strip {} data length: {}", strip_idx, strip_data.len());
+        tracing::debug!("Strip {} data length: {}", strip_idx, strip_data.len());
         if strip_data.len() >= 16 {
-            tracing::info!("First 16 bytes: {:02x?}", &strip_data[0..16]);
+            tracing::debug!("First 16 bytes: {:02x?}", &strip_data[0..16]);
 
             // Check what type of data this strip contains
             let ascii_str: String = strip_data[0..16]
@@ -1398,7 +1402,7 @@ impl Z9NefParser {
                     }
                 })
                 .collect();
-            tracing::info!("Strip {} as ASCII: '{}'", strip_idx, ascii_str);
+            tracing::debug!("Strip {} as ASCII: '{}'", strip_idx, ascii_str);
         }
 
         // For compression tag 6, the data might not be a complete LJPEG stream
@@ -1420,7 +1424,7 @@ impl Z9NefParser {
             Ok(())
         } else {
             // Nikon proprietary compression (compression tag 6 but not LJPEG)
-            tracing::info!("Nikon proprietary compression detected (tag 6, non-LJPEG)");
+            tracing::debug!("Nikon proprietary compression detected (tag 6, non-LJPEG)");
             self.extract_roi_from_nikon_compressed_strip(
                 strip_data, strip_idx, roi, metadata, output,
             )
@@ -1696,13 +1700,13 @@ impl Z9NefParser {
         metadata: &Z9Metadata,
         _output: &mut dyn RawOutput,
     ) -> Result<()> {
-        tracing::info!("Analyzing strip data pattern...");
+        tracing::debug!("Analyzing strip data pattern...");
 
         // Check if this might actually be uncompressed data with some header/padding
         let expected_pixels = metadata.width * metadata.rows_per_strip;
         let expected_bytes = expected_pixels * 2; // 16-bit per pixel
 
-        tracing::info!(
+        tracing::debug!(
             "Expected pixels: {}, Expected bytes: {}, Actual bytes: {}",
             expected_pixels,
             expected_bytes,
@@ -1714,7 +1718,7 @@ impl Z9NefParser {
         for i in 0..strip_data.len().min(1000) {
             unique_values.insert(strip_data[i]);
         }
-        tracing::info!(
+        tracing::debug!(
             "Unique byte values in first 1000 bytes: {}",
             unique_values.len()
         );
@@ -1732,35 +1736,35 @@ impl Z9NefParser {
             }
             if different_count >= 5 {
                 data_start = i;
-                tracing::info!("Potential data start found at offset: {}", data_start);
+                tracing::debug!("Potential data start found at offset: {}", data_start);
                 break;
             }
         }
 
         // The strip contains much more data than expected - this suggests it's the entire image
         // compressed in a single strip, not per-strip compression
-        tracing::info!(
+        tracing::debug!(
             "Strip contains {} bytes, much larger than expected {} bytes",
             strip_data.len(),
             expected_bytes
         );
-        tracing::info!("This suggests the entire image is in one compressed block");
+        tracing::debug!("This suggests the entire image is in one compressed block");
 
         // For Z9 compression tag 6, we need to implement the actual decompression algorithm
         // For now, let's try to extract some data from the variable portion
         if data_start < strip_data.len() {
-            tracing::info!(
+            tracing::debug!(
                 "Attempting to extract data from variable portion starting at {}",
                 data_start
             );
 
             // Try different interpretations of the data after the header
             let remaining_data = &strip_data[data_start..];
-            tracing::info!("Remaining data length: {}", remaining_data.len());
+            tracing::debug!("Remaining data length: {}", remaining_data.len());
 
             // Check if this might be compressed with a different algorithm
             if remaining_data.len() >= 16 {
-                tracing::info!(
+                tracing::debug!(
                     "First 16 bytes of variable data: {:02x?}",
                     &remaining_data[0..16]
                 );
@@ -1776,11 +1780,11 @@ impl Z9NefParser {
                         }
                     })
                     .collect();
-                tracing::info!("As ASCII: '{}'", ascii_str);
+                tracing::debug!("As ASCII: '{}'", ascii_str);
 
                 // Check if this is XML metadata (XMP)
                 if ascii_str.contains("<?x") {
-                    tracing::info!("Detected XML/XMP metadata in strip data");
+                    tracing::debug!("Detected XML/XMP metadata in strip data");
                     tracing::warn!("This strip contains metadata, not image data!");
                 }
             }
@@ -1871,13 +1875,13 @@ impl Z9NefParser {
         metadata: &Z9Metadata,
         output: &mut dyn RawOutput,
     ) -> Result<()> {
-        tracing::info!("Starting Nikon compression 34713 decompression");
+        tracing::debug!("Starting Nikon compression 34713 decompression");
 
         // Parse MakerNote to get real compression metadata
         let compression_meta =
             match self.parse_makernote_compression_meta(metadata.bits_per_sample as u8) {
                 Ok(meta) => {
-                    tracing::info!("Successfully parsed MakerNote compression metadata");
+                    tracing::debug!("Successfully parsed MakerNote compression metadata");
                     meta
                 }
                 Err(e) => {
@@ -1913,7 +1917,7 @@ impl Z9NefParser {
             height: strip_roi_height,
         };
 
-        tracing::info!(
+        tracing::debug!(
             "Strip {} ROI: bbox=({}, {}, {}, {})",
             strip_idx,
             bbox.x,
@@ -1961,7 +1965,7 @@ impl Z9NefParser {
                 bbox,
                 destination,
             )?;
-            tracing::info!(
+            tracing::debug!(
                 "Sidecar-free NEF ROI stream decode completed in {:.2}ms: {} pixels",
                 decode_start.elapsed().as_secs_f64() * 1000.0,
                 expected_pixels
@@ -1991,7 +1995,7 @@ impl Z9NefParser {
                 .copy_from_slice(&source[..destination_end - destination_start]);
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Nikon compression 34713 ROI decompression completed: {} pixels",
             expected_pixels
         );
@@ -2021,7 +2025,7 @@ impl Z9NefParser {
                 &index,
             ) {
                 Ok(pixels) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "Indexed NEF ROI decode completed in {:.2}ms using {}",
                         decode_start.elapsed().as_secs_f64() * 1000.0,
                         index_path.display()
@@ -2077,7 +2081,7 @@ impl Z9NefParser {
         if let Err(error) = index.save_atomic(index_path) {
             tracing::warn!("Failed to persist NEF seek index: {}", error);
         }
-        tracing::info!(
+        tracing::debug!(
             "Cold NEF ROI decode and seek-index build completed in {:.2}ms",
             start.elapsed().as_secs_f64() * 1000.0
         );
@@ -2179,7 +2183,7 @@ impl Z9NefParser {
             u16::from_be_bytes(entry_count_bytes)
         };
 
-        tracing::info!(
+        tracing::debug!(
             "MakerNote has {} entries, searching for WB tags",
             entry_count
         );
@@ -2203,7 +2207,7 @@ impl Z9NefParser {
 
             // WB_RBLevels (0x000c) - as-shot white balance
             if tag == 0x000c {
-                tracing::info!("Found WB tag 0x{:04x}", tag);
+                tracing::debug!("Found WB tag 0x{:04x}", tag);
 
                 let count = if little_endian {
                     u32::from_le_bytes([
@@ -2280,7 +2284,7 @@ impl Z9NefParser {
                         ])
                     };
 
-                    tracing::info!(
+                    tracing::debug!(
                         "WB rational[{}]: {}/{} = {:.6}",
                         i,
                         numerator,
@@ -2301,7 +2305,7 @@ impl Z9NefParser {
                     }
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     "Raw WB from MakerNote tag 0x000c: [0]={:.6}, [1]={:.6}, [2]={:.6}, [3]={:.6}",
                     raw_wb[0],
                     raw_wb[1],
@@ -2319,7 +2323,7 @@ impl Z9NefParser {
                 let g_raw = wb[2]; // This is actually G
                 let g2_raw = wb[3]; // G2 is correct
 
-                tracing::info!(
+                tracing::debug!(
                     "Reordered WB (R, G, B, G2): R={:.6}, G={:.6}, B={:.6}, G2={:.6}",
                     r_raw,
                     g_raw,
@@ -2336,7 +2340,7 @@ impl Z9NefParser {
                     1.0,           // G2 (same as G)
                 ];
 
-                tracing::info!(
+                tracing::debug!(
                     "Normalized WB: R={:.3}, G={:.3}, B={:.3}, G2={:.3}",
                     wb_normalized[0],
                     wb_normalized[1],
@@ -2368,7 +2372,7 @@ impl Z9NefParser {
         if let (Some(offset), Some(_size)) = (self.makernote_offset, self.makernote_size) {
             let mut reader = self.open_reader()?;
 
-            tracing::info!("Parsing MakerNote at offset: {}", offset);
+            tracing::debug!("Parsing MakerNote at offset: {}", offset);
 
             // Seek to MakerNote
             reader.seek(SeekFrom::Start(offset))?;
@@ -2381,7 +2385,7 @@ impl Z9NefParser {
                 return Err(anyhow::anyhow!("Invalid Nikon MakerNote header"));
             }
 
-            tracing::info!("Found valid Nikon MakerNote header");
+            tracing::debug!("Found valid Nikon MakerNote header");
 
             // Read TIFF header within MakerNote
             let mut tiff_header = [0u8; 8];
@@ -2411,7 +2415,7 @@ impl Z9NefParser {
                 ])
             };
 
-            tracing::info!("MakerNote IFD offset: {}", ifd_offset);
+            tracing::debug!("MakerNote IFD offset: {}", ifd_offset);
 
             // Seek to MakerNote IFD (relative to MakerNote start + 10 bytes)
             reader.seek(SeekFrom::Start(offset + 10 + ifd_offset as u64))?;
@@ -2425,7 +2429,7 @@ impl Z9NefParser {
                 u16::from_be_bytes(entry_count_bytes)
             };
 
-            tracing::info!("MakerNote has {} entries", entry_count);
+            tracing::debug!("MakerNote has {} entries", entry_count);
 
             // Look for tag 0x96 (linearization table)
             for _ in 0..entry_count {
@@ -2440,7 +2444,7 @@ impl Z9NefParser {
 
                 if tag == 0x96 {
                     // Linearization table
-                    tracing::info!("Found linearization table (tag 0x96)!");
+                    tracing::debug!("Found linearization table (tag 0x96)!");
 
                     let data_type = if little_endian {
                         u16::from_le_bytes([entry_bytes[2], entry_bytes[3]])
@@ -2480,7 +2484,7 @@ impl Z9NefParser {
                         ])
                     };
 
-                    tracing::info!(
+                    tracing::debug!(
                         "Tag 0x96: type={}, count={}, offset={}",
                         data_type,
                         count,

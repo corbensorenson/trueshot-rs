@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use nalgebra as na;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 pub fn load_mesh(path: &Path) -> Result<Mesh> {
@@ -16,6 +16,14 @@ pub fn load_mesh(path: &Path) -> Result<Mesh> {
         "obj" => load_obj(path),
         "ply" => load_ply(path),
         _ => anyhow::bail!("Unsupported mesh format: {}", ext),
+    }
+}
+
+pub fn load_mesh_from_reader<R: Read>(reader: R, format: &str) -> Result<Mesh> {
+    match format.trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "obj" => load_obj_reader(BufReader::new(reader)),
+        "ply" => load_ply_reader(BufReader::new(reader), "descriptor-backed PLY"),
+        format => anyhow::bail!("Unsupported mesh format: {format}"),
     }
 }
 
@@ -55,8 +63,10 @@ pub fn ensure_vertex_normals(mesh: &mut Mesh) {
 fn load_obj(path: &Path) -> Result<Mesh> {
     let file =
         File::open(path).with_context(|| format!("Failed to open OBJ: {}", path.display()))?;
-    let reader = BufReader::new(file);
+    load_obj_reader(BufReader::new(file))
+}
 
+fn load_obj_reader<R: BufRead>(reader: R) -> Result<Mesh> {
     let mut positions: Vec<na::Point3<f32>> = Vec::new();
     let mut position_colors: Vec<Option<[u8; 3]>> = Vec::new();
     let mut any_color = false;
@@ -218,7 +228,10 @@ fn load_obj(path: &Path) -> Result<Mesh> {
 fn load_ply(path: &Path) -> Result<Mesh> {
     let file =
         File::open(path).with_context(|| format!("Failed to open PLY: {}", path.display()))?;
-    let mut reader = BufReader::new(file);
+    load_ply_reader(BufReader::new(file), &path.display().to_string())
+}
+
+fn load_ply_reader<R: BufRead>(mut reader: R, source: &str) -> Result<Mesh> {
     let mut line = String::new();
     let mut vertex_count = 0usize;
     let mut face_count = 0usize;
@@ -236,7 +249,7 @@ fn load_ply(path: &Path) -> Result<Mesh> {
             if trimmed.contains("ascii") {
                 is_ascii = true;
             } else {
-                anyhow::bail!("PLY must be ascii: {}", path.display());
+                anyhow::bail!("PLY must be ascii: {source}");
             }
         } else if trimmed.starts_with("element ") {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -265,7 +278,7 @@ fn load_ply(path: &Path) -> Result<Mesh> {
     }
 
     if !is_ascii || vertex_count == 0 {
-        anyhow::bail!("PLY header invalid: {}", path.display());
+        anyhow::bail!("PLY header invalid: {source}");
     }
 
     let index_of = |name: &str| vertex_properties.iter().position(|p| p == name);
@@ -394,4 +407,22 @@ fn load_ply(path: &Path) -> Result<Mesh> {
         uvs,
         faces,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_backed_obj_and_ply_loaders_match_expected_topology() {
+        let obj = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        let obj_mesh = load_mesh_from_reader(obj.as_slice(), "obj").unwrap();
+        assert_eq!(obj_mesh.vertices.len(), 3);
+        assert_eq!(obj_mesh.faces.len(), 1);
+
+        let ply = b"ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+        let ply_mesh = load_mesh_from_reader(ply.as_slice(), ".PLY").unwrap();
+        assert_eq!(ply_mesh.vertices.len(), 3);
+        assert_eq!(ply_mesh.faces.len(), 1);
+    }
 }

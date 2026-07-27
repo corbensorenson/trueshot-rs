@@ -192,7 +192,19 @@ pub fn export_gltf(mesh: &Mesh, path: &Path) -> Result<()> {
 /// Export mesh as GLB (single binary file)
 pub fn export_glb(mesh: &Mesh, path: &Path) -> Result<()> {
     tracing::info!("Exporting GLB to {:?}", path);
+    let file = File::create(path)?;
+    export_glb_to_writer(
+        mesh,
+        file,
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("asset.glb"),
+    )?;
+    write_provenance_for_export(path)?;
+    Ok(())
+}
 
+pub fn export_glb_to_writer<W: Write>(mesh: &Mesh, writer: W, asset_name: &str) -> Result<()> {
     if mesh.is_empty() {
         anyhow::bail!("Cannot export empty mesh");
     }
@@ -259,7 +271,10 @@ pub fn export_glb(mesh: &Mesh, path: &Path) -> Result<()> {
 
     let provenance_sidecar = format!(
         "{}.provenance.json",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("asset")
+        Path::new(asset_name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("asset")
     );
     let provenance_key_id = ProvenanceSigner::global().key_id();
     let gltf = json!({
@@ -290,8 +305,7 @@ pub fn export_glb(mesh: &Mesh, path: &Path) -> Result<()> {
     // GLB structure
     let total_length = 12 + 8 + json_padded_len + 8 + bin_padded_len;
 
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::new(writer);
 
     // GLB Header
     writer.write_all(b"glTF")?; // magic
@@ -315,7 +329,6 @@ pub fn export_glb(mesh: &Mesh, path: &Path) -> Result<()> {
     }
 
     writer.flush()?;
-    write_provenance_for_export(path)?;
 
     tracing::info!(
         "Exported GLB: {} vertices, {} faces",
@@ -357,7 +370,7 @@ fn build_binary_data(mesh: &Mesh) -> Result<Vec<u8>> {
     }
 
     // Write colors (RGBA u8, alpha = 255)
-    for (i, c) in mesh.colors.iter().enumerate() {
+    for c in &mesh.colors {
         data.push(c[0]);
         data.push(c[1]);
         data.push(c[2]);

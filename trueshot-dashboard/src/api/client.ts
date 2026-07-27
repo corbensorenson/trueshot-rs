@@ -671,6 +671,8 @@ export interface FusionReportSummary {
     frame_count?: number | null;
     crop_origin_x?: number | null;
     crop_origin_y?: number | null;
+    glare_physical_scale: boolean;
+    trimap_physical_scale: boolean;
     fusion_edit_digest?: string | null;
     editable_base: boolean;
     revision_executable: boolean;
@@ -707,12 +709,14 @@ export const fetchFusionArtifact = async (projectId: string, artifactPath: strin
 };
 
 export type FusionEditReason = 'motion' | 'disocclusion' | 'focus' | 'glare' | 'boundary' | 'other';
+export type FusionEditSelector = 'rectangle' | 'glare_affected' | 'boundary_affected' | 'boundary_crossing_core';
 
 export interface FusionEditOperation {
     id: string;
     rect: { x: number; y: number; width: number; height: number };
     source_frame: number;
     reason: FusionEditReason;
+    selector: FusionEditSelector;
     note?: string;
 }
 

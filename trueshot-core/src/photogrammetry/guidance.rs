@@ -259,8 +259,6 @@ impl GuidanceSystem {
         let mut right_count = 0; // Positive X
         let mut top_count = 0; // Positive Y
         let mut bottom_count = 0; // Negative Y
-        let mut front_count = 0; // Positive Z
-        let mut back_count = 0; // Negative Z
 
         for point in points {
             if point.position.x < 0.0 {
@@ -272,11 +270,6 @@ impl GuidanceSystem {
                 bottom_count += 1;
             } else {
                 top_count += 1;
-            }
-            if point.position.z < 0.0 {
-                back_count += 1;
-            } else {
-                front_count += 1;
             }
         }
 

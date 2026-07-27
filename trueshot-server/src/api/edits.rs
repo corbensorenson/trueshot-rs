@@ -5,16 +5,24 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use crate::api::project_asset::{
+    commit_project_asset_stager, write_project_asset_bytes, OpenedProjectAsset,
+};
 use crate::auth::require_admin;
-use crate::fs_safety::{ensure_filename, resolve_project_child, resolve_project_child_file};
+use crate::fs_safety::{
+    ensure_filename, ensure_project_directory, resolve_project_child_file, stage_project_file,
+};
 use crate::state::AppState;
 
-use trueshot_core::export::ply::{export_ply, PlyExportOptions};
+use trueshot_core::export::ply::{export_ply_to_writer, PlyExportOptions};
 use trueshot_core::gaussian_splatting::splat_edit::{
-    apply_splat_edits, load_splat, save_splat, save_spz, SplatEditOp,
+    apply_splat_edits, load_splat_from_reader, save_splat_to_writer, save_spz_to_writer,
+    SplatEditOp,
 };
 use trueshot_core::mesh::editing::{apply_mesh_edits, MeshEditOp};
-use trueshot_core::mesh::io::load_mesh;
+use trueshot_core::mesh::io::load_mesh_from_reader;
+
+const MAX_EDIT_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct MeshEditRequest {
@@ -93,15 +101,20 @@ pub async fn edit_mesh(
     if output_format != "ply" {
         return HttpResponse::BadRequest().body("Only ply output_format is supported");
     }
-    let output_dir =
-        match resolve_project_child(&state.config.paths.projects_dir, &project_id, "output") {
-            Ok(path) => path
-                .join("edits")
-                .join(Utc::now().format("%Y%m%dT%H%M%SZ").to_string()),
-            Err(resp) => return resp,
-        };
-    if let Err(err) = tokio::fs::create_dir_all(&output_dir).await {
-        return HttpResponse::InternalServerError().body(err.to_string());
+    let edit_group = format!("edits/{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
+    let output_dir = match resolve_project_child_file(
+        &state.config.paths.projects_dir,
+        &project_id,
+        "output",
+        &edit_group,
+    ) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    if let Err(response) =
+        ensure_project_directory(&state.config.paths.projects_dir, &project_id, &output_dir)
+    {
+        return response;
     }
 
     let output_name = payload
@@ -113,7 +126,8 @@ pub async fn edit_mesh(
     }
     let output_path = output_dir.join(&output_name);
 
-    let result = apply_mesh_edit_pipeline(&input_path, &output_path, &payload.ops);
+    let result =
+        apply_mesh_edit_pipeline(&state, &project_id, &input_path, &output_path, &payload.ops);
     let response = match result {
         Ok(()) => {
             let entry = EditHistoryEntry {
@@ -128,16 +142,18 @@ pub async fn edit_mesh(
                 ),
                 operations: serde_json::to_value(&payload.ops).unwrap_or(serde_json::json!([])),
             };
-            let history_path =
-                match append_edit_history(&state.config.paths.projects_dir, &project_id, entry) {
+            let history_path = {
+                let _guard = state.project_file_mutations.lock().await;
+                match append_edit_history(&state, &project_id, entry) {
                     Ok(path) => path,
                     Err(err) => {
                         return HttpResponse::InternalServerError().body(err.to_string());
                     }
-                };
+                }
+            };
             HttpResponse::Ok().json(EditResponse {
                 id: Uuid::new_v4().to_string(),
-                output_path: output_path.to_string_lossy().to_string(),
+                output_path: format!("output/{edit_group}/{output_name}"),
                 history_path,
             })
         }
@@ -182,15 +198,20 @@ pub async fn edit_splat(
         Ok(path) => path,
         Err(resp) => return resp,
     };
-    let output_dir =
-        match resolve_project_child(&state.config.paths.projects_dir, &project_id, "output") {
-            Ok(path) => path
-                .join("edits")
-                .join(Utc::now().format("%Y%m%dT%H%M%SZ").to_string()),
-            Err(resp) => return resp,
-        };
-    if let Err(err) = tokio::fs::create_dir_all(&output_dir).await {
-        return HttpResponse::InternalServerError().body(err.to_string());
+    let edit_group = format!("edits/{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
+    let output_dir = match resolve_project_child_file(
+        &state.config.paths.projects_dir,
+        &project_id,
+        "output",
+        &edit_group,
+    ) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    if let Err(response) =
+        ensure_project_directory(&state.config.paths.projects_dir, &project_id, &output_dir)
+    {
+        return response;
     }
 
     let output_name = payload
@@ -203,7 +224,14 @@ pub async fn edit_splat(
     let output_path = output_dir.join(&output_name);
     let write_spz = payload.write_spz.unwrap_or(true);
 
-    let result = apply_splat_edit_pipeline(&input_path, &output_path, &payload.ops, write_spz);
+    let result = apply_splat_edit_pipeline(
+        &state,
+        &project_id,
+        &input_path,
+        &output_path,
+        &payload.ops,
+        write_spz,
+    );
     let response = match result {
         Ok(()) => {
             let entry = EditHistoryEntry {
@@ -218,16 +246,18 @@ pub async fn edit_splat(
                 ),
                 operations: serde_json::to_value(&payload.ops).unwrap_or(serde_json::json!([])),
             };
-            let history_path =
-                match append_edit_history(&state.config.paths.projects_dir, &project_id, entry) {
+            let history_path = {
+                let _guard = state.project_file_mutations.lock().await;
+                match append_edit_history(&state, &project_id, entry) {
                     Ok(path) => path,
                     Err(err) => {
                         return HttpResponse::InternalServerError().body(err.to_string());
                     }
-                };
+                }
+            };
             HttpResponse::Ok().json(EditResponse {
                 id: Uuid::new_v4().to_string(),
-                output_path: output_path.to_string_lossy().to_string(),
+                output_path: format!("output/{edit_group}/{output_name}"),
                 history_path,
             })
         }
@@ -256,14 +286,26 @@ pub async fn get_edit_history(
         return resp;
     }
     let project_id = path.into_inner();
-    match read_edit_history(&state.config.paths.projects_dir, &project_id) {
+    match read_edit_history(&state, &project_id) {
         Ok(history) => HttpResponse::Ok().json(history),
         Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
     }
 }
 
-fn apply_mesh_edit_pipeline(input: &Path, output: &Path, ops: &[MeshEditOp]) -> Result<()> {
-    let mut mesh = load_mesh(input)?;
+fn apply_mesh_edit_pipeline(
+    state: &AppState,
+    project_id: &str,
+    input: &Path,
+    output: &Path,
+    ops: &[MeshEditOp],
+) -> Result<()> {
+    let format = input
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Mesh input has no format extension"))?;
+    let source = OpenedProjectAsset::open(state, project_id, input)
+        .map_err(|response| anyhow::anyhow!("Mesh input open failed: {}", response.status()))?;
+    let mut mesh = load_mesh_from_reader(source.into_reader(), format)?;
     apply_mesh_edits(&mut mesh, ops)?;
     let options = PlyExportOptions {
         binary: true,
@@ -272,55 +314,90 @@ fn apply_mesh_edit_pipeline(input: &Path, output: &Path, ops: &[MeshEditOp]) -> 
         include_uvs: !mesh.uvs.is_empty(),
         comment: Some("TrueShot mesh edit".to_string()),
     };
-    export_ply(&mesh, output, &options)?;
+    let mut staged = stage_project_file(&state.config.paths.projects_dir, project_id, output, true)
+        .map_err(|response| anyhow::anyhow!("Mesh output stage failed: {}", response.status()))?;
+    export_ply_to_writer(&mesh, staged.file_mut(), &options)?;
+    commit_project_asset_stager(state, project_id, output, staged)
+        .map_err(|response| anyhow::anyhow!("Mesh output commit failed: {}", response.status()))?;
     Ok(())
 }
 
 fn apply_splat_edit_pipeline(
+    state: &AppState,
+    project_id: &str,
     input: &Path,
     output: &Path,
     ops: &[SplatEditOp],
     write_spz_file: bool,
 ) -> Result<()> {
-    let points = load_splat(input)?;
+    let source = OpenedProjectAsset::open(state, project_id, input)
+        .map_err(|response| anyhow::anyhow!("Splat input open failed: {}", response.status()))?;
+    let points = load_splat_from_reader(source.into_reader())?;
     let edited = apply_splat_edits(points, ops);
-    save_splat(output, &edited)?;
+    let mut staged = stage_project_file(&state.config.paths.projects_dir, project_id, output, true)
+        .map_err(|response| anyhow::anyhow!("Splat output stage failed: {}", response.status()))?;
+    save_splat_to_writer(staged.file_mut(), &edited)?;
+    commit_project_asset_stager(state, project_id, output, staged)
+        .map_err(|response| anyhow::anyhow!("Splat output commit failed: {}", response.status()))?;
     if write_spz_file {
         let spz_path = output.with_extension("spz");
-        let _ = save_spz(&spz_path, &edited);
+        let mut staged = stage_project_file(
+            &state.config.paths.projects_dir,
+            project_id,
+            &spz_path,
+            true,
+        )
+        .map_err(|response| anyhow::anyhow!("SPZ output stage failed: {}", response.status()))?;
+        save_spz_to_writer(staged.file_mut(), &edited)?;
+        commit_project_asset_stager(state, project_id, &spz_path, staged).map_err(|response| {
+            anyhow::anyhow!("SPZ output commit failed: {}", response.status())
+        })?;
     }
     Ok(())
 }
 
 fn history_path(root: &Path, project_id: &str) -> Result<PathBuf> {
-    let output_dir = resolve_project_child(root, project_id, "output")
-        .map_err(|_| anyhow::anyhow!("Invalid project"))?;
-    Ok(output_dir.join("edits").join("history.json"))
+    resolve_project_child_file(root, project_id, "output", "edits/history.json")
+        .map_err(|response| anyhow::anyhow!("Invalid edit history path: {}", response.status()))
 }
 
-fn read_edit_history(root: &Path, project_id: &str) -> Result<Vec<EditHistoryEntry>> {
-    let path = history_path(root, project_id)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let payload = std::fs::read_to_string(&path)?;
-    let history: Vec<EditHistoryEntry> = serde_json::from_str(&payload)?;
+fn read_edit_history(state: &AppState, project_id: &str) -> Result<Vec<EditHistoryEntry>> {
+    let path = history_path(&state.config.paths.projects_dir, project_id)?;
+    let payload = match OpenedProjectAsset::open(state, project_id, &path) {
+        Ok(asset) => asset
+            .read_to_end_bounded(MAX_EDIT_HISTORY_BYTES)
+            .map_err(|response| {
+                anyhow::anyhow!("Edit history read failed: {}", response.status())
+            })?,
+        Err(response) if response.status() == actix_web::http::StatusCode::NOT_FOUND => {
+            return Ok(Vec::new())
+        }
+        Err(response) => {
+            return Err(anyhow::anyhow!(
+                "Edit history open failed: {}",
+                response.status()
+            ))
+        }
+    };
+    let history: Vec<EditHistoryEntry> = serde_json::from_slice(&payload)?;
     Ok(history)
 }
 
-fn append_edit_history(root: &Path, project_id: &str, entry: EditHistoryEntry) -> Result<String> {
-    let path = history_path(root, project_id)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut history = if path.exists() {
-        let payload = std::fs::read_to_string(&path)?;
-        serde_json::from_str::<Vec<EditHistoryEntry>>(&payload).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+fn append_edit_history(
+    state: &AppState,
+    project_id: &str,
+    entry: EditHistoryEntry,
+) -> Result<String> {
+    let path = history_path(&state.config.paths.projects_dir, project_id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Edit history has no parent"))?;
+    ensure_project_directory(&state.config.paths.projects_dir, project_id, parent)
+        .map_err(|response| anyhow::anyhow!("Edit directory failed: {}", response.status()))?;
+    let mut history = read_edit_history(state, project_id)?;
     history.push(entry);
-    let json = serde_json::to_string_pretty(&history)?;
-    std::fs::write(&path, json)?;
-    Ok(path.to_string_lossy().to_string())
+    let json = serde_json::to_vec_pretty(&history)?;
+    write_project_asset_bytes(state, project_id, &path, &json)
+        .map_err(|response| anyhow::anyhow!("Edit history write failed: {}", response.status()))?;
+    Ok("output/edits/history.json".to_string())
 }

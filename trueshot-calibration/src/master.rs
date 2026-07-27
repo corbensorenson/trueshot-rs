@@ -131,6 +131,12 @@ fn solve_extrinsics(
     if image_paths.is_empty() {
         anyhow::bail!("No images provided for extrinsics");
     }
+    if rows < 3 || cols < 3 {
+        anyhow::bail!("Checkerboard rows and columns must both be at least 3");
+    }
+    if !square_size_mm.is_finite() || square_size_mm <= 0.0 {
+        anyhow::bail!("Checkerboard square size must be finite and positive");
+    }
 
     let pattern_size = Size::new(cols - 1, rows - 1);
     let mut obj_points_vec = VectorOfPoint3f::new();
@@ -152,7 +158,11 @@ fn solve_extrinsics(
     let mut results = Vec::new();
 
     for path in image_paths {
-        let img = imgcodecs::imread(path.to_str().unwrap(), imgcodecs::IMREAD_GRAYSCALE)?;
+        let img = imgcodecs::imread(
+            path.to_str()
+                .ok_or_else(|| anyhow::anyhow!("Image path is not valid UTF-8"))?,
+            imgcodecs::IMREAD_GRAYSCALE,
+        )?;
         if img.empty() {
             continue;
         }
@@ -191,6 +201,7 @@ fn solve_extrinsics(
         )?;
 
         let mut projected = Vector::<Point2f>::new();
+        let mut jacobian = Mat::default();
         calib3d::project_points(
             &obj_points_vec,
             &rvec,
@@ -198,6 +209,8 @@ fn solve_extrinsics(
             &camera_matrix,
             &dist_coeffs,
             &mut projected,
+            &mut jacobian,
+            0.0,
         )?;
 
         let mut err = 0.0f64;
@@ -211,10 +224,16 @@ fn solve_extrinsics(
         }
         let reproj = if n > 0.0 { err / n } else { 0.0 };
 
-        let mut rvec_buf = vec![0.0f64; 3];
-        let mut tvec_buf = vec![0.0f64; 3];
-        rvec.copy_to(&mut Mat::from_slice_mut(&mut rvec_buf)?)?;
-        tvec.copy_to(&mut Mat::from_slice_mut(&mut tvec_buf)?)?;
+        let rvec_buf = [
+            *rvec.at_2d::<f64>(0, 0)?,
+            *rvec.at_2d::<f64>(1, 0)?,
+            *rvec.at_2d::<f64>(2, 0)?,
+        ];
+        let tvec_buf = [
+            *tvec.at_2d::<f64>(0, 0)?,
+            *tvec.at_2d::<f64>(1, 0)?,
+            *tvec.at_2d::<f64>(2, 0)?,
+        ];
 
         results.push(CameraExtrinsics {
             rvec: [rvec_buf[0], rvec_buf[1], rvec_buf[2]],

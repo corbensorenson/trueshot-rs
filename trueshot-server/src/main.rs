@@ -38,6 +38,7 @@ mod fusion_revision;
 mod guest;
 mod intervalometer;
 mod licensing;
+mod public_error;
 mod queue;
 mod rate_limit;
 mod redis_runtime;
@@ -45,6 +46,7 @@ mod retention;
 mod scan_types;
 mod scan_wizard;
 mod state;
+mod sync_lock;
 mod telemetry;
 mod tls;
 mod trace_middleware;
@@ -152,15 +154,20 @@ async fn main() -> std::io::Result<()> {
             .map_err(|e| std::io::Error::other(format!("Auth store init failed: {}", e)))?,
     );
     let auth = Arc::new(
-        AuthManager::new(
+        AuthManager::new_with_secret_path(
             "trueshot".to_string(),
             admin_ttl,
             guest_ttl,
             refresh_ttl,
             auth_store,
+            config.server.hmac_secret_path.as_deref(),
+            is_production,
         )
         .map_err(|e| std::io::Error::other(format!("Auth init failed: {}", e)))?,
     );
+    auth.migrate_public_share_aliases()
+        .await
+        .map_err(|e| std::io::Error::other(format!("Public share migration failed: {e}")))?;
     if at_rest::encryption_required(&config.privacy, &config.paths.projects_dir) {
         at_rest::require_master_key(&config.privacy, &config.paths.projects_dir)
             .map_err(|e| std::io::Error::other(format!("Encryption master key required: {}", e)))?;
@@ -286,7 +293,11 @@ async fn main() -> std::io::Result<()> {
                 if tt_lock.is_some() {
                     warn!("Turntable connection lost! Re-scanning...");
                     *tt_lock = None;
-                    *status_clone.lock().unwrap() = "Disconnected".to_string();
+                    let _ = sync_lock::replace(
+                        &status_clone,
+                        "turntable.status",
+                        "Disconnected".to_string(),
+                    );
                     eb_turntable.publish(SystemEvent::TurntableStatus {
                         connected: false,
                         angle: 0.0,
@@ -296,7 +307,8 @@ async fn main() -> std::io::Result<()> {
             }
 
             info!("Starting Turntable Scan...");
-            *status_clone.lock().unwrap() = "Scanning...".to_string();
+            let _ =
+                sync_lock::replace(&status_clone, "turntable.status", "Scanning...".to_string());
 
             // Try Foldio360
             if tt_config.turntable_type == "foldio360" || tt_config.turntable_type == "auto" {
@@ -307,7 +319,11 @@ async fn main() -> std::io::Result<()> {
                 if foldio.connect().await.is_ok() {
                     info!("Foldio360 Connected!");
                     *tt_clone.lock().await = Some(Box::new(foldio) as Box<dyn Turntable>);
-                    *status_clone.lock().unwrap() = "Foldio360".to_string();
+                    let _ = sync_lock::replace(
+                        &status_clone,
+                        "turntable.status",
+                        "Foldio360".to_string(),
+                    );
 
                     eb_turntable.publish(SystemEvent::DeviceConnected {
                         kind: "turntable".to_string(),
@@ -332,7 +348,8 @@ async fn main() -> std::io::Result<()> {
                 if serial.connect().await.is_ok() {
                     info!("Serial Turntable Connected on {}", port);
                     *tt_clone.lock().await = Some(Box::new(serial) as Box<dyn Turntable>);
-                    *status_clone.lock().unwrap() = "Serial".to_string();
+                    let _ =
+                        sync_lock::replace(&status_clone, "turntable.status", "Serial".to_string());
 
                     eb_turntable.publish(SystemEvent::DeviceConnected {
                         kind: "turntable".to_string(),
@@ -348,7 +365,7 @@ async fn main() -> std::io::Result<()> {
                 }
             }
 
-            *status_clone.lock().unwrap() = "Not Found".to_string();
+            let _ = sync_lock::replace(&status_clone, "turntable.status", "Not Found".to_string());
             // info!("Turntable Scan Complete (None found). Retrying in 10s...");
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
@@ -420,11 +437,12 @@ async fn main() -> std::io::Result<()> {
             let disk_gb = free_space / 1024 / 1024 / 1024;
 
             {
-                let mut lock = stats_clone.lock().unwrap();
-                lock.cpu_usage = cpu_usage;
-                lock.memory_used_mb = used_mem;
-                lock.memory_total_mb = total_mem;
-                lock.disk_free_gb = disk_gb;
+                if let Ok(mut stats) = sync_lock::lock(&stats_clone, "system.stats") {
+                    stats.cpu_usage = cpu_usage;
+                    stats.memory_used_mb = used_mem;
+                    stats.memory_total_mb = total_mem;
+                    stats.disk_free_gb = disk_gb;
+                }
             }
 
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -507,6 +525,7 @@ async fn main() -> std::io::Result<()> {
         intervalometer: Arc::new(AsyncMutex::new(IntervalometerState::new())),
         adaptive_capture: Arc::new(AsyncMutex::new(adaptive_capture)),
         calibration_session: Arc::new(AsyncMutex::new(state::CalibrationSession::default())),
+        project_file_mutations: Arc::new(AsyncMutex::new(())),
         audit,
         license_gate,
         redis_pool,
@@ -605,6 +624,23 @@ async fn main() -> std::io::Result<()> {
             "TRUESHOT_ENV=production requires server.allowed_origins to be configured",
         ));
     }
+    let trusted_proxies = Arc::new(
+        config
+            .server
+            .trusted_proxy_cidrs
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| {
+                value.parse::<ipnet::IpNet>().map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Invalid server.trusted_proxy_cidrs entry {value}: {error}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
 
     info!(
         "Starting TrueShot Server (Actix) on {}:{}",
@@ -643,7 +679,11 @@ async fn main() -> std::io::Result<()> {
                 actix_web::http::header::ACCEPT,
                 actix_web::http::header::CONTENT_TYPE,
                 actix_web::http::header::HeaderName::from_static("x-api-key"),
+                actix_web::http::header::HeaderName::from_static("x-api-token"),
             ])
+            .expose_headers(vec![actix_web::http::header::HeaderName::from_static(
+                public_error::CORRELATION_HEADER,
+            )])
             .supports_credentials()
             .max_age(3600);
         for origin in &allowed_origins {
@@ -671,7 +711,9 @@ async fn main() -> std::io::Result<()> {
                 config.server.api_key.clone(),
                 csrf_required,
                 rate_limiter.clone(),
-            ))
+            )
+            .with_trusted_proxies(trusted_proxies.clone()))
+            .wrap(public_error::OpaqueServerErrors)
             .app_data(state.clone())
             .app_data(phone_state_data.clone())
             // General
@@ -754,12 +796,15 @@ async fn main() -> std::io::Result<()> {
             .service(api::scan::get_detection_status)
             .service(api::scan::get_quality_status)
             .service(api::scan::get_quality_history)
+            .service(api::scan::get_scale_anchor)
+            .service(api::scan::set_scale_anchor)
             .service(api::scan::get_uncertainty_map)
             .service(api::scan::analyze_object)
             .service(api::scan::compute_scan_plan)
             .service(api::scan::start_scan)
             .service(api::scan::stop_scan)
             .service(api::scan::get_scan_progress)
+            .service(api::scan::get_scan_coverage)
             .service(api::scan::execute_step)
             .service(api::scan::trigger_capture)
             .service(api::scan::get_sdcard_status)

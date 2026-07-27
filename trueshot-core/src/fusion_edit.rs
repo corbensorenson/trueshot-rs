@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub const FUSION_EDIT_SCHEMA: &str = "trueshot.fusion.edits.v1";
+pub const FUSION_EDIT_SCHEMA: &str = "trueshot.fusion.edits.v2";
+pub const LEGACY_FUSION_EDIT_SCHEMA_V1: &str = "trueshot.fusion.edits.v1";
 pub const MAX_FUSION_EDIT_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_FUSION_EDIT_OPERATIONS: usize = 2_048;
 pub const MAX_FUSION_EDIT_NOTE_BYTES: usize = 512;
@@ -34,6 +35,8 @@ pub struct FusionEditOperation {
     pub rect: FusionEditRect,
     pub source_frame: u16,
     pub reason: FusionEditReason,
+    #[serde(default)]
+    pub selector: FusionEditSelector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -56,6 +59,18 @@ pub enum FusionEditReason {
     Glare,
     Boundary,
     Other,
+}
+
+/// Recomputed fusion evidence that limits which pixels inside a rectangle may
+/// be rebound to the selected measured source.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FusionEditSelector {
+    #[default]
+    Rectangle,
+    GlareAffected,
+    BoundaryAffected,
+    BoundaryCrossingCore,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,11 +102,15 @@ impl FusionEditDocument {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.schema != FUSION_EDIT_SCHEMA {
+        if !matches!(
+            self.schema.as_str(),
+            FUSION_EDIT_SCHEMA | LEGACY_FUSION_EDIT_SCHEMA_V1
+        ) {
             anyhow::bail!(
-                "Unsupported fusion edit schema {}; expected {}",
+                "Unsupported fusion edit schema {}; expected {} or {}",
                 self.schema,
-                FUSION_EDIT_SCHEMA
+                FUSION_EDIT_SCHEMA,
+                LEGACY_FUSION_EDIT_SCHEMA_V1
             );
         }
         validate_sha256("capture_group_id", &self.capture_group_id)?;
@@ -107,7 +126,14 @@ impl FusionEditDocument {
         }
 
         for (index, operation) in self.operations.iter().enumerate() {
-            validate_operation(index, operation, self.width, self.height, self.frame_count)?;
+            validate_operation(
+                index,
+                operation,
+                self.width,
+                self.height,
+                self.frame_count,
+                &self.schema,
+            )?;
         }
         let mut ordered = self.operations.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|operation| {
@@ -192,6 +218,7 @@ fn validate_operation(
     width: u32,
     height: u32,
     frame_count: u16,
+    schema: &str,
 ) -> Result<()> {
     if operation.id.is_empty()
         || operation.id.len() > 80
@@ -243,6 +270,49 @@ fn validate_operation(
             );
         }
     }
+    if schema == LEGACY_FUSION_EDIT_SCHEMA_V1 {
+        if operation.selector != FusionEditSelector::Rectangle {
+            anyhow::bail!(
+                "Legacy fusion edit operation {} cannot use an evidence selector",
+                operation.id
+            );
+        }
+        if matches!(
+            operation.reason,
+            FusionEditReason::Glare | FusionEditReason::Boundary
+        ) {
+            anyhow::bail!(
+                "Legacy fusion edit operation {} uses physical reason {:?}; migrate it to schema {} with a matching evidence selector",
+                operation.id,
+                operation.reason,
+                FUSION_EDIT_SCHEMA
+            );
+        }
+    } else {
+        let selector_matches_reason = matches!(
+            (operation.reason, operation.selector),
+            (FusionEditReason::Glare, FusionEditSelector::GlareAffected)
+                | (
+                    FusionEditReason::Boundary,
+                    FusionEditSelector::BoundaryAffected | FusionEditSelector::BoundaryCrossingCore
+                )
+                | (
+                    FusionEditReason::Motion
+                        | FusionEditReason::Disocclusion
+                        | FusionEditReason::Focus
+                        | FusionEditReason::Other,
+                    FusionEditSelector::Rectangle
+                )
+        );
+        if !selector_matches_reason {
+            anyhow::bail!(
+                "Fusion edit operation {} reason {:?} is incompatible with selector {:?}",
+                operation.id,
+                operation.reason,
+                operation.selector
+            );
+        }
+    }
     Ok(())
 }
 
@@ -289,6 +359,7 @@ mod tests {
                     },
                     source_frame: 2,
                     reason: FusionEditReason::Motion,
+                    selector: FusionEditSelector::Rectangle,
                     note: Some("Use the measured reference without interpolation.".to_string()),
                 },
                 FusionEditOperation {
@@ -301,6 +372,7 @@ mod tests {
                     },
                     source_frame: 5,
                     reason: FusionEditReason::Focus,
+                    selector: FusionEditSelector::Rectangle,
                     note: None,
                 },
             ],
@@ -350,5 +422,52 @@ mod tests {
         second.operations.swap(0, 1);
         assert_eq!(first.digest().unwrap(), first.digest().unwrap());
         assert_ne!(first.digest().unwrap(), second.digest().unwrap());
+    }
+
+    #[test]
+    fn physical_reasons_require_matching_evidence_selectors() {
+        let mut glare = document();
+        glare.operations[0].reason = FusionEditReason::Glare;
+        assert!(glare.validate().is_err());
+        glare.operations[0].selector = FusionEditSelector::GlareAffected;
+        assert!(glare.validate().is_ok());
+
+        let mut boundary = document();
+        boundary.operations[0].reason = FusionEditReason::Boundary;
+        boundary.operations[0].selector = FusionEditSelector::BoundaryAffected;
+        assert!(boundary.validate().is_ok());
+        boundary.operations[0].selector = FusionEditSelector::BoundaryCrossingCore;
+        assert!(boundary.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_v1_defaults_to_rectangles_and_rejects_new_selectors() {
+        let payload = serde_json::json!({
+            "schema": LEGACY_FUSION_EDIT_SCHEMA_V1,
+            "capture_group_id": "a".repeat(64),
+            "base_report_sha256": "b".repeat(64),
+            "width": 8,
+            "height": 8,
+            "crop_origin_x": 0,
+            "crop_origin_y": 0,
+            "frame_count": 1,
+            "operations": [{
+                "id": "legacy",
+                "rect": {"x": 0, "y": 0, "width": 2, "height": 2},
+                "source_frame": 0,
+                "reason": "focus"
+            }]
+        });
+        let mut legacy: FusionEditDocument = serde_json::from_value(payload).unwrap();
+        assert_eq!(legacy.operations[0].selector, FusionEditSelector::Rectangle);
+        legacy.validate().unwrap();
+        legacy.operations[0].selector = FusionEditSelector::BoundaryAffected;
+        assert!(legacy.validate().is_err());
+
+        legacy.operations[0].selector = FusionEditSelector::Rectangle;
+        legacy.operations[0].reason = FusionEditReason::Glare;
+        assert!(legacy.validate().is_err());
+        legacy.operations[0].reason = FusionEditReason::Boundary;
+        assert!(legacy.validate().is_err());
     }
 }

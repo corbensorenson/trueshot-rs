@@ -32,7 +32,7 @@ export const SecurityConsole = ({ isOpen, onClose, onLoggedOut }: SecurityConsol
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [createName, setCreateName] = useState('');
-    const [createScopes, setCreateScopes] = useState('*');
+    const [createScopes, setCreateScopes] = useState('read');
     const [createExpiry, setCreateExpiry] = useState('30d');
     const [createdToken, setCreatedToken] = useState<ApiTokenResponse | null>(null);
 
@@ -74,12 +74,12 @@ export const SecurityConsole = ({ isOpen, onClose, onLoggedOut }: SecurityConsol
         try {
             const token = await createApiToken({
                 name: createName.trim(),
-                scopes: scopes.length ? scopes : ['*'],
+                scopes: scopes.length ? scopes : ['read'],
                 expires_in_seconds: selectedExpiry?.seconds,
             });
             setCreatedToken(token);
             setCreateName('');
-            setCreateScopes('*');
+            setCreateScopes('read');
             setCreateExpiry('30d');
             refreshTokens();
         } catch (err: unknown) {
@@ -152,9 +152,12 @@ export const SecurityConsole = ({ isOpen, onClose, onLoggedOut }: SecurityConsol
                             <input
                                 value={createScopes}
                                 onChange={(e) => setCreateScopes(e.target.value)}
-                                placeholder="Scopes (comma-separated, default *)"
+                                placeholder="Scopes: read, capture, process, export, license, admin"
                                 className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-white outline-none focus:border-white/40"
                             />
+                            <div className="text-[11px] leading-relaxed text-white/40">
+                                Use the minimum access needed. Wildcard <span className="font-mono">*</span> grants every capability and must be used alone.
+                            </div>
                             <select
                                 value={createExpiry}
                                 onChange={(e) => setCreateExpiry(e.target.value)}

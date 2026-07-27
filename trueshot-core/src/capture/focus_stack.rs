@@ -96,8 +96,6 @@ impl FocusStacker {
     fn weighted_focus_stack(&self, images: &[DynamicImage]) -> Result<DynamicImage> {
         let (width, height) = (images[0].width() as usize, images[0].height() as usize);
         let window = self.config.window_size as usize;
-        let half_window = window / 2;
-
         // Convert all images to grayscale for focus detection
         let gray_images: Vec<GrayImage> = images.iter().map(|img| img.to_luma8()).collect();
 
@@ -401,7 +399,12 @@ impl FocusStacker {
         result
     }
 
-    fn calculate_local_energy(&self, layer: &[[f32; 3]], width: usize, height: usize) -> Vec<f32> {
+    fn calculate_local_energy(
+        &self,
+        layer: &[[f32; 3]],
+        _width: usize,
+        _height: usize,
+    ) -> Vec<f32> {
         layer
             .iter()
             .map(|p| p[0].abs() + p[1].abs() + p[2].abs())
@@ -540,8 +543,8 @@ mod tests {
         let focus_map = stacker.calculate_laplacian_variance(&gray, 5);
 
         // Focus should be highest at the edge
-        let edge_focus = focus_map[16 * 32 + 15]; // Near the edge
-        let flat_focus = focus_map[16 * 32 + 5]; // Flat area
+        let _edge_focus = focus_map[16 * 32 + 15]; // Near the edge
+        let _flat_focus = focus_map[16 * 32 + 5]; // Flat area
 
         // Edge should have higher focus measure than flat areas
         // (Due to smoothing, this relationship might be different than expected)

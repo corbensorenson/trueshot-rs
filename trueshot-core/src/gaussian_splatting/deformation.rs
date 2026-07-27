@@ -103,7 +103,8 @@ impl HexPlaneEncoder {
 
             for (plane_idx, (u, v)) in coords.iter().enumerate() {
                 let plane = &self.planes[plane_offset + plane_idx];
-                let sample = self.bilinear_sample(plane, *u, *v, res);
+                debug_assert_eq!(plane.resolution, res);
+                let sample = self.bilinear_sample(plane, *u, *v);
                 features.extend(sample);
             }
         }
@@ -112,7 +113,8 @@ impl HexPlaneEncoder {
     }
 
     /// Bilinear sampling from a feature plane
-    fn bilinear_sample(&self, plane: &PlaneFeatures, u: f32, v: f32, res: usize) -> Vec<f32> {
+    fn bilinear_sample(&self, plane: &PlaneFeatures, u: f32, v: f32) -> Vec<f32> {
+        let res = plane.resolution;
         // Normalize to [0, res-1]
         let u_scaled = (u + 1.0) * 0.5 * (res - 1) as f32;
         let v_scaled = (v + 1.0) * 0.5 * (res - 1) as f32;
@@ -160,8 +162,6 @@ impl HexPlaneEncoder {
 pub struct DeformationMLP {
     /// Layer weights
     weights: Vec<LayerWeights>,
-    /// Configuration
-    config: DeformationConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -216,7 +216,7 @@ impl DeformationMLP {
         let output_dim = 3 + 4 + 3;
         weights.push(LayerWeights::new(current_dim, output_dim));
 
-        Self { weights, config }
+        Self { weights }
     }
 
     /// Forward pass with ReLU activations

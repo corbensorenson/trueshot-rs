@@ -6,14 +6,13 @@
 use crate::events::{EventBus, LogLevel, SystemEvent};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*};
 use tracing_subscriber::{layer::Context as LayerContext, registry::LookupSpan, Layer};
 
 // Global guard to keep file writer alive - using OnceLock for safety
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
-static INIT: Once = Once::new();
 
 pub struct EventBusLayer {
     bus: Arc<EventBus>,

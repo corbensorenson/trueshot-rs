@@ -99,7 +99,12 @@ impl RateLimiter {
         }
 
         let now = Instant::now();
-        let mut buckets = buckets.lock().unwrap();
+        let Ok(mut buckets) = crate::sync_lock::lock(buckets, "rate_limit.buckets") else {
+            return RateLimitDecision {
+                allowed: false,
+                retry_after_seconds: Some(60),
+            };
+        };
         if buckets.len() > 50_000 {
             purge_stale(&mut buckets, now, Duration::from_secs(3600));
         }
@@ -133,4 +138,25 @@ impl RateLimiter {
 
 fn purge_stale(buckets: &mut HashMap<String, Bucket>, now: Instant, max_age: Duration) {
     buckets.retain(|_, bucket| now.duration_since(bucket.last_seen) <= max_age);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn poisoned_rate_limit_state_fails_closed() {
+        let limiter = Arc::new(RateLimiter::new(60, 10, 60, 10));
+        let poisoned = limiter.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.ip_buckets.lock().expect("initial lock");
+            panic!("poison rate limiter");
+        })
+        .join();
+
+        let decision = limiter.check_ip("198.51.100.9");
+        assert!(!decision.allowed);
+        assert_eq!(decision.retry_after_seconds, Some(60));
+    }
 }

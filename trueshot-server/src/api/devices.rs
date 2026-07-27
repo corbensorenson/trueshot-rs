@@ -164,8 +164,14 @@ pub async fn get_all_devices(req: HttpRequest, state: web::Data<AppState>) -> im
         let tt_lock = state.turntable.lock().await;
         let connected = tt_lock.is_some();
         let angle = tt_lock.as_ref().map(|t| t.get_rotation()).unwrap_or(0.0);
-        let moving = *state.turntable_moving.lock().unwrap();
-        let tt_type = state.turntable_status.lock().unwrap().clone();
+        let moving = match crate::sync_lock::lock(&state.turntable_moving, "turntable.moving") {
+            Ok(moving) => *moving,
+            Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+        };
+        let tt_type = match crate::sync_lock::lock(&state.turntable_status, "turntable.status") {
+            Ok(status) => status.clone(),
+            Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+        };
 
         devices.push(UnifiedDevice {
             id: "turntable-main".to_string(),

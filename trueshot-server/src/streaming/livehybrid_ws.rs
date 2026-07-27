@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use uuid::Uuid;
 
-use crate::auth::{AuthContext, AuthError, AuthVerifier, Role, SESSION_COOKIE_NAME};
+use crate::auth::{AuthContext, AuthError, AuthManager, Role, SESSION_COOKIE_NAME};
 
 /// WebSocket streaming configuration
 #[derive(Clone, Debug)]
@@ -57,9 +57,9 @@ impl Default for StreamingConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StreamingRouterConfig {
-    pub auth: Arc<AuthVerifier>,
+    pub auth: Arc<AuthManager>,
     pub required_scopes: Vec<String>,
     pub allowed_origins: Option<HashSet<String>>,
     pub allow_missing_origin: bool,
@@ -69,7 +69,7 @@ pub struct StreamingRouterConfig {
 }
 
 impl StreamingRouterConfig {
-    pub fn new(auth: Arc<AuthVerifier>) -> Self {
+    pub fn new(auth: Arc<AuthManager>) -> Self {
         Self {
             auth,
             required_scopes: vec!["stream:read".to_string()],
@@ -377,7 +377,7 @@ pub async fn livehybrid_ws_handler(
         }
     };
 
-    let auth_ctx = match state.config.auth.verify_token(&token) {
+    let auth_ctx = match state.config.auth.verify_token(&token).await {
         Ok(ctx) => ctx,
         Err(AuthError::Expired) => {
             return (StatusCode::UNAUTHORIZED, "Auth token expired").into_response();
@@ -603,13 +603,13 @@ async fn wait_for_connect(
 }
 
 /// Create router for LiveHybrid streaming
-pub fn create_streaming_router(manager: Arc<StreamingSessionManager>) -> axum::Router {
+pub fn create_streaming_router(
+    manager: Arc<StreamingSessionManager>,
+    auth: Arc<AuthManager>,
+) -> axum::Router {
     create_streaming_router_with_config(
         manager,
-        StreamingRouterConfig::new(Arc::new(
-            AuthVerifier::new("trueshot")
-                .expect("Failed to initialize streaming auth verifier"),
-        )),
+        StreamingRouterConfig::new(auth),
     )
 }
 
@@ -668,6 +668,7 @@ mod tests {
     fn test_quality_bitrate() {
         assert!(StreamQuality::Ultra.bitrate_kbps() > StreamQuality::Low.bitrate_kbps());
     }
+
 }
 
 fn extract_token(headers: &HeaderMap, query: &WsQuery) -> Option<String> {

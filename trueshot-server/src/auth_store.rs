@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Row, SqlitePool};
 use std::path::Path;
 
@@ -8,6 +9,7 @@ pub struct StoredRefreshSession {
     pub subject: String,
     pub role: String,
     pub scopes: Vec<String>,
+    pub session_version: u64,
     pub expires_at: i64,
     pub issued_at: i64,
     pub last_seen: i64,
@@ -32,6 +34,14 @@ pub struct StoredUser {
     pub created_at: i64,
     pub last_login: Option<i64>,
     pub active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredLoginThrottle {
+    pub failed_attempts: i64,
+    pub window_started: i64,
+    pub locked_until: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +90,7 @@ pub struct ShareAnalyticsSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSharePublic {
     pub token_hash: String,
-    pub public_token: String,
+    pub public_alias_hash: String,
     pub short_code: String,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -94,7 +104,6 @@ pub struct StoredSharePublic {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicShareRecord {
     pub token_hash: String,
-    pub public_token: String,
     pub short_code: String,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -122,13 +131,67 @@ impl AuthStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create auth db dir: {}", parent.display()))?;
         }
-        let url = format!("sqlite://{}", path.display());
-        let pool = SqlitePool::connect(&url)
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePool::connect_with(options)
             .await
             .with_context(|| format!("Failed to open auth db: {}", path.display()))?;
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub async fn close_for_test(&self) {
+        self.pool.close().await;
+    }
+
+    #[cfg(test)]
+    pub async fn set_user_active_for_test(&self, user_id: &str, active: bool) -> Result<()> {
+        sqlx::query("UPDATE users SET active = ? WHERE id = ?;")
+            .bind(if active { 1 } else { 0 })
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn public_token_storage_for_test(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let row = sqlx::query(
+            "SELECT public_token, public_alias_hash FROM share_public WHERE token_hash = ?;",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get("public_token")?,
+                row.try_get("public_alias_hash")?,
+            ))
+        })
+        .transpose()
+    }
+
+    #[cfg(test)]
+    pub async fn restore_legacy_public_token_for_test(
+        &self,
+        token_hash: &str,
+        token: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE share_public SET public_token = ?, public_alias_hash = NULL WHERE token_hash = ?;",
+        )
+        .bind(token)
+        .bind(token_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -160,6 +223,49 @@ impl AuthStore {
             r#"
             CREATE INDEX IF NOT EXISTS refresh_sessions_expires_idx
             ON refresh_sessions(expires_at);
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        let refresh_columns = sqlx::query("PRAGMA table_info(refresh_sessions);")
+            .fetch_all(&self.pool)
+            .await?;
+        if !refresh_columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "session_version")
+        }) {
+            sqlx::query(
+                "ALTER TABLE refresh_sessions ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0;",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS access_subject_versions (
+                subject TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS revoked_access_tokens (
+                jti TEXT PRIMARY KEY,
+                expires_at INTEGER NOT NULL,
+                revoked_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS revoked_access_tokens_expires_idx
+            ON revoked_access_tokens(expires_at);
             "#,
         )
         .execute(&self.pool)
@@ -226,6 +332,28 @@ impl AuthStore {
 
         sqlx::query(
             r#"
+            CREATE TABLE IF NOT EXISTS login_failures (
+                identity_hash TEXT PRIMARY KEY,
+                failed_attempts INTEGER NOT NULL,
+                window_started INTEGER NOT NULL,
+                locked_until INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS login_failures_updated_idx
+            ON login_failures(updated_at);
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
             CREATE TABLE IF NOT EXISTS api_tokens (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -285,6 +413,26 @@ impl AuthStore {
                 updated_at INTEGER NOT NULL,
                 is_public INTEGER NOT NULL
             );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        let public_columns = sqlx::query("PRAGMA table_info(share_public);")
+            .fetch_all(&self.pool)
+            .await?;
+        if !public_columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "public_alias_hash")
+        }) {
+            sqlx::query("ALTER TABLE share_public ADD COLUMN public_alias_hash TEXT;")
+                .execute(&self.pool)
+                .await?;
+        }
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS share_public_alias_hash_idx
+            ON share_public(public_alias_hash)
+            WHERE public_alias_hash IS NOT NULL AND public_alias_hash != '';
             "#,
         )
         .execute(&self.pool)
@@ -366,14 +514,15 @@ impl AuthStore {
         sqlx::query(
             r#"
             INSERT INTO refresh_sessions
-            (refresh_hash, subject, role, scopes_json, expires_at, issued_at, last_seen, csrf_token)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            (refresh_hash, subject, role, scopes_json, session_version, expires_at, issued_at, last_seen, csrf_token)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             "#,
         )
         .bind(refresh_hash)
         .bind(&session.subject)
         .bind(&session.role)
         .bind(scopes_json)
+        .bind(i64::try_from(session.session_version).context("Session version exceeds SQLite range")?)
         .bind(session.expires_at)
         .bind(session.issued_at)
         .bind(session.last_seen)
@@ -389,7 +538,7 @@ impl AuthStore {
     ) -> Result<Option<StoredRefreshSession>> {
         let row = sqlx::query(
             r#"
-            SELECT subject, role, scopes_json, expires_at, issued_at, last_seen, csrf_token
+            SELECT subject, role, scopes_json, session_version, expires_at, issued_at, last_seen, csrf_token
             FROM refresh_sessions
             WHERE refresh_hash = ?;
             "#,
@@ -407,6 +556,8 @@ impl AuthStore {
             subject: row.try_get("subject")?,
             role: row.try_get("role")?,
             scopes,
+            session_version: u64::try_from(row.try_get::<i64, _>("session_version")?)
+                .context("Stored session version is negative")?,
             expires_at: row.try_get("expires_at")?,
             issued_at: row.try_get("issued_at")?,
             last_seen: row.try_get("last_seen")?,
@@ -432,6 +583,79 @@ impl AuthStore {
 
     pub async fn prune_refresh_sessions(&self, now: i64) -> Result<u64> {
         let result = sqlx::query("DELETE FROM refresh_sessions WHERE expires_at <= ?;")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn access_subject_version(&self, subject: &str) -> Result<u64> {
+        let version = sqlx::query_scalar::<_, i64>(
+            "SELECT version FROM access_subject_versions WHERE subject = ?;",
+        )
+        .bind(subject)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(0);
+        u64::try_from(version).context("Stored access-token subject version is negative")
+    }
+
+    pub async fn increment_access_subject_version(&self, subject: &str, now: i64) -> Result<u64> {
+        let version = sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO access_subject_versions (subject, version, updated_at)
+            VALUES (?, 1, ?)
+            ON CONFLICT(subject) DO UPDATE SET
+                version = CASE
+                    WHEN access_subject_versions.version < 9223372036854775807
+                        THEN access_subject_versions.version + 1
+                    ELSE access_subject_versions.version
+                END,
+                updated_at = excluded.updated_at
+            RETURNING version;
+            "#,
+        )
+        .bind(subject)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        if version == i64::MAX {
+            anyhow::bail!("Access-token subject version exhausted");
+        }
+        u64::try_from(version).context("Stored access-token subject version is negative")
+    }
+
+    pub async fn revoke_access_token(&self, jti: &str, expires_at: i64, now: i64) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO revoked_access_tokens (jti, expires_at, revoked_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(jti) DO UPDATE SET
+                expires_at = MAX(revoked_access_tokens.expires_at, excluded.expires_at),
+                revoked_at = MIN(revoked_access_tokens.revoked_at, excluded.revoked_at);
+            "#,
+        )
+        .bind(jti)
+        .bind(expires_at)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn access_token_is_revoked(&self, jti: &str, now: i64) -> Result<bool> {
+        let revoked = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM revoked_access_tokens WHERE jti = ? AND expires_at > ?;",
+        )
+        .bind(jti)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(revoked != 0)
+    }
+
+    pub async fn prune_revoked_access_tokens(&self, now: i64) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM revoked_access_tokens WHERE expires_at <= ?;")
             .bind(now)
             .execute(&self.pool)
             .await?;
@@ -580,10 +804,35 @@ impl AuthStore {
         let row = sqlx::query(
             r#"
             SELECT id, email, name, role, password_hash, created_at, last_login, active
-            FROM users WHERE email = ?;
+            FROM users WHERE email = ? COLLATE NOCASE;
             "#,
         )
         .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(StoredUser {
+            id: row.try_get("id")?,
+            email: row.try_get("email")?,
+            name: row.try_get("name")?,
+            role: row.try_get("role")?,
+            password_hash: row.try_get("password_hash")?,
+            created_at: row.try_get("created_at")?,
+            last_login: row.try_get("last_login")?,
+            active: row.try_get::<i64, _>("active")? == 1,
+        }))
+    }
+
+    pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<StoredUser>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, email, name, role, password_hash, created_at, last_login, active
+            FROM users WHERE id = ?;
+            "#,
+        )
+        .bind(user_id)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -605,6 +854,128 @@ impl AuthStore {
         sqlx::query("UPDATE users SET last_login = ? WHERE id = ?;")
             .bind(now)
             .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_login_throttle(
+        &self,
+        identity_hash: &str,
+    ) -> Result<Option<StoredLoginThrottle>> {
+        let row = sqlx::query(
+            r#"
+            SELECT failed_attempts, window_started, locked_until, updated_at
+            FROM login_failures
+            WHERE identity_hash = ?;
+            "#,
+        )
+        .bind(identity_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(StoredLoginThrottle {
+                failed_attempts: row.try_get("failed_attempts")?,
+                window_started: row.try_get("window_started")?,
+                locked_until: row.try_get("locked_until")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn record_login_failure(
+        &self,
+        identity_hash: &str,
+        now: i64,
+        window_seconds: i64,
+        threshold: i64,
+        base_lock_seconds: i64,
+        max_lock_seconds: i64,
+    ) -> Result<StoredLoginThrottle> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO login_failures
+                (identity_hash, failed_attempts, window_started, locked_until, updated_at)
+            VALUES (?, 1, ?, 0, ?)
+            ON CONFLICT(identity_hash) DO UPDATE SET
+                locked_until = CASE
+                    WHEN excluded.updated_at - login_failures.window_started >= ?
+                        THEN 0
+                    WHEN login_failures.failed_attempts + 1 >= ?
+                        THEN MAX(
+                            login_failures.locked_until,
+                            excluded.updated_at + MIN(
+                                ?,
+                                ? * (1 << MIN(
+                                    10,
+                                    login_failures.failed_attempts + 1 - ?
+                                ))
+                            )
+                        )
+                    ELSE login_failures.locked_until
+                END,
+                failed_attempts = CASE
+                    WHEN excluded.updated_at - login_failures.window_started >= ?
+                        THEN 1
+                    ELSE MIN(login_failures.failed_attempts + 1, 1000000)
+                END,
+                window_started = CASE
+                    WHEN excluded.updated_at - login_failures.window_started >= ?
+                        THEN excluded.updated_at
+                    ELSE login_failures.window_started
+                END,
+                updated_at = excluded.updated_at
+            RETURNING failed_attempts, window_started, locked_until, updated_at;
+            "#,
+        )
+        .bind(identity_hash)
+        .bind(now)
+        .bind(now)
+        .bind(window_seconds)
+        .bind(threshold)
+        .bind(max_lock_seconds)
+        .bind(base_lock_seconds)
+        .bind(threshold)
+        .bind(window_seconds)
+        .bind(window_seconds)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(StoredLoginThrottle {
+            failed_attempts: row.try_get("failed_attempts")?,
+            window_started: row.try_get("window_started")?,
+            locked_until: row.try_get("locked_until")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+
+    pub async fn clear_login_failures(&self, identity_hash: &str) -> Result<()> {
+        sqlx::query("DELETE FROM login_failures WHERE identity_hash = ?;")
+            .bind(identity_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn prune_login_failures(&self, cutoff: i64) -> Result<u64> {
+        let result =
+            sqlx::query("DELETE FROM login_failures WHERE updated_at < ? AND locked_until < ?;")
+                .bind(cutoff)
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected())
+    }
+
+    #[cfg(test)]
+    pub async fn set_login_lock_for_test(
+        &self,
+        identity_hash: &str,
+        locked_until: i64,
+    ) -> Result<()> {
+        sqlx::query("UPDATE login_failures SET locked_until = ? WHERE identity_hash = ?;")
+            .bind(locked_until)
+            .bind(identity_hash)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -900,6 +1271,7 @@ impl AuthStore {
             INSERT INTO share_public (
                 token_hash,
                 public_token,
+                public_alias_hash,
                 short_code,
                 title,
                 description,
@@ -909,9 +1281,10 @@ impl AuthStore {
                 updated_at,
                 is_public
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(token_hash) DO UPDATE SET
-                public_token = excluded.public_token,
+                public_token = '',
+                public_alias_hash = excluded.public_alias_hash,
                 short_code = excluded.short_code,
                 title = excluded.title,
                 description = excluded.description,
@@ -922,7 +1295,7 @@ impl AuthStore {
             "#,
         )
         .bind(&entry.token_hash)
-        .bind(&entry.public_token)
+        .bind(&entry.public_alias_hash)
         .bind(&entry.short_code)
         .bind(&entry.title)
         .bind(&entry.description)
@@ -936,10 +1309,74 @@ impl AuthStore {
         Ok(())
     }
 
+    pub async fn public_share_alias_states(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        let rows = sqlx::query(
+            "SELECT token_hash, public_token, public_alias_hash FROM share_public ORDER BY token_hash;",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("token_hash")?,
+                    row.try_get("public_token")?,
+                    row.try_get("public_alias_hash")?,
+                ))
+            })
+            .collect()
+    }
+
+    pub async fn begin_public_token_scrub(&self) -> Result<()> {
+        sqlx::query("PRAGMA secure_delete = ON;")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn finish_public_token_scrub(&self) -> Result<()> {
+        let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute(&self.pool)
+            .await;
+        sqlx::query("VACUUM;").execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn set_public_alias_hash(
+        &self,
+        token_hash: &str,
+        public_alias_hash: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE share_public
+            SET public_alias_hash = ?, public_token = ''
+            WHERE token_hash = ?;
+            "#,
+        )
+        .bind(public_alias_hash)
+        .bind(token_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn resolve_public_alias_hash(
+        &self,
+        public_alias_hash: &str,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT token_hash FROM share_public WHERE public_alias_hash = ? LIMIT 1;",
+        )
+        .bind(public_alias_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn get_share_public(&self, token_hash: &str) -> Result<Option<StoredSharePublic>> {
         let row = sqlx::query(
             r#"
-            SELECT token_hash, public_token, short_code, title, description, tags_json, cover_path, created_at, updated_at, is_public
+            SELECT token_hash, COALESCE(public_alias_hash, '') AS public_alias_hash, short_code, title, description, tags_json, cover_path, created_at, updated_at, is_public
             FROM share_public
             WHERE token_hash = ?;
             "#,
@@ -955,7 +1392,7 @@ impl AuthStore {
         let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
         Ok(Some(StoredSharePublic {
             token_hash: row.try_get("token_hash")?,
-            public_token: row.try_get("public_token")?,
+            public_alias_hash: row.try_get("public_alias_hash")?,
             short_code: row.try_get("short_code")?,
             title: row.try_get("title")?,
             description: row.try_get("description")?,
@@ -973,7 +1410,7 @@ impl AuthStore {
     ) -> Result<Option<StoredSharePublic>> {
         let row = sqlx::query(
             r#"
-            SELECT token_hash, public_token, short_code, title, description, tags_json, cover_path, created_at, updated_at, is_public
+            SELECT token_hash, COALESCE(public_alias_hash, '') AS public_alias_hash, short_code, title, description, tags_json, cover_path, created_at, updated_at, is_public
             FROM share_public
             WHERE short_code = ?;
             "#,
@@ -989,7 +1426,7 @@ impl AuthStore {
         let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
         Ok(Some(StoredSharePublic {
             token_hash: row.try_get("token_hash")?,
-            public_token: row.try_get("public_token")?,
+            public_alias_hash: row.try_get("public_alias_hash")?,
             short_code: row.try_get("short_code")?,
             title: row.try_get("title")?,
             description: row.try_get("description")?,
@@ -1013,7 +1450,6 @@ impl AuthStore {
             r#"
             SELECT
                 sp.token_hash,
-                sp.public_token,
                 sp.short_code,
                 sp.title,
                 sp.description,
@@ -1063,7 +1499,6 @@ impl AuthStore {
             let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
             items.push(PublicShareRecord {
                 token_hash: row.try_get("token_hash")?,
-                public_token: row.try_get("public_token")?,
                 short_code: row.try_get("short_code")?,
                 title: row.try_get("title")?,
                 description: row.try_get("description")?,
@@ -1083,6 +1518,7 @@ impl AuthStore {
         Ok(items)
     }
 
+    #[allow(dead_code)]
     pub async fn revoke_share_link(&self, token_hash: &str) -> Result<u64> {
         let res = sqlx::query("UPDATE share_links SET revoked = 1 WHERE token_hash = ?;")
             .bind(token_hash)
@@ -1091,6 +1527,7 @@ impl AuthStore {
         Ok(res.rows_affected())
     }
 
+    #[allow(dead_code)]
     pub async fn prune_share_links(&self, now: i64) -> Result<u64> {
         let res = sqlx::query("DELETE FROM share_links WHERE expires_at <= ? OR revoked = 1;")
             .bind(now)
@@ -1113,5 +1550,65 @@ fn row_to_share_link(row: sqlx::sqlite::SqliteRow) -> StoredShareLink {
         allow_embed: row.get::<i64, _>("allow_embed") != 0,
         revoked: row.get::<i64, _>("revoked") != 0,
         last_access: row.get("last_access"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn migration_adds_refresh_generation_to_existing_database() {
+        let directory = tempfile::tempdir().expect("temporary auth directory");
+        let path = directory.path().join("auth.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let legacy = SqlitePool::connect_with(options)
+            .await
+            .expect("legacy auth database");
+        sqlx::query(
+            r#"
+            CREATE TABLE refresh_sessions (
+                refresh_hash TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                role TEXT NOT NULL,
+                scopes_json TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                issued_at INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                csrf_token TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&legacy)
+        .await
+        .expect("legacy refresh schema");
+        legacy.close().await;
+
+        let store = AuthStore::new(&path).await.expect("migrated auth store");
+        let session = StoredRefreshSession {
+            subject: "operator".to_string(),
+            role: "Admin".to_string(),
+            scopes: vec!["*".to_string()],
+            session_version: 7,
+            expires_at: 2_000,
+            issued_at: 1_000,
+            last_seen: 1_000,
+            csrf_token: "csrf".to_string(),
+        };
+        store
+            .insert_refresh_session("refresh", &session)
+            .await
+            .expect("insert versioned refresh");
+        assert_eq!(
+            store
+                .get_refresh_session("refresh")
+                .await
+                .expect("read refresh")
+                .expect("stored refresh")
+                .session_version,
+            7
+        );
     }
 }

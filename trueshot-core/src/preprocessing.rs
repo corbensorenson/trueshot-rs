@@ -580,6 +580,10 @@ fn compute_phase_correlation(ref_frame: &Array3<f64>, frame: &Array3<f64>) -> (f
 ///
 /// # Returns
 /// Rescaled Bayer frame with preserved RGGB pattern
+#[expect(
+    dead_code,
+    reason = "legacy Bayer-space alignment baseline retained for regression comparisons"
+)]
 fn rescale_bayer_frame(frame: &Array3<f64>, scale: f64) -> Result<Array3<f64>> {
     let (height, width, _) = frame.dim();
     let mut rescaled = Array3::<f64>::zeros((height, width, 1));
@@ -694,6 +698,10 @@ fn get_bayer_color_local(y: usize, x: usize) -> usize {
 /// We use simple bilinear interpolation without trying to preserve the Bayer pattern.
 /// The Bayer pattern will be "broken" after transformation, but that's OK because
 /// we'll do joint demosaicing later which handles this correctly.
+#[expect(
+    dead_code,
+    reason = "legacy Bayer-space alignment baseline retained for regression comparisons"
+)]
 fn shift_and_scale_frame(frame: &Array3<f64>, dx: f64, dy: f64, scale: f64) -> Array3<f64> {
     let (height, width, channels) = frame.dim();
 

@@ -31,9 +31,6 @@ pub fn gpu_collapse_pixels(
         );
     }
 
-    let total_pixels = height
-        .checked_mul(width)
-        .context("Image dimensions overflow")?;
     let num_pixels = pixel_coords.len();
 
     let images_f32 = flatten_images_n_major(images)?;

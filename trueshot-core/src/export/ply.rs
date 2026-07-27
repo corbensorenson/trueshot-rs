@@ -40,8 +40,17 @@ impl Default for PlyExportOptions {
 pub fn export_ply(mesh: &Mesh, path: &Path, options: &PlyExportOptions) -> Result<()> {
     let file = std::fs::File::create(path)
         .with_context(|| format!("Failed to create PLY file: {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
+    export_ply_to_writer(mesh, file, options)?;
+    write_provenance_for_export(path)?;
+    Ok(())
+}
 
+pub fn export_ply_to_writer<W: Write>(
+    mesh: &Mesh,
+    writer: W,
+    options: &PlyExportOptions,
+) -> Result<()> {
+    let mut writer = BufWriter::new(writer);
     // Write header
     writeln!(writer, "ply")?;
 
@@ -94,7 +103,6 @@ pub fn export_ply(mesh: &Mesh, path: &Path, options: &PlyExportOptions) -> Resul
     }
 
     writer.flush()?;
-    write_provenance_for_export(path)?;
     Ok(())
 }
 

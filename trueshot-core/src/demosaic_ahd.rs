@@ -3,7 +3,7 @@
 // Reference implementation: dcraw by Dave Coffin
 
 use anyhow::{Context, Result};
-use ndarray::Array3;
+use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 
 // Sized to keep each worker's directional RGB/Lab/homogeneity working set near
@@ -12,7 +12,11 @@ const TS: usize = 160;
 const TILE_OVERLAP: usize = 6;
 const TILE_STEP: usize = TS - TILE_OVERLAP;
 const OUTPUT_BORDER: usize = 5;
-const HOMOGENEITY_DECISION_MARGIN: u32 = 1;
+const CIELAB_MATRIX_SHIFT: u32 = 11;
+const CIELAB_MATRIX_SCALE: i32 = 1 << CIELAB_MATRIX_SHIFT;
+const CIELAB_MATRIX_MAX: i32 = 8_191;
+const CLASSIFIER_MAX: f32 = 65_535.0;
+const CLASSIFIER_DARK_THRESHOLD: i32 = 1_310;
 
 #[inline]
 fn tile_rgb_index(direction: usize, row: usize, col: usize, channel: usize) -> usize {
@@ -62,68 +66,217 @@ fn ulim(val: f32, a: f32, b: f32) -> f32 {
 /// Convert RGB to CIELab color space
 /// This is used for homogeneity detection
 struct CieLabConverter {
-    cbrt: Vec<i16>,
-    xyz_cam: [[f32; 4]; 3],
+    cbrt: Vec<i32>,
+    xyz_cam: [[i32; 4]; 3],
 }
 
 impl CieLabConverter {
-    fn new(rgb_cam: &[[f32; 4]; 3]) -> Self {
-        // Precompute cube root lookup table for 0.0-1.0 range
-        // Use 16-bit precision for lookup (65536 entries)
-        let mut cbrt = vec![0i16; 65536];
-        for i in 0..65536 {
-            let r = i as f32 / 65535.0;
-            let cbrt_val = if r > 0.008856 {
-                r.powf(1.0 / 3.0)
-            } else {
-                7.787 * r + 16.0 / 116.0
-            };
-            cbrt[i] = (cbrt_val * 32767.0).round() as i16;
-        }
-
-        // XYZ from RGB matrix (D65 white point)
-        const XYZ_RGB: [[f32; 3]; 3] = [
-            [0.412453, 0.357580, 0.180423],
-            [0.212671, 0.715160, 0.072169],
-            [0.019334, 0.119193, 0.950227],
-        ];
-        const D65_WHITE: [f32; 3] = [0.950456, 1.0, 1.088754];
-
-        // Compute xyz_cam = xyz_rgb * rgb_cam / d65_white
-        let mut xyz_cam = [[0.0f32; 4]; 3];
-        for i in 0..3 {
-            for j in 0..4 {
-                for k in 0..3 {
-                    xyz_cam[i][j] += XYZ_RGB[i][k] * rgb_cam[k][j] / D65_WHITE[i];
-                }
-            }
-        }
-
-        Self { cbrt, xyz_cam }
+    fn new(rgb_cam: &[[f32; 4]; 3]) -> Result<Self> {
+        Ok(Self {
+            cbrt: cielab_cbrt_lut(),
+            xyz_cam: quantized_xyz_camera_matrix(rgb_cam)?,
+        })
     }
 
+    #[cfg(test)]
     fn convert(&self, rgb: &[f32; 3]) -> [i16; 3] {
-        let mut xyz = [0.0f32; 3];
-        for channel in 0..3 {
-            xyz[0] += self.xyz_cam[0][channel] * rgb[channel];
-            xyz[1] += self.xyz_cam[1][channel] * rgb[channel];
-            xyz[2] += self.xyz_cam[2][channel] * rgb[channel];
+        self.convert_quantized(&rgb.map(|value| classifier_quantize(value)))
+    }
+
+    fn convert_quantized(&self, rgb_u16: &[i32; 3]) -> [i16; 3] {
+        let mut roots = [0i32; 3];
+        for (row, root) in roots.iter_mut().enumerate() {
+            let dot = (0..3)
+                .map(|channel| i64::from(self.xyz_cam[row][channel]) * i64::from(rgb_u16[channel]))
+                .sum::<i64>();
+            let xyz =
+                div_round_signed_i64(dot, i64::from(CIELAB_MATRIX_SCALE)).clamp(0, 65_535) as usize;
+            *root = self.cbrt[xyz];
         }
-        let xyz_idx = xyz.map(|value| (clip(value) * 65_535.0) as usize);
 
-        let xyz_cbrt = [
-            self.cbrt[xyz_idx[0]] as f32 / 32767.0,
-            self.cbrt[xyz_idx[1]] as f32 / 32767.0,
-            self.cbrt[xyz_idx[2]] as f32 / 32767.0,
-        ];
-
-        // Scale Lab by 64 while retaining the full range inside i16.
+        // Integer arithmetic makes CPU and Metal classification independent of
+        // fused floating-point operations and float-to-index boundary behavior.
         [
-            ((116.0 * xyz_cbrt[1] - 16.0) * 64.0).round() as i16,
-            (500.0 * (xyz_cbrt[0] - xyz_cbrt[1]) * 64.0).round() as i16,
-            (200.0 * (xyz_cbrt[1] - xyz_cbrt[2]) * 64.0).round() as i16,
+            div_round_signed_i32((116 * roots[1] - 16 * 32_767) * 64, 32_767) as i16,
+            div_round_signed_i32(500 * (roots[0] - roots[1]) * 64, 32_767) as i16,
+            div_round_signed_i32(200 * (roots[1] - roots[2]) * 64, 32_767) as i16,
         ]
     }
+}
+
+pub(crate) fn cielab_cbrt_lut() -> Vec<i32> {
+    (0..65_536)
+        .map(|index| {
+            let value = index as f32 / 65_535.0;
+            let transformed = if value > 0.008_856 {
+                value.powf(1.0 / 3.0)
+            } else {
+                7.787 * value + 16.0 / 116.0
+            };
+            (transformed * 32_767.0).round() as i32
+        })
+        .collect()
+}
+
+pub(crate) fn quantized_xyz_camera_matrix(rgb_cam: &[[f32; 4]; 3]) -> Result<[[i32; 4]; 3]> {
+    const XYZ_RGB: [[f32; 3]; 3] = [
+        [0.412_453, 0.357_580, 0.180_423],
+        [0.212_671, 0.715_160, 0.072_169],
+        [0.019_334, 0.119_193, 0.950_227],
+    ];
+    const D65_WHITE: [f32; 3] = [0.950_456, 1.0, 1.088_754];
+    let mut output = [[0i32; 4]; 3];
+    for row in 0..3 {
+        for column in 0..4 {
+            let value = (0..3)
+                .map(|channel| XYZ_RGB[row][channel] * rgb_cam[channel][column] / D65_WHITE[row])
+                .sum::<f32>();
+            let quantized = (value * CIELAB_MATRIX_SCALE as f32).round();
+            if !quantized.is_finite() || quantized.abs() > CIELAB_MATRIX_MAX as f32 {
+                anyhow::bail!(
+                    "camera-to-XYZ matrix coefficient ({row}, {column}) is outside the fixed-point classifier range"
+                );
+            }
+            output[row][column] = quantized as i32;
+        }
+    }
+    Ok(output)
+}
+
+#[inline]
+fn div_round_signed_i32(numerator: i32, denominator: i32) -> i32 {
+    if numerator < 0 {
+        -((-numerator + denominator / 2) / denominator)
+    } else {
+        (numerator + denominator / 2) / denominator
+    }
+}
+
+#[inline]
+fn div_round_signed_i64(numerator: i64, denominator: i64) -> i64 {
+    if numerator < 0 {
+        -((-numerator + denominator / 2) / denominator)
+    } else {
+        (numerator + denominator / 2) / denominator
+    }
+}
+
+#[inline]
+fn squared_chroma_difference(first_a: i16, first_b: i16, second_a: i16, second_b: i16) -> u32 {
+    let da = (i32::from(first_a) - i32::from(second_a)).unsigned_abs() >> 1;
+    let db = (i32::from(first_b) - i32::from(second_b)).unsigned_abs() >> 1;
+    da * da + db * db
+}
+
+#[inline]
+fn classifier_quantize(value: f32) -> i32 {
+    (clip(value) * CLASSIFIER_MAX) as i32
+}
+
+#[inline]
+fn classifier_sample(image: &Array3<f32>, row: usize, col: usize) -> i32 {
+    classifier_quantize(image[[row, col, 0]])
+}
+
+fn classifier_green(image: &Array3<f32>, row: usize, col: usize, direction: usize) -> i32 {
+    let (height, width, _) = image.dim();
+    let original = classifier_sample(image, row, col);
+    if fc_rgb(row, col) == 1 {
+        return original;
+    }
+    let dark = original < CLASSIFIER_DARK_THRESHOLD;
+    if direction == 0 && col > 1 && col + 2 < width {
+        let left = classifier_sample(image, row, col - 1);
+        let right = classifier_sample(image, row, col + 1);
+        let value = if dark {
+            div_round_signed_i32(left + right, 2)
+        } else {
+            div_round_signed_i32(
+                2 * (left + original + right)
+                    - classifier_sample(image, row, col - 2)
+                    - classifier_sample(image, row, col + 2),
+                4,
+            )
+        };
+        return value.clamp(left.min(right), left.max(right));
+    }
+    if direction == 1 && row > 1 && row + 2 < height {
+        let up = classifier_sample(image, row - 1, col);
+        let down = classifier_sample(image, row + 1, col);
+        let value = if dark {
+            div_round_signed_i32(up + down, 2)
+        } else {
+            div_round_signed_i32(
+                2 * (up + original + down)
+                    - classifier_sample(image, row - 2, col)
+                    - classifier_sample(image, row + 2, col),
+                4,
+            )
+        };
+        return value.clamp(up.min(down), up.max(down));
+    }
+    original
+}
+
+fn classifier_rgb(image: &Array3<f32>, row: usize, col: usize, direction: usize) -> [i32; 3] {
+    let (height, width, _) = image.dim();
+    let channel = fc_rgb(row, col);
+    let original = classifier_sample(image, row, col);
+    let dark = original < CLASSIFIER_DARK_THRESHOLD;
+    let green = classifier_green(image, row, col, direction);
+    let mut rgb = [0i32; 3];
+    rgb[channel] = original;
+    rgb[1] = green;
+
+    if channel == 1 && row > 0 && row + 1 < height && col > 0 && col + 1 < width {
+        let adjacent_channel = fc_rgb(row + 1, col);
+        let horizontal = if dark {
+            div_round_signed_i32(
+                classifier_sample(image, row, col - 1) + classifier_sample(image, row, col + 1),
+                2,
+            )
+        } else {
+            green
+                + div_round_signed_i32(
+                    classifier_sample(image, row, col - 1) + classifier_sample(image, row, col + 1)
+                        - classifier_green(image, row, col - 1, direction)
+                        - classifier_green(image, row, col + 1, direction),
+                    2,
+                )
+        };
+        let vertical = if dark {
+            div_round_signed_i32(
+                classifier_sample(image, row - 1, col) + classifier_sample(image, row + 1, col),
+                2,
+            )
+        } else {
+            green
+                + div_round_signed_i32(
+                    classifier_sample(image, row - 1, col) + classifier_sample(image, row + 1, col)
+                        - classifier_green(image, row - 1, col, direction)
+                        - classifier_green(image, row + 1, col, direction),
+                    2,
+                )
+        };
+        rgb[2 - adjacent_channel] = horizontal.clamp(0, 65_535);
+        rgb[adjacent_channel] = vertical.clamp(0, 65_535);
+    } else if channel != 1 && row > 0 && row + 1 < height && col > 0 && col + 1 < width {
+        let source_sum = classifier_sample(image, row - 1, col - 1)
+            + classifier_sample(image, row - 1, col + 1)
+            + classifier_sample(image, row + 1, col - 1)
+            + classifier_sample(image, row + 1, col + 1);
+        let other = if dark {
+            div_round_signed_i32(source_sum, 4)
+        } else {
+            let green_sum = classifier_green(image, row - 1, col - 1, direction)
+                + classifier_green(image, row - 1, col + 1, direction)
+                + classifier_green(image, row + 1, col - 1, direction)
+                + classifier_green(image, row + 1, col + 1, direction);
+            green + div_round_signed_i32(source_sum - green_sum, 4)
+        };
+        rgb[2 - channel] = other.clamp(0, 65_535);
+    }
+    rgb
 }
 
 fn demosaic_bilinear_pixel(image: &Array3<f32>, row: usize, col: usize) -> [f32; 3] {
@@ -215,7 +368,7 @@ pub fn ahd_demosaic_f32_owned(
     }
 
     // Initialize CIELab converter
-    let cielab = CieLabConverter::new(rgb_cam);
+    let cielab = CieLabConverter::new(rgb_cam)?;
 
     // Allocate output image (f32 for precision)
     let mut output = Array3::<f32>::zeros((height, width, 3));
@@ -293,6 +446,77 @@ pub fn ahd_demosaic_f32_owned(
     }
     tracing::info!("AHD demosaicing complete");
     Ok(output)
+}
+
+/// Recompute the exact AHD direction decision map used by the CPU path.
+///
+/// Values are `0` for an equal-score average, `1` for horizontal, and `2` for
+/// vertical. This qualification-only diagnostic intentionally excludes timing
+/// measurements from the production demosaic benchmark.
+pub fn ahd_direction_map_f32(image: &Array3<f32>, rgb_cam: &[[f32; 4]; 3]) -> Result<Array2<u8>> {
+    let (height, width, channels) = image.dim();
+    if channels != 1 || height == 0 || width == 0 {
+        anyhow::bail!("AHD direction diagnostics require non-empty single-channel Bayer input");
+    }
+    if image.iter().any(|value| !value.is_finite() || *value < 0.0) {
+        anyhow::bail!("AHD direction diagnostics require finite, non-negative values");
+    }
+    let range_scale = ahd_normalization_scale(image.iter().copied().fold(1.0f32, f32::max))?;
+    let normalized;
+    let image = if range_scale == 1.0 {
+        image
+    } else {
+        normalized = image.mapv(|value| value / range_scale);
+        &normalized
+    };
+    let converter = CieLabConverter::new(rgb_cam)?;
+    let mut directions = Array2::<u8>::zeros((height, width));
+    let interior_start = OUTPUT_BORDER.min(height);
+    let interior_end = height.saturating_sub(OUTPUT_BORDER);
+    if interior_start >= interior_end || width <= OUTPUT_BORDER * 2 {
+        return Ok(directions);
+    }
+
+    let mut scratch = AhdScratch::new();
+    for output_y0 in (interior_start..interior_end).step_by(TILE_STEP) {
+        let output_y1 = (output_y0 + TILE_STEP).min(interior_end);
+        let top = output_y0 - 3;
+        let mut left = 2;
+        while left < width.saturating_sub(OUTPUT_BORDER) {
+            let tile_height = (top + TS).min(height - 2);
+            let tile_width = (left + TS).min(width - 2);
+            scratch.clear();
+            build_classifier_lab(
+                image,
+                &mut scratch.lab,
+                &converter,
+                top,
+                left,
+                tile_height,
+                tile_width,
+            );
+            build_homogeneity_maps(
+                &scratch.lab,
+                &mut scratch.homo,
+                top,
+                left,
+                tile_height,
+                tile_width,
+            );
+            write_direction_map(
+                &mut directions,
+                &scratch.homo,
+                output_y0,
+                output_y1,
+                top,
+                left,
+                tile_height,
+                tile_width,
+            );
+            left += TILE_STEP;
+        }
+    }
+    Ok(directions)
 }
 
 /// Return the exact power-of-two scale used to normalize HDR-linear AHD input.
@@ -474,10 +698,9 @@ fn interpolate_green(
                     (image[[row, col - 1, 0]] + image[[row, col + 1, 0]]) * 0.5
                 } else {
                     // Edge-directed interpolation for normal areas
-                    ((image[[row, col - 1, 0]] + image[[row, col, 0]] + image[[row, col + 1, 0]])
-                        * 2.0
-                        - image[[row, col - 2, 0]]
-                        - image[[row, col + 2, 0]])
+                    let triple = (image[[row, col - 1, 0]] + image[[row, col, 0]])
+                        + image[[row, col + 1, 0]];
+                    (2.0f32.mul_add(triple, -image[[row, col - 2, 0]]) - image[[row, col + 2, 0]])
                         * 0.25
                 };
                 rgb[tile_rgb_index(0, tr, tc, 1)] =
@@ -494,10 +717,9 @@ fn interpolate_green(
                     (image[[row - 1, col, 0]] + image[[row + 1, col, 0]]) * 0.5
                 } else {
                     // Edge-directed interpolation for normal areas
-                    ((image[[row - 1, col, 0]] + image[[row, col, 0]] + image[[row + 1, col, 0]])
-                        * 2.0
-                        - image[[row - 2, col, 0]]
-                        - image[[row + 2, col, 0]])
+                    let triple = (image[[row - 1, col, 0]] + image[[row, col, 0]])
+                        + image[[row + 1, col, 0]];
+                    (2.0f32.mul_add(triple, -image[[row - 2, col, 0]]) - image[[row + 2, col, 0]])
                         * 0.25
                 };
                 rgb[tile_rgb_index(1, tr, tc, 1)] =
@@ -557,11 +779,10 @@ fn interpolate_rb_and_lab(
                             (image[[row, col - 1, 0]] + image[[row, col + 1, 0]]) * 0.5
                         } else {
                             // Edge-directed interpolation
-                            rgb[tile_rgb_index(d, tr, tc, 1)]
-                                + ((image[[row, col - 1, 0]] + image[[row, col + 1, 0]]
-                                    - rgb[tile_rgb_index(d, tr, tc - 1, 1)]
-                                    - rgb[tile_rgb_index(d, tr, tc + 1, 1)])
-                                    * 0.5)
+                            let delta = (image[[row, col - 1, 0]] + image[[row, col + 1, 0]])
+                                - rgb[tile_rgb_index(d, tr, tc - 1, 1)]
+                                - rgb[tile_rgb_index(d, tr, tc + 1, 1)];
+                            delta.mul_add(0.5, rgb[tile_rgb_index(d, tr, tc, 1)])
                         };
                         rgb[tile_rgb_index(d, tr, tc, 2 - c2)] = clip(val);
                     }
@@ -573,11 +794,10 @@ fn interpolate_rb_and_lab(
                             (image[[row - 1, col, 0]] + image[[row + 1, col, 0]]) * 0.5
                         } else {
                             // Edge-directed interpolation
-                            rgb[tile_rgb_index(d, tr, tc, 1)]
-                                + ((image[[row - 1, col, 0]] + image[[row + 1, col, 0]]
-                                    - rgb[tile_rgb_index(d, tr - 1, tc, 1)]
-                                    - rgb[tile_rgb_index(d, tr + 1, tc, 1)])
-                                    * 0.5)
+                            let delta = (image[[row - 1, col, 0]] + image[[row + 1, col, 0]])
+                                - rgb[tile_rgb_index(d, tr - 1, tc, 1)]
+                                - rgb[tile_rgb_index(d, tr + 1, tc, 1)];
+                            delta.mul_add(0.5, rgb[tile_rgb_index(d, tr, tc, 1)])
                         };
                         rgb[tile_rgb_index(d, tr, tc, c2)] = clip(val);
                     }
@@ -605,16 +825,16 @@ fn interpolate_rb_and_lab(
                                 * 0.25
                         } else {
                             // Edge-directed interpolation
-                            rgb[tile_rgb_index(d, tr, tc, 1)]
-                                + ((image[[row - 1, col - 1, 0]]
-                                    + image[[row - 1, col + 1, 0]]
-                                    + image[[row + 1, col - 1, 0]]
-                                    + image[[row + 1, col + 1, 0]]
-                                    - rgb[tile_rgb_index(d, tr - 1, tc - 1, 1)]
-                                    - rgb[tile_rgb_index(d, tr - 1, tc + 1, 1)]
-                                    - rgb[tile_rgb_index(d, tr + 1, tc - 1, 1)]
-                                    - rgb[tile_rgb_index(d, tr + 1, tc + 1, 1)])
-                                    * 0.25)
+                            let source_sum = ((image[[row - 1, col - 1, 0]]
+                                + image[[row - 1, col + 1, 0]])
+                                + image[[row + 1, col - 1, 0]])
+                                + image[[row + 1, col + 1, 0]];
+                            let green_sum = ((rgb[tile_rgb_index(d, tr - 1, tc - 1, 1)]
+                                + rgb[tile_rgb_index(d, tr - 1, tc + 1, 1)])
+                                + rgb[tile_rgb_index(d, tr + 1, tc - 1, 1)])
+                                + rgb[tile_rgb_index(d, tr + 1, tc + 1, 1)];
+                            (source_sum - green_sum)
+                                .mul_add(0.25, rgb[tile_rgb_index(d, tr, tc, 1)])
                         };
                         rgb[tile_rgb_index(d, tr, tc, other_color)] = clip(val);
                     }
@@ -625,14 +845,40 @@ fn interpolate_rb_and_lab(
                 rgb[tile_rgb_index(d, tr, tc, rgb_c)] = image[[row, col, 0]];
 
                 // Convert to CIELab
-                let rgb_pixel = [
-                    rgb[tile_rgb_index(d, tr, tc, 0)],
-                    rgb[tile_rgb_index(d, tr, tc, 1)],
-                    rgb[tile_rgb_index(d, tr, tc, 2)],
-                ];
-                let lab_pixel = cielab.convert(&rgb_pixel);
+                let lab_pixel = cielab.convert_quantized(&classifier_rgb(image, row, col, d));
                 for channel in 0..3 {
                     lab[tile_rgb_index(d, tr, tc, channel)] = lab_pixel[channel];
+                }
+            }
+        }
+    }
+}
+
+fn build_classifier_lab(
+    image: &Array3<f32>,
+    lab: &mut [i16],
+    converter: &CieLabConverter,
+    top: usize,
+    left: usize,
+    tile_height: usize,
+    tile_width: usize,
+) {
+    let (height, width, _) = image.dim();
+    for direction in 0..2 {
+        for row in (top + 1)..(tile_height.saturating_sub(1)).min(height - 1) {
+            let tile_row = row - top;
+            if tile_row >= TS - 1 {
+                break;
+            }
+            for col in (left + 1)..(tile_width.saturating_sub(1)).min(width - 1) {
+                let tile_col = col - left;
+                if tile_col >= TS - 1 {
+                    break;
+                }
+                let pixel =
+                    converter.convert_quantized(&classifier_rgb(image, row, col, direction));
+                for channel in 0..3 {
+                    lab[tile_rgb_index(direction, tile_row, tile_col, channel)] = pixel[channel];
                 }
             }
         }
@@ -689,12 +935,12 @@ fn build_homogeneity_maps(
                     ldiff[d][i] = (lab[tile_rgb_index(d, tr, tc, 0)]
                         - lab[tile_rgb_index(d, nr, nc, 0)])
                     .unsigned_abs() as u32;
-                    let a_difference = lab[tile_rgb_index(d, tr, tc, 1)] as i32
-                        - lab[tile_rgb_index(d, nr, nc, 1)] as i32;
-                    let b_difference = lab[tile_rgb_index(d, tr, tc, 2)] as i32
-                        - lab[tile_rgb_index(d, nr, nc, 2)] as i32;
-                    abdiff[d][i] =
-                        (a_difference * a_difference + b_difference * b_difference) as u32;
+                    abdiff[d][i] = squared_chroma_difference(
+                        lab[tile_rgb_index(d, tr, tc, 1)],
+                        lab[tile_rgb_index(d, tr, tc, 2)],
+                        lab[tile_rgb_index(d, nr, nc, 1)],
+                        lab[tile_rgb_index(d, nr, nc, 2)],
+                    );
                 }
             }
 
@@ -757,7 +1003,7 @@ fn combine_homogenous(
             }
 
             // Choose direction or average
-            if hm[0].abs_diff(hm[1]) > HOMOGENEITY_DECISION_MARGIN {
+            if hm[0] != hm[1] {
                 let best_d = if hm[1] > hm[0] { 1 } else { 0 };
                 for c in 0..3 {
                     let output_index = ((row - output_y0) * _width + col) * 3 + c;
@@ -776,6 +1022,43 @@ fn combine_homogenous(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_direction_map(
+    directions: &mut Array2<u8>,
+    homo: &[u8],
+    output_y0: usize,
+    output_y1: usize,
+    top: usize,
+    left: usize,
+    tile_height: usize,
+    tile_width: usize,
+) {
+    let width = directions.ncols();
+    for row in (top + 3)..tile_height.saturating_sub(3).min(output_y1) {
+        if row < output_y0 {
+            continue;
+        }
+        let tile_row = row - top;
+        for col in (left + 3)..tile_width.saturating_sub(3).min(width) {
+            let tile_col = col - left;
+            let mut sums = [0u32; 2];
+            for direction in 0..2 {
+                for sample_row in tile_row - 1..=tile_row + 1 {
+                    for sample_col in tile_col - 1..=tile_col + 1 {
+                        sums[direction] +=
+                            homo[tile_homo_index(direction, sample_row, sample_col)] as u32;
+                    }
+                }
+            }
+            directions[[row, col]] = match sums[0].cmp(&sums[1]) {
+                std::cmp::Ordering::Greater => 1,
+                std::cmp::Ordering::Less => 2,
+                std::cmp::Ordering::Equal => 0,
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,11 +1073,29 @@ mod tests {
 
     #[test]
     fn lab_lookup_retains_neutral_chroma() {
-        let converter = CieLabConverter::new(&identity_camera_matrix());
+        let converter = CieLabConverter::new(&identity_camera_matrix()).unwrap();
         let lab = converter.convert(&[0.5, 0.5, 0.5]);
         assert!(lab[0] > 0);
         assert!(lab[1].abs() < 128, "neutral a* was {}", lab[1]);
         assert!(lab[2].abs() < 128, "neutral b* was {}", lab[2]);
+    }
+
+    #[test]
+    fn fixed_point_classifier_rejects_invalid_camera_matrices() {
+        let mut non_finite = identity_camera_matrix();
+        non_finite[0][0] = f32::NAN;
+        assert!(CieLabConverter::new(&non_finite).is_err());
+
+        let mut out_of_range = identity_camera_matrix();
+        out_of_range[0][0] = 100.0;
+        assert!(CieLabConverter::new(&out_of_range).is_err());
+    }
+
+    #[test]
+    fn chroma_distance_is_bounded_at_i16_extremes() {
+        let distance = squared_chroma_difference(i16::MIN, i16::MIN, i16::MAX, i16::MAX);
+        assert_eq!(distance, 2 * 32_767u32.pow(2));
+        assert!(distance <= i32::MAX as u32);
     }
 
     #[test]

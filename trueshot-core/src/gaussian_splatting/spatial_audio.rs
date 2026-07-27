@@ -439,7 +439,7 @@ impl SpatialAudioScene {
 
     /// Add a sound source
     pub fn add_source(&mut self, source: SoundSource) {
-        if let Some(last_sample) = source.samples.last() {
+        if !source.samples.is_empty() {
             let source_duration = source.samples.len() as f32 / source.sample_rate as f32;
             self.duration = self.duration.max(source_duration);
         }
@@ -459,8 +459,6 @@ impl SpatialAudioScene {
         let mut right = vec![0.0f32; num_samples];
 
         let listener_right = listener_forward.cross(&na::Vector3::y()).normalize();
-        let listener_up = listener_right.cross(listener_forward);
-
         for source in &self.sources {
             // Check if source is active at this time
             if time_start > source.time_range.1 || time_start + duration < source.time_range.0 {
@@ -469,14 +467,11 @@ impl SpatialAudioScene {
 
             // Calculate spatial parameters
             let to_source = source.position - listener_pos;
-            let distance = to_source.norm();
             let direction = to_source.normalize();
 
             // Calculate stereo panning based on angle
             let pan = direction.dot(&listener_right); // -1 (left) to 1 (right)
-            let elevation = direction.dot(&listener_up);
-
-            // Distance attenuation
+                                                      // Distance attenuation
             let gain = source.total_gain(listener_pos);
 
             // Calculate sample range
@@ -517,14 +512,13 @@ impl SpatialAudioScene {
 
     /// Simple room reverb approximation
     fn apply_simple_reverb(&self, left: &mut [f32], right: &mut [f32], w: f32, h: f32, d: f32) {
-        // Calculate approximate RT60 based on room size
         let volume = w * h * d;
         let surface = 2.0 * (w * h + w * d + h * d);
-        let rt60 = 0.161 * volume / (surface * self.room_absorption);
+        let rt60 = (0.161 * volume / (surface * self.room_absorption.max(0.01))).max(0.05);
 
         // Simple delay lines for early reflections
         let delay_samples = (0.02 * self.sample_rate as f32) as usize; // 20ms early reflection
-        let decay = 0.5 * (1.0 - self.room_absorption);
+        let decay = (-6.907_755 * 0.02 / rt60).exp();
 
         if delay_samples < left.len() {
             for i in delay_samples..left.len() {

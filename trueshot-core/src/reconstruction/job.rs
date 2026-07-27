@@ -54,8 +54,6 @@ impl Job for UnifiedJob {
         let _ = progress_tx.send(0.05).await;
 
         // Check paths
-        let unified = UnifiedReconstruction::new(self.workspace_path.clone());
-
         // 1. Synchronize (if DSLR + LiveScan)
         let mut priors: Option<PosePriors> = None;
         if let (Some(dslr), Some(livescan)) = (&self.dslr_path, &self.livescan_path) {

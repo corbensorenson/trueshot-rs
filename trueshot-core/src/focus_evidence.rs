@@ -150,6 +150,7 @@ pub(crate) unsafe fn compute_focus_metric_apple_neon(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn sorted_trimmed_focus_mean_at(
     metric: &[f32],
     width: usize,

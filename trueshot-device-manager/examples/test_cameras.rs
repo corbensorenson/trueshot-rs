@@ -3,7 +3,7 @@
 //! Run with: cargo run --example test_cameras -p trueshot-device-manager
 
 use trueshot_device_manager::camera::{CameraManager, KinectCamera};
-use trueshot_device_manager::sensor::{LeapMotionController, LeapMotionMode, SensorManager};
+use trueshot_device_manager::sensor::{LeapMotionController, SensorManager};
 
 #[tokio::main]
 async fn main() {
