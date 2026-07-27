@@ -29,6 +29,7 @@ pub mod intrinsics;
 pub mod inventory;
 pub mod joint_demosaic;
 pub mod lens_psf;
+pub mod lens_psf_extract;
 pub mod logging;
 pub mod metrics;
 pub mod native_fusion;

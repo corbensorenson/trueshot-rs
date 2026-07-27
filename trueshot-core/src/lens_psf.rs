@@ -293,6 +293,12 @@ pub struct LensPsfMeasurement {
     pub source_sha256: String,
     pub split: CalibrationSplit,
     pub focus_distance_m: f32,
+    /// Auditable origin of the focus coordinate, when supplied.
+    #[serde(default)]
+    pub focus_distance_source: Option<String>,
+    /// One-sigma uncertainty for an independently measured focus coordinate.
+    #[serde(default)]
+    pub focus_distance_uncertainty_m: Option<f32>,
     pub subject_distance_m: f32,
     pub field_radius: f32,
     pub effective_focal_length_mm: f32,
@@ -329,6 +335,17 @@ impl LensPsfMeasurementSet {
         let set: Self = serde_json::from_slice(&bytes)?;
         set.validate()?;
         Ok(set)
+    }
+
+    pub fn save_json(&self, path: &Path) -> Result<()> {
+        self.validate()?;
+        if path.exists() {
+            anyhow::bail!(
+                "Refusing to overwrite lens PSF measurements {}",
+                path.display()
+            );
+        }
+        atomic_json(path, self)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -381,9 +398,22 @@ impl LensPsfMeasurementSet {
         let mut source_splits = HashMap::with_capacity(self.sources.len());
         for measurement in &self.measurements {
             let radius_index = nearest_knot(&self.radius_knots, measurement.field_radius);
+            let valid_focus_provenance = match (
+                measurement.focus_distance_source.as_deref(),
+                measurement.focus_distance_uncertainty_m,
+            ) {
+                (None, None) | (Some("exif_subject_distance"), None) => true,
+                (Some("independent_measured"), Some(uncertainty)) => {
+                    uncertainty.is_finite()
+                        && uncertainty > 0.0
+                        && uncertainty / measurement.focus_distance_m <= 0.25
+                }
+                _ => false,
+            };
             if !source_hashes.contains(measurement.source_sha256.as_str())
                 || !measurement.focus_distance_m.is_finite()
                 || measurement.focus_distance_m <= self.nominal_focal_length_mm * 0.001 * 1.01
+                || !valid_focus_provenance
                 || !measurement.subject_distance_m.is_finite()
                 || measurement.subject_distance_m <= self.nominal_focal_length_mm * 0.001 * 1.01
                 || !measurement.field_radius.is_finite()
@@ -871,6 +901,8 @@ mod tests {
                         source_sha256: String::new(),
                         split,
                         focus_distance_m: focus,
+                        focus_distance_source: None,
+                        focus_distance_uncertainty_m: None,
                         subject_distance_m: subject,
                         field_radius: radius,
                         effective_focal_length_mm: effective,
@@ -1080,6 +1112,15 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("disjoint retained sources"));
+
+        let mut set = synthetic_measurements();
+        set.measurements[0].focus_distance_source = Some("independent_measured".to_string());
+        assert!(set.validate().is_err());
+
+        let mut set = synthetic_measurements();
+        set.measurements[0].focus_distance_source = Some("independent_measured".to_string());
+        set.measurements[0].focus_distance_uncertainty_m = Some(0.001);
+        assert!(set.validate().is_ok());
     }
 
     #[test]

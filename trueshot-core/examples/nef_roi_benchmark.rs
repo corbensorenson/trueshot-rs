@@ -41,14 +41,20 @@ fn main() -> Result<()> {
     let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
     let metadata = parser.get_metadata()?;
     println!(
-        "camera=\"{} {}\" raw={}x{} bits={} compression={} sensor_levels={:?}",
+        "camera=\"{} {}\" raw={}x{} bits={} compression={} sensor_levels={:?} \
+         sensor_geometry={:?} lens={:?} focal_mm={:?} aperture={:?} focus_m={:?}",
         metadata.camera_make,
         metadata.camera_model,
         metadata.width,
         metadata.height,
         metadata.bits_per_sample,
         metadata.compression,
-        metadata.sensor_levels
+        metadata.sensor_levels,
+        metadata.sensor_geometry,
+        metadata.lens_model,
+        metadata.focal_length,
+        metadata.aperture,
+        metadata.focus_distance
     );
 
     let detection_start = Instant::now();

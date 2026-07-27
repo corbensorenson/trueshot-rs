@@ -43,6 +43,7 @@ use trueshot_core::inventory::{Device, Inventory, Machine, Model, Sequence, Sequ
 use trueshot_core::lens_psf::{
     calibrate_lens_psf, LensPsfCalibrationConfig, LensPsfMeasurementSet, LensPsfProfile,
 };
+use trueshot_core::lens_psf_extract::{extract_lens_psf_measurements, LensPsfExtractionPlan};
 use trueshot_core::licensing::{Feature, LicenseError, LicenseManager};
 use trueshot_core::native_fusion::{
     fuse_native_group, fusion_provenance_preview_with_frequency, NativeFusionConfig,
@@ -356,6 +357,21 @@ enum Commands {
         coverage_tolerance: f32,
     },
 
+    /// Extract source-hashed lens PSF measurements from retained native Bayer targets
+    ExtractLensPsf {
+        /// Source-hashed target geometry and bounded edge-ROI plan
+        #[arg(short, long)]
+        plan: PathBuf,
+
+        /// Root directory containing the plan's relative retained-capture paths
+        #[arg(long)]
+        capture_root: PathBuf,
+
+        /// Output measurement-set JSON for calibrate-lens-psf
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
     /// Fit a digest-bound lens breathing, pupil, and field-PSF profile
     CalibrateLensPsf {
         /// Retained fit/holdout defocus measurement-set JSON
@@ -604,7 +620,9 @@ fn main() -> Result<()> {
     } else {
         let level = if matches!(
             &cli.command,
-            Commands::CalibrateNoise { .. } | Commands::CalibrateLensPsf { .. }
+            Commands::CalibrateNoise { .. }
+                | Commands::ExtractLensPsf { .. }
+                | Commands::CalibrateLensPsf { .. }
         ) {
             tracing::Level::WARN
         } else {
@@ -702,6 +720,11 @@ fn main() -> Result<()> {
             maximum_variance_error,
             coverage_tolerance,
         ),
+        Commands::ExtractLensPsf {
+            plan,
+            capture_root,
+            output,
+        } => cmd_extract_lens_psf(plan, capture_root, output),
         Commands::CalibrateLensPsf {
             measurements,
             output,
@@ -1839,6 +1862,87 @@ fn cmd_calibrate_lens_psf(
     Ok(())
 }
 
+fn cmd_extract_lens_psf(plan: PathBuf, capture_root: PathBuf, output: PathBuf) -> Result<()> {
+    if output.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite lens PSF measurements {}",
+            output.display()
+        );
+    }
+    let report_path = lens_psf_extraction_report_path(&output);
+    if report_path.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite lens PSF extraction report {}",
+            report_path.display()
+        );
+    }
+    let plan_sha256 = sha256_file(&plan)?;
+    let extraction_plan = LensPsfExtractionPlan::load_json(&plan)
+        .with_context(|| format!("Load lens PSF extraction plan {}", plan.display()))?;
+    let (measurements, extraction) =
+        match extract_lens_psf_measurements(&extraction_plan, &capture_root) {
+            Ok(result) => result,
+            Err(error) => {
+                write_atomic_json(
+                    &report_path,
+                    &serde_json::json!({
+                        "schema": "trueshot.lens-psf-extraction-run.v1",
+                        "plan_path": plan.display().to_string(),
+                        "plan_sha256": plan_sha256,
+                        "capture_root": capture_root.display().to_string(),
+                        "measurement_path": output.display().to_string(),
+                        "measurement_published": false,
+                        "extraction_error": format!("{error:#}")
+                    }),
+                )?;
+                return Err(error).with_context(|| {
+                    format!(
+                        "Lens PSF extraction failed; diagnostic report written to {}",
+                        report_path.display()
+                    )
+                });
+            }
+        };
+    let passed = extraction.passed;
+    let measurement_count = extraction.measurements;
+    let decode_fraction = extraction.decode_fraction;
+    let report = serde_json::json!({
+        "schema": "trueshot.lens-psf-extraction-run.v1",
+        "plan_path": plan.display().to_string(),
+        "plan_sha256": plan_sha256,
+        "capture_root": capture_root.display().to_string(),
+        "measurement_path": output.display().to_string(),
+        "measurement_published": passed,
+        "extraction": extraction
+    });
+    if !passed {
+        write_atomic_json(&report_path, &report)?;
+        anyhow::bail!(
+            "Lens PSF extraction quality gates failed; measurements were not published. Inspect {}",
+            report_path.display()
+        );
+    }
+    let measurements =
+        measurements.context("Passing lens PSF extraction produced no measurement set")?;
+    measurements.save_json(&output)?;
+    let published = LensPsfMeasurementSet::load_json(&output)
+        .context("Published lens PSF measurements failed runtime validation")?;
+    write_atomic_json(&report_path, &report)?;
+    println!(
+        "{} Lens PSF measurements published: {} ({} measurements, {:.3}% decoded/full-frame pixels)",
+        CHECK,
+        style(output.display()).green(),
+        measurement_count,
+        decode_fraction * 100.0
+    );
+    println!(
+        "  Retained sources: {}, extraction report: {}",
+        published.sources.len(),
+        report_path.display()
+    );
+    Ok(())
+}
+
 fn inspect_noise_calibration_directory(
     directory: &Path,
     role: &str,
@@ -1983,6 +2087,14 @@ fn calibration_report_path(profile_path: &Path) -> PathBuf {
     profile_path.with_file_name(format!("{stem}_calibration_report.json"))
 }
 
+fn lens_psf_extraction_report_path(measurement_path: &Path) -> PathBuf {
+    let stem = measurement_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("lens-psf-measurements");
+    measurement_path.with_file_name(format!("{stem}_extraction_report.json"))
+}
+
 fn spatial_correction_profile_path(noise_profile_path: &Path) -> PathBuf {
     let stem = noise_profile_path
         .file_stem()
@@ -2028,7 +2140,9 @@ fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         file.write_all(b"\n")?;
         file.sync_all()?;
         drop(file);
-        std::fs::rename(&partial, path)?;
+        std::fs::hard_link(&partial, path)
+            .with_context(|| format!("Publish JSON without replacing {}", path.display()))?;
+        std::fs::remove_file(&partial)?;
         std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
@@ -5153,6 +5267,36 @@ mod burst_pipeline_tests {
     }
 
     #[test]
+    fn lens_psf_extraction_cli_binds_plan_root_and_output() {
+        let cli = Cli::try_parse_from([
+            "trueshot",
+            "extract-lens-psf",
+            "--plan",
+            "retained/plan.json",
+            "--capture-root",
+            "retained",
+            "--output",
+            "measurements.json",
+        ])
+        .unwrap();
+        let Commands::ExtractLensPsf {
+            plan,
+            capture_root,
+            output,
+        } = cli.command
+        else {
+            panic!("expected extract-lens-psf command");
+        };
+        assert_eq!(plan, PathBuf::from("retained/plan.json"));
+        assert_eq!(capture_root, PathBuf::from("retained"));
+        assert_eq!(output, PathBuf::from("measurements.json"));
+        assert_eq!(
+            lens_psf_extraction_report_path(&output),
+            PathBuf::from("measurements_extraction_report.json")
+        );
+    }
+
+    #[test]
     fn lens_psf_calibration_publishes_only_after_holdout_and_refuses_overwrite() {
         use trueshot_core::lens_psf::{
             CalibrationSplit, LensPsfMeasurement, LensPsfSourceRecord, LENS_PSF_MEASUREMENTS_SCHEMA,
@@ -5188,6 +5332,8 @@ mod burst_pipeline_tests {
                             CalibrationSplit::Holdout
                         },
                         focus_distance_m: focus,
+                        focus_distance_source: None,
+                        focus_distance_uncertainty_m: None,
                         subject_distance_m: subject,
                         field_radius: radius,
                         effective_focal_length_mm: effective,

@@ -122,13 +122,21 @@ source-hashed, preregistered fit/holdout measurement artifact and refuses
 publication unless every grid cell has evidence and independent holdout p95
 error and improvement gates pass. Runtime identity binds camera, full sensor
 geometry, lens, focal length, aperture, and focus envelope; interpolation is
-in diopters and sensor radius. Calibrated image distance drives metric depth,
-field PSF drives sub-plane confidence and crossing support, and the maximum
-retained effective pupil drives the linear aperture projection. The exact
-profile digest is exported. No profile remains a visible
+in diopters and sensor radius. A retained-target extractor now verifies exact
+source hashes, selectively decodes bounded native-Bayer edge pairs, fits an
+analytic disk PSF/MTF50 with uncertainty and residual gates, and derives
+effective focal length from measured target geometry. Independently measured
+focus distance and uncertainty are preferred; EXIF distance is an attributed
+fallback, and disagreement fails closed. The deterministic 2.5-16 pixel,
+3-17 degree synthetic sweep has 0.005365 maximum diameter relative error.
+Calibrated image distance drives metric depth, field PSF drives sub-plane
+confidence and crossing support, and the maximum retained effective pupil
+drives the linear aperture projection. The exact profile digest is exported.
+No profile remains a visible
 `ideal_thin_lens_explicit_fallback`, not an implied calibration. See
 `docs/LENS_PSF_CALIBRATION.md`; retained synthetic and fallback evidence is in
-`docs/benchmarks/lens_psf_qualification_2026-07-27.json`.
+`docs/benchmarks/lens_psf_qualification_2026-07-27.json` and
+`docs/benchmarks/lens_psf_extraction_qualification_2026-07-27.json`.
 
 ### 3. Occlusion-correct, halo-free compositing
 

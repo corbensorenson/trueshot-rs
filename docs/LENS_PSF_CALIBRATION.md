@@ -36,6 +36,58 @@ magnification. Defocus diameter should come from a preregistered edge/point
 target method, not visual tuning. Fit and holdout captures must be separate
 files.
 
+## Native Bayer Extraction
+
+`trueshot.lens-psf-extraction-plan.v1` removes hand-entered optical
+measurements from the calibration path. Each retained NEF capture declares:
+
+- a relative path and exact lowercase SHA-256;
+- a preregistered `fit` or `holdout` split;
+- independently measured subject distance;
+- independently measured focus distance plus one-sigma uncertainty when
+  available;
+- one two-edge target at every declared field-radius knot;
+- two bounded slanted-edge ROIs and their known target-plane edge separation.
+
+Use high-contrast, matte, parallel edges between 1.5 and 20 degrees from the
+sensor axes. The target must be rigid, its physical edge separation must be
+measured rather than inferred from a print setting, and center/corner ROIs must
+remain inside the full sensor. Do not tune ROIs after inspecting holdout
+results.
+
+```bash
+cargo run -p trueshot-cli --release -- \
+  extract-lens-psf \
+  --plan retained/z9-50mm-f7.1-extraction-plan.json \
+  --capture-root retained \
+  --output retained/z9-50mm-f7.1-measurements.json
+```
+
+The extractor verifies every retained source before parsing it, selectively
+decodes only the union of each target's two ROIs, and measures native green
+Bayer sites using full-sensor CFA parity. It estimates edge orientation with a
+structure tensor and deterministic sub-degree refinement, builds an 8x
+supersampled edge-spread function, robustly fits the analytic uniform-disk PSF,
+and reports segmented diameter uncertainty, residual, MTF50, pair parallelism,
+pair disagreement, measured field radius, magnification-derived effective
+focal length, decoded pixels, and full-frame-equivalent decode fraction.
+
+Clipping, weak contrast, low gradient coherence, axis-aligned edges, excessive
+uncertainty/residual, nonparallel pairs, inconsistent diameters, incorrect
+field placement, identity drift, and source-hash drift fail closed. A failed
+run writes a diagnostic report but never publishes measurements.
+
+An independently measured focus distance is authoritative because camera lens
+telemetry is quantized and may be approximate. Its declared uncertainty must
+be at most 2% by default. When EXIF `SubjectDistance` is also present, the
+extractor reports and gates their relative disagreement. If no independent
+distance is supplied, usable EXIF distance is accepted and explicitly labeled
+`exif_subject_distance`; missing distance fails closed. Approximate encrypted
+Nikon MakerNote distance is not silently promoted to calibration truth. The
+selected source and uncertainty are embedded in every published measurement,
+so the downstream profile's measurement digest binds this provenance rather
+than depending on a detached report.
+
 ## Publication
 
 ```bash
@@ -92,7 +144,12 @@ Without a supplied profile, processing remains available but reports
 
 The synthetic gates prove fitter recovery, independent holdout improvement,
 source-manifest integrity, focus/radius interpolation, runtime attribution,
-identity rejection, and tile invariance. A product quality claim still
-requires retained real target captures for every marketed lens, focal length,
-aperture, focus envelope, and relevant wavelength/temperature configuration,
-plus halo/MTF validation on real hair, fur, transparency, and glossy edges.
+identity rejection, tile invariance, native analytic-disk extraction across
+2.5-16 pixel blur diameters and 3-17 degree edge slants, and distance-provenance
+gating. The extraction sweep's maximum diameter relative error is 0.005365.
+A private Z9 NEF verifies real parser, source-hash, and fail-closed missing
+distance behavior, but it is not an optical target and cannot qualify a lens.
+A product quality claim still requires retained real target captures for every
+marketed lens, focal length, aperture, focus envelope, and relevant
+wavelength/temperature configuration, plus halo/MTF validation on real hair,
+fur, transparency, and glossy edges.

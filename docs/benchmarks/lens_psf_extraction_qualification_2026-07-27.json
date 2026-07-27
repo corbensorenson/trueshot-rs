@@ -1,0 +1,78 @@
+{
+  "schema": "trueshot.lens-psf-extraction-qualification.v1",
+  "date": "2026-07-27",
+  "status": "pass_with_retained_real_optical_targets_pending",
+  "source": {
+    "parent_commit": "4f1b1321",
+    "lens_psf_extract_sha256": "9351f6c72d86038d76ed2fb05e60f151c7bc22310308de8484587eaa1f5a3e9d",
+    "lens_psf_sha256": "4af32ef8825a9e4df9fc2c3a721361c8b729a5ea36dec88a2c1af26269791c66",
+    "cli_sha256": "f3e9ea50a2efcf11f385b2155834be96e0209da57d6cdc07a5b1637b2dd2a216",
+    "protocol_sha256": "33a8a5e817a43637bd96e1dc4e9048786afe98c94396ca969839933da989e5b5"
+  },
+  "native_bayer_analytic_disk_recovery": {
+    "green_cfa_parity": "full_sensor",
+    "esf_oversampling": 8,
+    "disk_diameters_px": [
+      2.5,
+      5.0,
+      10.0,
+      16.0
+    ],
+    "edge_slants_degrees": [
+      3.0,
+      7.0,
+      12.0,
+      17.0
+    ],
+    "maximum_diameter_relative_error": 0.005365,
+    "single_case_expected_diameter_px": 6.0,
+    "single_case_measured_diameter_px": 6.00526,
+    "single_case_expected_effective_focal_length_mm": 52.5,
+    "single_case_measured_effective_focal_length_mm": 52.49540,
+    "single_case_edge_pair_parallel_angle_degrees": 0.0
+  },
+  "quality_and_provenance_gates": {
+    "bounded_selective_roi_decode": true,
+    "source_sha256_verified_before_decode": true,
+    "safe_relative_capture_paths": true,
+    "fit_holdout_sources_disjoint": true,
+    "every_radius_cell_required_per_capture": true,
+    "clipped_or_black_evidence_rejected": true,
+    "weak_contrast_rejected": true,
+    "low_gradient_coherence_rejected": true,
+    "axis_aligned_edges_rejected": true,
+    "fit_residual_gated": true,
+    "segmented_diameter_uncertainty_gated": true,
+    "edge_pair_diameter_disagreement_gated": true,
+    "edge_pair_parallelism_gated": true,
+    "measured_field_radius_gated": true,
+    "camera_sensor_lens_aperture_focal_identity_gated": true,
+    "independent_focus_uncertainty_gated": true,
+    "focus_metadata_disagreement_gated": true,
+    "focus_provenance_bound_into_measurement_digest": true,
+    "failed_run_does_not_publish_measurements": true,
+    "atomic_no_replace_measurement_publication": true
+  },
+  "private_z9_fail_closed_integration": {
+    "redistributable": false,
+    "camera": "NIKON CORPORATION NIKON Z 9",
+    "lens": "NIKKOR Z 50mm f/1.8 S",
+    "focal_length_mm": 50.0,
+    "aperture": 7.1,
+    "raw_width": 8280,
+    "raw_height": 5520,
+    "bits_per_sample": 14,
+    "plan_sha256": "058ce12ef2b442aa1ed8e5269bc3fe7d97d0d5a008866a43d9f0c1e18f437c28",
+    "first_source_sha256": "00f6ec6b8819fa5b0769746953aa69126950daab956d2a2508fd35206fd627ac",
+    "focus_distance_available": false,
+    "expected_result": "refuse_publication",
+    "measurement_published": false,
+    "observed_error": "Capture _Z9Z5338.NEF has no usable focus distance"
+  },
+  "caveats": [
+    "Analytic synthetic recovery qualifies the deterministic measurement algorithm, not a physical lens.",
+    "The private Z9 images are ordinary object captures, not preregistered optical targets, so only parser, source-integrity, and fail-closed behavior were exercised.",
+    "Real optical qualification still requires retained matte parallel-edge targets with measured geometry, focus and subject distance, complete field-radius coverage, and independent fit/holdout captures.",
+    "No real-lens or competitor-superiority claim is made by this record."
+  ]
+}
