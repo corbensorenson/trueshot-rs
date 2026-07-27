@@ -41,6 +41,38 @@ The accumulator rejects camera, calibration artifact, ROI, focal-length, or
 aperture drift. Near-identical focus metadata is merged within a tight
 diopter tolerance so metadata jitter cannot fabricate extra focus planes.
 
+## Local Measured Session
+
+`MeasuredAdaptiveSession` is the transactional state machine between the
+planner and a camera adapter:
+
+1. a retained reference NEF initializes calibrated radiance evidence and a
+   bounded prior over the camera-supported focus candidate coordinates;
+2. exactly one next candidate is staged;
+3. the completed RAW must match that candidate's ISO, shutter, and physical
+   focus metadata;
+4. RAW assimilation, measured elapsed/motion/thermal telemetry, provenance,
+   and replanning are computed on cloned state; and
+5. the transition commits only after every check succeeds.
+
+Rejected or malformed RAWs leave the session unchanged. Automatic quality,
+information, budget, and calibration termination is attributed. Operator and
+hardware interruption can terminate without claiming that the staged action
+executed.
+
+The authenticated local server exposes this state machine at
+`/api/cameras/adaptive`. It derives candidates from the connected camera's
+declared shutter/ISO options, accepts at most 4,096 API candidates and 32
+active sessions, selectively decodes only project-local regular NEFs off the
+async runtime, blocks symlink escapes, enforces the advanced-capture
+entitlement on every route, and uses generation checks to reject concurrent
+session advancement.
+
+The API deliberately returns an absolute focus-diopter request rather than
+converting it to an uncalibrated relative lens step. Until a body/lens pair has
+an absolute drive calibration and EXIF readback qualification, the existing
+relative `drive_focus` adapter is not authorized to execute that request.
+
 ## Constraints
 
 Candidates are rejected before ranking when they exceed:
@@ -109,7 +141,9 @@ archival output.
   focus from captured RAW metadata; unsupported lenses must fail closed.
 - Feed measured motion, readout/settle latency, thermals, and lens travel time
   back into the posterior after each capture.
-- Wire measured NEF observations, planner decisions, and the trace contract
-  into an interruption-safe production server capture session.
+- Persist active server sessions and completed trace artifacts atomically so a
+  process restart can resume or close them without losing attribution.
+- Connect the session API to the dashboard capture flow after absolute
+  body/lens focus-drive calibration is available.
 - Validate at least 20% capture-time reduction at equal quality, or higher
   quality at equal time, on the preregistered real stack corpus.

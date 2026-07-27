@@ -84,8 +84,11 @@ pub struct RawCaptureObservation {
     pub camera_model: String,
     pub bits_per_sample: u16,
     pub sensor_calibration_id: String,
+    pub sensor_range_dn: f32,
     pub iso: u32,
     pub exposure_seconds: f32,
+    /// Relative sensor exposure: shutter * ISO / (100 * f-number^2).
+    pub sensor_exposure: f32,
     pub focus_diopters: Option<f32>,
     pub focal_length_mm: Option<f32>,
     pub aperture: Option<f32>,
@@ -118,6 +121,7 @@ struct ObservationIdentity {
     camera_model: String,
     bits_per_sample: u16,
     sensor_calibration_id: String,
+    sensor_range_dn: f32,
     focal_length_mm: Option<f32>,
     aperture: Option<f32>,
     roi: [u32; 4],
@@ -228,6 +232,7 @@ impl RawPosteriorAccumulator {
             camera_model: observation.camera_model.clone(),
             bits_per_sample: observation.bits_per_sample,
             sensor_calibration_id: observation.sensor_calibration_id.clone(),
+            sensor_range_dn: observation.sensor_range_dn,
             focal_length_mm: observation.focal_length_mm,
             aperture: observation.aperture,
             roi: observation.roi,
@@ -240,6 +245,7 @@ impl RawPosteriorAccumulator {
             || identity.camera_model != incoming.camera_model
             || identity.bits_per_sample != incoming.bits_per_sample
             || identity.sensor_calibration_id != incoming.sensor_calibration_id
+            || relative_error(identity.sensor_range_dn, incoming.sensor_range_dn) > 1e-6
             || identity.roi != incoming.roi
             || !optional_nearly_equal(identity.focal_length_mm, incoming.focal_length_mm, 0.001)
             || !optional_nearly_equal(identity.aperture, incoming.aperture, 0.001)
@@ -283,6 +289,39 @@ pub fn observe_nef_roi(
     )
 }
 
+/// Observe a reference NEF using its own verified sensor exposure as the
+/// radiance anchor. The file is parsed and the requested ROI is decoded once.
+pub fn observe_nef_reference(
+    path: &Path,
+    roi: Roi,
+    sensor_profile: &SensorNoiseProfile,
+    config: RawObservationConfig,
+) -> Result<RawCaptureObservation> {
+    let mut parser = Z9NefParser::new(path);
+    parser
+        .parse()
+        .with_context(|| format!("Parse adaptive RAW reference {}", path.display()))?;
+    if !parser.supports_selective_loading() {
+        anyhow::bail!(
+            "{} does not support verified selective RAW observation",
+            path.display()
+        );
+    }
+    let metadata = parser.get_metadata()?.clone();
+    let anchor = metadata_sensor_exposure(&metadata)?;
+    let raw = parser
+        .load_roi(&roi, None)
+        .with_context(|| format!("Decode adaptive RAW reference ROI {}", path.display()))?;
+    observe_raw_roi(
+        &raw,
+        (roi.x, roi.y),
+        &metadata,
+        sensor_profile,
+        anchor,
+        config,
+    )
+}
+
 pub fn observe_raw_roi(
     raw: &RawBuffer,
     roi_origin: (u32, u32),
@@ -310,8 +349,16 @@ pub fn observe_raw_roi(
         .exposure_time
         .context("Adaptive RAW observation requires exposure metadata")?
         as f32;
+    let aperture = metadata
+        .aperture
+        .context("Adaptive RAW observation requires aperture metadata")?;
+    let sensor_exposure = metadata_sensor_exposure(metadata)?;
     if !exposure_seconds.is_finite()
         || exposure_seconds <= 0.0
+        || !aperture.is_finite()
+        || aperture <= 0.0
+        || !sensor_exposure.is_finite()
+        || sensor_exposure <= 0.0
         || !radiance_anchor_exposure.is_finite()
         || radiance_anchor_exposure <= 0.0
     {
@@ -335,7 +382,7 @@ pub fn observe_raw_roi(
     let mut focus = Vec::with_capacity(tile_count);
     let total_pixels = (raw.width as f32 * raw.height as f32).max(1.0);
     let range_dn = f32::from(levels.white - levels.black);
-    let exposure_ratio = exposure_seconds / radiance_anchor_exposure;
+    let exposure_ratio = sensor_exposure / radiance_anchor_exposure;
 
     for tile_y in 0..u32::from(config.tile_rows) {
         let y0 = raw.height * tile_y / u32::from(config.tile_rows);
@@ -388,11 +435,13 @@ pub fn observe_raw_roi(
         camera_model: metadata.camera_model.clone(),
         bits_per_sample: metadata.bits_per_sample,
         sensor_calibration_id: sensor_profile.calibration_id.clone(),
+        sensor_range_dn: range_dn,
         iso,
         exposure_seconds,
+        sensor_exposure,
         focus_diopters,
         focal_length_mm: metadata.focal_length,
-        aperture: metadata.aperture,
+        aperture: Some(aperture),
         roi: [roi_origin.0, roi_origin.1, raw.width, raw.height],
         radiance_anchor_exposure,
         radiance,
@@ -400,6 +449,23 @@ pub fn observe_raw_roi(
     };
     validate_observation(&observation)?;
     Ok(observation)
+}
+
+fn metadata_sensor_exposure(metadata: &Z9Metadata) -> Result<f32> {
+    let shutter = metadata
+        .exposure_time
+        .context("Adaptive RAW observation requires exposure metadata")? as f32;
+    let iso = metadata
+        .iso
+        .context("Adaptive RAW observation requires ISO metadata")?;
+    let aperture = metadata
+        .aperture
+        .context("Adaptive RAW observation requires aperture metadata")?;
+    let exposure = shutter * iso as f32 / (100.0 * aperture * aperture);
+    if !exposure.is_finite() || exposure <= 0.0 {
+        anyhow::bail!("Adaptive RAW sensor exposure is invalid");
+    }
+    Ok(exposure)
 }
 
 pub fn verify_observation_candidate(
@@ -749,9 +815,13 @@ fn validate_observation(observation: &RawCaptureObservation) -> Result<()> {
         || observation.camera_model.trim().is_empty()
         || observation.sensor_calibration_id.trim().is_empty()
         || observation.bits_per_sample == 0
+        || !observation.sensor_range_dn.is_finite()
+        || observation.sensor_range_dn <= 0.0
         || observation.iso == 0
         || !observation.exposure_seconds.is_finite()
         || observation.exposure_seconds <= 0.0
+        || !observation.sensor_exposure.is_finite()
+        || observation.sensor_exposure <= 0.0
         || !observation.radiance_anchor_exposure.is_finite()
         || observation.radiance_anchor_exposure <= 0.0
         || observation.radiance.is_empty()
@@ -816,6 +886,16 @@ fn validate_observation(observation: &RawCaptureObservation) -> Result<()> {
     {
         anyhow::bail!("RAW observation focus distance is invalid");
     }
+    let expected_sensor_exposure = observation.exposure_seconds * observation.iso as f32
+        / (100.0
+            * observation
+                .aperture
+                .map_or(f32::NAN, |aperture| aperture * aperture));
+    if !expected_sensor_exposure.is_finite()
+        || relative_error(observation.sensor_exposure, expected_sensor_exposure) > 1e-5
+    {
+        anyhow::bail!("RAW observation sensor-exposure provenance is inconsistent");
+    }
     if !observation.focus.is_empty()
         && (observation.focus_diopters.is_none()
             || observation
@@ -875,16 +955,19 @@ mod tests {
             camera_model: "NIKON Z 9".to_string(),
             bits_per_sample: 14,
             calibration_id: "sha256:raw-observation-test".to_string(),
-            iso_models: vec![IsoNoiseModel {
-                iso: 100,
-                model: SensorNoiseModel {
-                    read_noise_dn: [2.0; 4],
-                    electrons_per_dn: [0.8; 4],
-                    black_drift_dn: [0.5; 4],
-                    saturation_margin_dn: 16.0,
-                    calibrated: true,
-                },
-            }],
+            iso_models: [100, 200]
+                .into_iter()
+                .map(|iso| IsoNoiseModel {
+                    iso,
+                    model: SensorNoiseModel {
+                        read_noise_dn: [2.0; 4],
+                        electrons_per_dn: [0.8; 4],
+                        black_drift_dn: [0.5; 4],
+                        saturation_margin_dn: 16.0,
+                        calibrated: true,
+                    },
+                })
+                .collect(),
         }
     }
 
@@ -943,7 +1026,7 @@ mod tests {
 
     #[test]
     fn radiance_observation_is_exposure_invariant_and_cfa_stable_for_odd_roi() {
-        let anchor = 0.01;
+        let anchor = 0.01 / 64.0;
         let config = RawObservationConfig {
             tile_columns: 2,
             tile_rows: 2,
@@ -975,8 +1058,43 @@ mod tests {
     }
 
     #[test]
+    fn radiance_anchor_uses_shutter_iso_and_aperture_sensor_exposure() {
+        let anchor = 0.01 / 64.0;
+        let config = RawObservationConfig {
+            tile_columns: 1,
+            tile_rows: 1,
+            ..Default::default()
+        };
+        let baseline_metadata = metadata(0.01, 0.5);
+        let mut equal_sensor_exposure = metadata(0.005, 0.5);
+        equal_sensor_exposure.iso = Some(200);
+        let baseline = observe_raw_roi(
+            &textured_raw(1.0, 2),
+            (0, 0),
+            &baseline_metadata,
+            &profile(),
+            anchor,
+            config,
+        )
+        .unwrap();
+        let higher_iso = observe_raw_roi(
+            &textured_raw(1.0, 2),
+            (0, 0),
+            &equal_sensor_exposure,
+            &profile(),
+            anchor,
+            config,
+        )
+        .unwrap();
+        assert!((baseline.sensor_exposure - higher_iso.sensor_exposure).abs() < 1e-8);
+        for (left, right) in baseline.radiance.iter().zip(&higher_iso.radiance) {
+            assert!((left.mean.unwrap() - right.mean.unwrap()).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn calibrated_observations_reduce_radiance_uncertainty() {
-        let anchor = 0.01;
+        let anchor = 0.01 / 64.0;
         let observation = observe_raw_roi(
             &textured_raw(1.0, 2),
             (0, 0),
@@ -1004,7 +1122,7 @@ mod tests {
 
     #[test]
     fn censored_observation_never_pulls_a_prior_downward() {
-        let anchor = 0.01;
+        let anchor = 0.01 / 64.0;
         let mut raw = RawBuffer::new(32, 32, [0, 1, 1, 2], 14);
         raw.data.fill(15_311);
         let observation = observe_raw_roi(
@@ -1039,7 +1157,7 @@ mod tests {
 
     #[test]
     fn mixed_clipping_is_not_misrepresented_as_a_tile_mean_bound() {
-        let anchor = 0.01;
+        let anchor = 0.01 / 64.0;
         let mut raw = textured_raw(1.0, 2);
         for y in 0..raw.height as usize {
             for x in (0..raw.width as usize).step_by(8) {
@@ -1072,7 +1190,7 @@ mod tests {
 
     #[test]
     fn accumulator_rejects_cross_capture_identity_drift() {
-        let anchor = 0.01;
+        let anchor = 0.01 / 64.0;
         let observation = observe_raw_roi(
             &textured_raw(1.0, 2),
             (0, 0),
@@ -1132,8 +1250,9 @@ mod tests {
 
     #[test]
     fn measured_nonuniform_focus_planes_recover_subplane_peak() {
-        let mut accumulator = RawPosteriorAccumulator::new(0.01).unwrap();
-        let mut posterior = empty_posterior(0.01);
+        let anchor = 0.01 / 64.0;
+        let mut accumulator = RawPosteriorAccumulator::new(anchor).unwrap();
+        let mut posterior = empty_posterior(anchor);
         let target = 2.3f32;
         for &diopters in &[1.0f32, 2.0, 3.5, 5.0] {
             let score = (-(diopters - target).powi(2) / 1.2).exp();
@@ -1142,13 +1261,15 @@ mod tests {
                 camera_model: "NIKON Z 9".to_string(),
                 bits_per_sample: 14,
                 sensor_calibration_id: profile().calibration_id,
+                sensor_range_dn: 14_303.0,
                 iso: 100,
                 exposure_seconds: 0.01,
+                sensor_exposure: anchor,
                 focus_diopters: Some(diopters),
                 focal_length_mm: Some(105.0),
                 aperture: Some(8.0),
                 roi: [0, 0, 64, 64],
-                radiance_anchor_exposure: 0.01,
+                radiance_anchor_exposure: anchor,
                 radiance: vec![RadianceObservation {
                     probe_id: 0,
                     cfa_site: 0,
@@ -1183,13 +1304,15 @@ mod tests {
             camera_model: "Z9".to_string(),
             bits_per_sample: 14,
             sensor_calibration_id: "sha256:test".to_string(),
+            sensor_range_dn: 14_303.0,
             iso: 100,
             exposure_seconds: 0.01,
+            sensor_exposure: 0.01 / 64.0,
             focus_diopters: Some(2.0),
             focal_length_mm: Some(105.0),
             aperture: Some(8.0),
             roi: [0, 0, 16, 16],
-            radiance_anchor_exposure: 0.01,
+            radiance_anchor_exposure: 0.01 / 64.0,
             radiance: vec![RadianceObservation {
                 probe_id: 0,
                 cfa_site: 0,

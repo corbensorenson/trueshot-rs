@@ -41,6 +41,7 @@ pub struct AppState {
     pub system_stats: Arc<Mutex<SystemStats>>,
     pub scan_wizard: Arc<AsyncMutex<ScanWizardState>>,
     pub intervalometer: Arc<AsyncMutex<IntervalometerState>>,
+    pub adaptive_capture: Arc<AsyncMutex<crate::api::adaptive_capture::AdaptiveCaptureSessions>>,
     pub calibration_session: Arc<AsyncMutex<CalibrationSession>>,
     pub audit: Arc<AuditLog>,
     pub license_gate: Arc<Mutex<crate::licensing::LicenseGate>>,

@@ -1,3 +1,4 @@
+pub mod adaptive_capture;
 pub mod annotations;
 pub mod audit;
 pub mod auth;

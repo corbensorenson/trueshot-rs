@@ -500,6 +500,9 @@ async fn main() -> std::io::Result<()> {
         system_stats,
         scan_wizard: Arc::new(AsyncMutex::new(ScanWizardState::default())),
         intervalometer: Arc::new(AsyncMutex::new(IntervalometerState::new())),
+        adaptive_capture: Arc::new(AsyncMutex::new(
+            api::adaptive_capture::AdaptiveCaptureSessions::default(),
+        )),
         calibration_session: Arc::new(AsyncMutex::new(state::CalibrationSession::default())),
         audit,
         license_gate,
@@ -756,6 +759,11 @@ async fn main() -> std::io::Result<()> {
             .service(api::hardware::capture_hdr_bracket)
             .service(api::hardware::capture_focus_stack)
             .service(api::hardware::capture_hdr_focus_stack)
+            .service(api::adaptive_capture::start_adaptive_capture)
+            .service(api::adaptive_capture::assimilate_adaptive_capture)
+            .service(api::adaptive_capture::get_adaptive_capture)
+            .service(api::adaptive_capture::get_adaptive_capture_provenance)
+            .service(api::adaptive_capture::terminate_adaptive_capture)
             .service(api::hardware::set_camera_enabled)
             .service(api::hardware::start_intervalometer)
             .service(api::hardware::stop_intervalometer)

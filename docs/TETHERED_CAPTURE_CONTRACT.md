@@ -37,6 +37,18 @@ The default directory is the macOS local application-data directory under
 `TrueShot/captures`. `TRUESHOT_CAPTURE_DIR` can select another user-owned local
 directory.
 
+## Adaptive Measurement Contract
+
+The local adaptive API does not infer success from a shutter acknowledgement.
+It accepts a completed project-local NEF, performs a bounded selective RAW ROI
+decode, verifies ISO/shutter/focus metadata against the staged candidate, and
+atomically commits measured posterior, runtime telemetry, provenance, and the
+next decision. Rejected captures do not advance the session.
+
+Absolute focus candidates are not mapped onto the current relative
+`drive_focus` command. That mapping remains disabled until each supported
+body/lens pair has a measured drive curve and captured-EXIF readback gate.
+
 ## Qualification State
 
 Pure path-safety and adapter integration tests run without camera hardware.
