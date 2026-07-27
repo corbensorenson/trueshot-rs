@@ -384,6 +384,27 @@ TrueShot's benchmark should include:
 
 Sources: [Multi-focus Image Fusion: A Benchmark](https://arxiv.org/abs/2005.01116) and [UHD-MFF](https://arxiv.org/abs/2606.31242).
 
+The production gate is implemented in
+`scripts/run_apple_nef_fusion_qualification.py`. It runs the actual licensed
+CLI path in isolated temporary directories, requires Apple Metal AHD with no
+fallback and measured-only provenance, hashes every primary artifact, removes
+timing fields before semantic-report comparison, and obtains process counters
+from macOS `proc_pid_rusage` plus thermal/low-power state from `NSProcessInfo`.
+It fails on missing primary energy evidence, low-power mode, serious thermals,
+absolute wall/memory/energy ceilings, output nondeterminism, or more than 15%
+regression against a supplied baseline.
+
+The source-bound Apple M1 record in
+`docs/benchmarks/apple_nef_fusion_qualification_2026-07-27.json` covers one
+warmup and five production executions of a private 21-frame native-resolution
+1310x1304 Z9 ROI. It measured 5.939/6.073 seconds wall p50/p95, 0.899 seconds
+decode p95, 2.901 seconds fusion p95, 0.070 seconds Metal
+demosaic/postprocess p95, 310.3 MiB maximum physical footprint, 711.4 MiB
+maximum RSS, 41.603 J maximum primary energy, and nominal thermals. All 11
+primary artifacts and semantic provenance were exact across runs. This is
+performance and integration evidence, not calibrated sensor/lens ground truth,
+full-sensor qualification, or a competitor-quality result.
+
 ## Methods Not Suitable for the Default Archival Path
 
 UltraFusion treats missing highlights as guided inpainting and demonstrates

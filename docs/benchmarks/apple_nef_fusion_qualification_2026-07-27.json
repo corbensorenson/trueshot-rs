@@ -1,0 +1,146 @@
+{
+  "baseline_comparison": null,
+  "configuration": {
+    "depth_export": true,
+    "jobs": null,
+    "memory_budget_bytes": 536870912,
+    "qualification_dev_license": true,
+    "quality": "ultra",
+    "runs": 5,
+    "warmups": 1
+  },
+  "determinism": {
+    "artifact_bytes": {
+      "artifact-00.png": 2176603,
+      "artifact-01.tiff": 13666422,
+      "artifact-02.png": 4158,
+      "artifact-03.tiff": 3416794,
+      "artifact-04.png": 546589,
+      "artifact-05.png": 83231,
+      "artifact-06.png": 161656,
+      "artifact-07.png": 541344,
+      "artifact-08.png": 4158,
+      "artifact-09.png": 4158,
+      "artifact-10.png": 546589
+    },
+    "artifact_sha256": {
+      "artifact-00.png": "ad741ace6762058d187e8996ef5381bf5d4870df74732703e021f96fcdbaa335",
+      "artifact-01.tiff": "3ea8d742f90082e32eedb6f6edce6b15536762909fbbf8fcb57b04c6ee21bd15",
+      "artifact-02.png": "8dec03d65210b9743f7304f46b145e18026ac98052819abd11fa1a6205be628e",
+      "artifact-03.tiff": "8f7abd3864e3f302899a334f7cfb959136c09d53cdecd5127c3b9c8a299f5b09",
+      "artifact-04.png": "a8efdaf89a19ce919c217c0a58c8d17429ce6fc75555903463409d814776bb48",
+      "artifact-05.png": "4e69c0be9b957df4544d3a4d923be7a0efa85c6972b9e42eacfd14add08d9da5",
+      "artifact-06.png": "dfcfa4a9e0566b9bf4e805d4cf6332881bbeec95ef9cc2534dc89277c95488f7",
+      "artifact-07.png": "b15beeba06d9494551327fd49c3a8b387a959f6b23432ce8c343ebdef2d6de88",
+      "artifact-08.png": "8dec03d65210b9743f7304f46b145e18026ac98052819abd11fa1a6205be628e",
+      "artifact-09.png": "8dec03d65210b9743f7304f46b145e18026ac98052819abd11fa1a6205be628e",
+      "artifact-10.png": "a8efdaf89a19ce919c217c0a58c8d17429ce6fc75555903463409d814776bb48"
+    },
+    "demosaic_adapters": [
+      "Apple M1"
+    ],
+    "group_artifact_adapter_shape_exact": true,
+    "groups": 1,
+    "primary_artifacts": 11,
+    "primary_artifacts_exact": true,
+    "semantic_provenance_exact": true
+  },
+  "failures": [],
+  "fixture": {
+    "aggregate_sha256": "8af4d8470895edea9e5f71a220bfd17228eda6084053f8c993686607fa44fef7",
+    "private_fixture_retained": false,
+    "source_bytes": 994391434,
+    "source_count": 21
+  },
+  "gates": {
+    "maximum_energy_joules": 100.0,
+    "maximum_peak_physical_footprint_bytes": 402653184,
+    "maximum_regression_fraction": 0.15,
+    "maximum_resident_set_size_bytes": 872415232,
+    "maximum_thermal_state": "fair",
+    "maximum_wall_p95_seconds": 8.0,
+    "minimum_independent_runs": 3,
+    "require_exact_primary_artifacts": true,
+    "require_exact_semantic_provenance": true,
+    "require_low_power_mode_off": true,
+    "require_measured_only_archival": true,
+    "require_metal_ahd_without_fallback": true,
+    "require_native_energy": true
+  },
+  "generated_at": "2026-07-27T12:02:25.224724+00:00",
+  "host": {
+    "architecture": "arm64",
+    "hardware_model": "MacBookPro17,1",
+    "macos_build": "24A5320a",
+    "macos_version": "15.0",
+    "memory_bytes": 17179869184
+  },
+  "low_power_mode_observed": false,
+  "metrics": {
+    "disk_bytes_read": {
+      "p50": 16384.0,
+      "p95": 16384.0
+    },
+    "disk_bytes_written": {
+      "p50": 25468928.0,
+      "p95": 25468928.0
+    },
+    "energy_joules": {
+      "available": true,
+      "maximum": 41.602915276,
+      "p50": 41.583301516,
+      "p95": 41.602915276
+    },
+    "maximum_resident_set_size_bytes": {
+      "maximum": 745947136.0,
+      "p50": 745177088.0,
+      "p95": 745947136.0
+    },
+    "peak_physical_footprint_bytes": {
+      "maximum": 325388928.0,
+      "p50": 285231616.0,
+      "p95": 325388928.0
+    },
+    "performance_energy_joules": {
+      "maximum": 40.348135656,
+      "p50": 40.312881903,
+      "p95": 40.348135656
+    },
+    "stages_seconds": {
+      "decode_seconds": {
+        "p50": 0.879988167,
+        "p95": 0.898967084
+      },
+      "demosaic_and_postprocess_seconds": {
+        "p50": 0.066922,
+        "p95": 0.070081084
+      },
+      "fusion_seconds": {
+        "p50": 2.858585375,
+        "p95": 2.901476
+      },
+      "processing_before_export_seconds": {
+        "p50": 3.8140836670000002,
+        "p95": 3.866445667
+      }
+    },
+    "wall_seconds": {
+      "maximum": 6.072884,
+      "minimum": 5.924579,
+      "p50": 5.938678708,
+      "p95": 6.072884
+    }
+  },
+  "passed": true,
+  "profile": "release-dev-license",
+  "schema": "trueshot.apple-nef-fusion-qualification.v1",
+  "scope": "Production process --mode burst on one private real NEF group; aggregate performance, determinism, Metal, and measured-only integration evidence. This is not calibrated sensor/lens ground truth or competitor quality evidence.",
+  "source_revision": "c0bd88708e22d6e1cdcd20122759a5fe0eac6f36",
+  "thermal_states": [
+    "nominal",
+    "nominal",
+    "nominal",
+    "nominal",
+    "nominal"
+  ]
+}

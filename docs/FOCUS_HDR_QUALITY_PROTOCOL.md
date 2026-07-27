@@ -122,6 +122,18 @@ Implemented:
   local correction and 40 inconsistent cells were excluded. The retained
   39.75% refusion distribution was unchanged from the immediately preceding
   implementation. This is engineering evidence, not a competitor result.
+- The source-bound production Apple M1 gate executes the complete CLI path in
+  isolated temporary directories with one warmup and five measured runs. It
+  passes exact 11-artifact and semantic-provenance repeatability, Apple Metal
+  AHD with no fallback, measured-only archival policy, native energy, low-power,
+  and thermal gates. Wall p50/p95 is 5.939/6.073 seconds; stage p95 is
+  0.899 seconds decode, 2.901 seconds fusion, and 0.070 seconds Metal
+  demosaic/postprocess. Maximum physical footprint/RSS/primary energy are
+  310.3 MiB/711.4 MiB/41.603 J, with nominal thermal state throughout.
+  Aggregate evidence is retained in
+  `docs/benchmarks/apple_nef_fusion_qualification_2026-07-27.json`; the private
+  uncalibrated fixture makes this an integration/performance result, not a
+  quality-superiority result.
 
 Not yet qualified:
 
@@ -141,7 +153,8 @@ Not yet qualified:
 - Live posterior extraction, calibrated lens-drive/readback, production server
   camera-adapter integration, and real efficiency qualification for the
   deterministic uncertainty-driven exposure/focus planner.
-- Release-mode Apple Silicon timing, memory, thermal, and energy baselines.
+- Redistributable NEF timing fixtures, full-sensor 8280x5520 qualification, and
+  equivalent release gates on every supported Apple Silicon generation.
 
 The implementation-grade literature mapping and rejection policy for
 generative recovery are recorded in `docs/HDR_FOCUS_RESEARCH_2026.md`.
