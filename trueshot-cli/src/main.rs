@@ -2559,6 +2559,9 @@ fn run_burst_pipeline(
             let memory_permit =
                 memory_credits.acquire(estimate.peak_memory_bytes, &cancellation)?;
             ensure_not_cancelled(&cancellation)?;
+            let source_input_bytes = sequence_source_bytes(sequence)?;
+            let expected_source_page_faults =
+                source_input_bytes.div_ceil(host_page_size_bytes().max(1));
 
             step_pb.set_message("Decoding native ROI group");
             let faults_before = major_page_faults();
@@ -2587,6 +2590,11 @@ fn run_burst_pipeline(
             )?;
             let fusion_seconds = fusion_started.elapsed().as_secs_f64();
             drop(group);
+            let released_input_arena_bytes = if estimate.release_input_before_postprocess {
+                native_arena.release() as u64
+            } else {
+                0
+            };
             ensure_not_cancelled(&cancellation)?;
             let fused_bytes = fused.size_bytes();
             step_pb.inc(1);
@@ -2926,9 +2934,12 @@ fn run_burst_pipeline(
                     "processing_before_export_seconds": group_started.elapsed().as_secs_f64(),
                     "decoded_megapixels": decoded_megapixels,
                     "native_input_bytes": native_input_bytes,
+                    "input_arena_released_before_postprocess": released_input_arena_bytes,
                     "fused_bytes": fused_bytes,
                     "admitted_peak_memory_bytes": estimate.peak_memory_bytes,
-                    "major_page_faults": major_page_faults
+                    "major_page_faults": major_page_faults,
+                    "source_input_bytes": source_input_bytes,
+                    "expected_source_page_faults": expected_source_page_faults
                 }),
             );
             let fusion_report = serde_json::to_vec_pretty(&fusion_report_value)?;
@@ -2951,6 +2962,7 @@ fn run_burst_pipeline(
                 decode_seconds,
                 decoded_megapixels,
                 major_page_faults,
+                expected_source_page_faults,
                 export: Box::new(move || {
                     // Retain admission credits until every large array is written
                     // and dropped by the export worker.
@@ -3122,6 +3134,7 @@ fn run_burst_pipeline(
                     writer_wait_seconds,
                     available_memory_ratio: available_memory_ratio(),
                     major_page_faults: task.major_page_faults,
+                    expected_source_page_faults: task.expected_source_page_faults,
                 };
                 export_sender
                     .send(task)
@@ -3131,12 +3144,13 @@ fn run_burst_pipeline(
                     let adjustment = controller.observe(pressure_sample);
                     if adjustment.changed {
                         tracing::info!(
-                            "Adaptive NEF workers: {} -> {} (decode {:.2}s, writer wait {:.2}s, major faults {})",
+                            "Adaptive NEF workers: {} -> {} (decode {:.2}s, writer wait {:.2}s, major faults {}, expected source faults {})",
                             adjustment.previous_workers,
                             adjustment.workers,
                             pressure_sample.decode_seconds,
                             pressure_sample.writer_wait_seconds,
                             pressure_sample.major_page_faults,
+                            pressure_sample.expected_source_page_faults,
                         );
                         options.max_parallel_sequences = Some(adjustment.workers);
                         loader = build_loader(options.clone());
@@ -3268,6 +3282,7 @@ struct BurstExportTask {
     decode_seconds: f64,
     decoded_megapixels: f64,
     major_page_faults: u64,
+    expected_source_page_faults: u64,
     export: BurstExportJob,
 }
 
@@ -3362,6 +3377,33 @@ fn available_memory_ratio() -> f64 {
     } else {
         resources.available_memory as f64 / resources.total_memory as f64
     }
+}
+
+fn sequence_source_bytes(sequence: &trueshot_core::types::Sequence) -> Result<u64> {
+    sequence.paths.iter().try_fold(0u64, |total, path| {
+        let bytes = std::fs::metadata(path)
+            .with_context(|| format!("Read source metadata for {}", path.display()))?
+            .len();
+        total
+            .checked_add(bytes)
+            .context("Sequence source byte count overflow")
+    })
+}
+
+#[cfg(unix)]
+fn host_page_size_bytes() -> u64 {
+    // SAFETY: sysconf has no pointer arguments and _SC_PAGESIZE is side-effect free.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size > 0 {
+        page_size as u64
+    } else {
+        4096
+    }
+}
+
+#[cfg(not(unix))]
+fn host_page_size_bytes() -> u64 {
+    4096
 }
 
 #[cfg(unix)]
@@ -5943,6 +5985,7 @@ mod burst_pipeline_tests {
                 decode_seconds: 0.1,
                 decoded_megapixels: 1.0,
                 major_page_faults: 0,
+                expected_source_page_faults: 0,
                 export: Box::new(|| panic!("synthetic exporter panic")),
             })
             .unwrap();
@@ -5957,6 +6000,7 @@ mod burst_pipeline_tests {
                 decode_seconds: 0.1,
                 decoded_megapixels: 1.0,
                 major_page_faults: 0,
+                expected_source_page_faults: 0,
                 export: Box::new(|| Ok(Vec::new())),
             })
             .unwrap();

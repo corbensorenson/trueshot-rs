@@ -254,7 +254,7 @@ impl Z9NefParser {
 
         // Read main IFD (IFD0)
         let ifd0 = self.tiff_parser.read_ifd(&mut reader, header.ifd_offset)?;
-        tracing::info!("IFD0 contains {} entries", ifd0.len());
+        tracing::debug!("IFD0 contains {} entries", ifd0.len());
         let camera_make = self
             .tiff_parser
             .read_ascii(
@@ -271,7 +271,7 @@ impl Z9NefParser {
                     .context("NEF IFD0 is missing camera model")?,
             )
             .context("Unable to read NEF camera model")?;
-        tracing::info!("NEF camera identity: {} {}", camera_make, camera_model);
+        tracing::debug!("NEF camera identity: {} {}", camera_make, camera_model);
 
         // Check for additional IFDs that might contain RAW data
         let mut current_ifd_offset = header.ifd_offset;
@@ -299,7 +299,7 @@ impl Z9NefParser {
 
             // Debug: Print all tags in this IFD
             if ifd_index == 0 {
-                tracing::info!("IFD0 tags: {:?}", ifd.keys().collect::<Vec<_>>());
+                tracing::debug!("IFD0 tags: {:?}", ifd.keys().collect::<Vec<_>>());
 
                 // First, look for EXIF IFD and MakerNote
                 if let Some(exif_entry) = ifd.get(&34665) {
@@ -344,7 +344,7 @@ impl Z9NefParser {
                     );
                     if tag > 30000 {
                         // Nikon-specific tags are usually > 30000
-                        tracing::info!(
+                        tracing::debug!(
                             "Nikon tag {}: offset={}, count={}",
                             tag,
                             entry.value_offset,
@@ -353,7 +353,7 @@ impl Z9NefParser {
                     }
                     if tag == 37500 {
                         // MakerNote tag in IFD0 (fallback)
-                        tracing::info!(
+                        tracing::debug!(
                             "MakerNote found in IFD0 at offset: {}, size: {}",
                             entry.value_offset,
                             entry.count
@@ -376,7 +376,7 @@ impl Z9NefParser {
                         if let Ok(subifd_offsets) =
                             self.tiff_parser.read_u32_array(&mut reader, entry)
                         {
-                            tracing::info!("Found {} SubIFDs", subifd_offsets.len());
+                            tracing::debug!("Found {} SubIFDs", subifd_offsets.len());
 
                             // Check each SubIFD for RAW data
                             for (i, &subifd_offset) in subifd_offsets.iter().enumerate() {

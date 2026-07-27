@@ -40,7 +40,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--quality", choices=("low", "medium", "high", "ultra"), default="ultra")
     parser.add_argument("--jobs", type=int)
+    parser.add_argument(
+        "--full-frame",
+        action="store_true",
+        help="disable preview-derived cropping and qualify the complete native sensor frame",
+    )
+    parser.add_argument("--expected-width", type=int)
+    parser.add_argument("--expected-height", type=int)
     parser.add_argument("--memory-budget-mib", type=int, default=512)
+    parser.add_argument("--max-pagein-amplification", type=float, default=1.25)
+    parser.add_argument("--minimum-free-disk-mib", type=int, default=2048)
     parser.add_argument("--max-wall-p95-seconds", type=float, default=8.0)
     parser.add_argument("--max-rss-mib", type=float, default=832.0)
     parser.add_argument("--max-footprint-mib", type=float, default=384.0)
@@ -63,12 +72,22 @@ def parse_args() -> argparse.Namespace:
         parser.error("--warmups cannot be negative")
     if args.jobs is not None and args.jobs < 1:
         parser.error("--jobs must be positive")
+    if (args.expected_width is None) != (args.expected_height is None):
+        parser.error("--expected-width and --expected-height must be supplied together")
+    if args.full_frame and args.expected_width is None:
+        parser.error("--full-frame requires --expected-width and --expected-height")
+    if args.expected_width is not None and (
+        args.expected_width < 1 or args.expected_height < 1
+    ):
+        parser.error("expected dimensions must be positive")
     for name in (
         "memory_budget_mib",
+        "max_pagein_amplification",
         "max_wall_p95_seconds",
         "max_rss_mib",
         "max_footprint_mib",
         "max_energy_joules",
+        "minimum_free_disk_mib",
     ):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
@@ -139,6 +158,7 @@ def host_record() -> dict[str, Any]:
         "architecture": platform.machine(),
         "hardware_model": product,
         "memory_bytes": memory,
+        "page_size_bytes": int(os.sysconf("SC_PAGE_SIZE")),
         "macos_version": os_version,
         "macos_build": os_build,
     }
@@ -187,10 +207,32 @@ def inspect_output(output: Path) -> dict[str, Any]:
             raise RuntimeError("unexpected fusion provenance schema")
 
     group_performance = [report["performance"] for report in fusion_reports]
+    group_geometry = [
+        {
+            "width": int(report["width"]),
+            "height": int(report["height"]),
+            "crop_origin_x": int(report["crop_origin"]["x"]),
+            "crop_origin_y": int(report["crop_origin"]["y"]),
+            "frame_count": int(report["frame_count"]),
+            "decoded_megapixels": float(report["performance"]["decoded_megapixels"]),
+            "admitted_peak_memory_bytes": int(
+                report["performance"]["admitted_peak_memory_bytes"]
+            ),
+            "native_input_bytes": int(report["performance"]["native_input_bytes"]),
+            "input_arena_released_before_postprocess": int(
+                report["performance"].get(
+                    "input_arena_released_before_postprocess", 0
+                )
+            ),
+            "major_page_faults": int(report["performance"]["major_page_faults"]),
+        }
+        for report in fusion_reports
+    ]
     return {
         "duration_seconds": float(run_report["duration_seconds"]),
         "performance": performance,
         "group_performance": group_performance,
+        "group_geometry": group_geometry,
         "artifact_hashes": artifact_hashes,
         "artifact_bytes": artifact_bytes,
         "fusion_semantics": canonical_semantics(fusion_reports),
@@ -223,9 +265,12 @@ def execute_once(
     ]
     if args.jobs is not None:
         command.extend(["--jobs", str(args.jobs)])
+    if args.full_frame:
+        command.append("--full-frame")
     environment = os.environ.copy()
     environment["TRUESHOT_MEMORY_BUDGET_MIB"] = str(args.memory_budget_mib)
     environment["TRUESHOT_RESUME_VERIFY"] = "full"
+    environment["RUST_LOG"] = "warn"
     if args.dev_license:
         environment["TRUESHOT_LICENSE_DEV_MODE"] = "1"
     output.mkdir(parents=True)
@@ -252,6 +297,8 @@ def aggregate(
     source_count: int,
     source_bytes: int,
     source_revision: str,
+    source_tracked_tree_clean: bool,
+    free_disk_bytes_before: int,
 ) -> tuple[dict[str, Any], list[str]]:
     durations = [item["duration_seconds"] for item in observations]
     rss = [
@@ -298,6 +345,84 @@ def aggregate(
         and item["artifacts"] == reference["artifacts"]
         and item["demosaic_adapters"] == reference["demosaic_adapters"]
         for item in observations[1:]
+    )
+    expected_geometry = (
+        None
+        if args.expected_width is None
+        else {
+            "width": args.expected_width,
+            "height": args.expected_height,
+            "crop_origin_x": 0 if args.full_frame else None,
+            "crop_origin_y": 0 if args.full_frame else None,
+        }
+    )
+    geometry_exact = True
+    decoded_extent_exact = True
+    admitted_memory_within_budget = True
+    oversized_input_released = True
+    maximum_major_page_faults = 0
+    maximum_admitted_memory_bytes = 0
+    for observation in observations:
+        for geometry in observation["group_geometry"]:
+            if expected_geometry is not None:
+                geometry_exact &= (
+                    geometry["width"] == expected_geometry["width"]
+                    and geometry["height"] == expected_geometry["height"]
+                    and (
+                        expected_geometry["crop_origin_x"] is None
+                        or geometry["crop_origin_x"]
+                        == expected_geometry["crop_origin_x"]
+                    )
+                    and (
+                        expected_geometry["crop_origin_y"] is None
+                        or geometry["crop_origin_y"]
+                        == expected_geometry["crop_origin_y"]
+                    )
+                )
+            expected_decoded_megapixels = (
+                geometry["frame_count"]
+                * geometry["width"]
+                * geometry["height"]
+                / 1_000_000.0
+            )
+            decoded_extent_exact &= math.isclose(
+                geometry["decoded_megapixels"],
+                expected_decoded_megapixels,
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+            maximum_admitted_memory_bytes = max(
+                maximum_admitted_memory_bytes,
+                geometry["admitted_peak_memory_bytes"],
+            )
+            admitted_memory_within_budget &= (
+                geometry["admitted_peak_memory_bytes"]
+                <= args.memory_budget_mib * MIB
+            )
+            if args.full_frame:
+                oversized_input_released &= (
+                    geometry["input_arena_released_before_postprocess"]
+                    >= geometry["native_input_bytes"]
+                )
+            maximum_major_page_faults = max(
+                maximum_major_page_faults,
+                geometry["major_page_faults"],
+            )
+    page_size_bytes = int(host["page_size_bytes"])
+    decode_pagein_amplification = max(
+        sum(
+            geometry["major_page_faults"]
+            for geometry in observation["group_geometry"]
+        )
+        * page_size_bytes
+        / source_bytes
+        for observation in observations
+    )
+    process_pagein_amplification = max(
+        int(observation["performance"]["counters"]["pageins"])
+        * page_size_bytes
+        / source_bytes
+        for observation in observations
     )
     energy_available = all(
         int(item["performance"]["counters"]["energy_nj"]) > 0 for item in observations
@@ -363,6 +488,11 @@ def aggregate(
             "p50": percentile(disk_written, 0.50),
             "p95": percentile(disk_written, 0.95),
         },
+        "maximum_admitted_memory_bytes": maximum_admitted_memory_bytes,
+        "maximum_major_page_faults": maximum_major_page_faults,
+        "maximum_decode_pagein_amplification": decode_pagein_amplification,
+        "maximum_process_pagein_amplification": process_pagein_amplification,
+        "free_disk_bytes_before": free_disk_bytes_before,
     }
     gates = {
         "maximum_wall_p95_seconds": args.max_wall_p95_seconds,
@@ -378,6 +508,13 @@ def aggregate(
         "require_exact_semantic_provenance": True,
         "require_metal_ahd_without_fallback": True,
         "require_measured_only_archival": True,
+        "require_expected_geometry": expected_geometry is not None,
+        "require_exact_decoded_extent": True,
+        "require_admitted_memory_within_budget": True,
+        "require_oversized_input_release": args.full_frame,
+        "require_clean_tracked_source": True,
+        "maximum_pagein_amplification": args.max_pagein_amplification,
+        "minimum_free_disk_bytes": args.minimum_free_disk_mib * MIB,
     }
     failures: list[str] = []
     if metrics["wall_seconds"]["p95"] > args.max_wall_p95_seconds:
@@ -404,6 +541,23 @@ def aggregate(
         failures.append("semantic fusion provenance differed across independent runs")
     if not same_shape:
         failures.append("run group/artifact/adapter shape differed")
+    if expected_geometry is not None and not geometry_exact:
+        failures.append("decoded output did not match the expected native geometry")
+    if not decoded_extent_exact:
+        failures.append("reported decoded megapixels did not match frame count and geometry")
+    if not admitted_memory_within_budget:
+        failures.append("admitted peak memory exceeded the configured budget")
+    if args.full_frame and not oversized_input_released:
+        failures.append("full-frame input arena overlapped RGB postprocessing")
+    if not source_tracked_tree_clean:
+        failures.append("tracked source tree was not clean at qualification start")
+    if (
+        decode_pagein_amplification > args.max_pagein_amplification
+        or process_pagein_amplification > args.max_pagein_amplification
+    ):
+        failures.append("source page-in amplification exceeded the declared ceiling")
+    if free_disk_bytes_before < args.minimum_free_disk_mib * MIB:
+        failures.append("free disk space was below the declared qualification floor")
 
     baseline_summary = None
     if args.baseline:
@@ -442,9 +596,10 @@ def aggregate(
                 failures.append(f"{name} regressed more than {args.maximum_regression:.1%}")
 
     record = {
-        "schema": "trueshot.apple-nef-fusion-qualification.v1",
+        "schema": "trueshot.apple-nef-fusion-qualification.v2",
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "source_revision": source_revision,
+        "source_tracked_tree_clean": source_tracked_tree_clean,
         "profile": "release-dev-license" if args.dev_license else "release",
         "host": host,
         "fixture": {
@@ -458,6 +613,9 @@ def aggregate(
             "warmups": args.warmups,
             "quality": args.quality,
             "jobs": args.jobs,
+            "full_frame": args.full_frame,
+            "expected_width": args.expected_width,
+            "expected_height": args.expected_height,
             "memory_budget_bytes": args.memory_budget_mib * MIB,
             "depth_export": True,
             "qualification_dev_license": args.dev_license,
@@ -474,6 +632,10 @@ def aggregate(
             "artifact_sha256": reference["artifact_hashes"],
             "artifact_bytes": reference["artifact_bytes"],
             "demosaic_adapters": reference["demosaic_adapters"],
+            "geometry_exact": geometry_exact,
+            "decoded_extent_exact": decoded_extent_exact,
+            "oversized_input_released": oversized_input_released,
+            "group_geometry": reference["group_geometry"],
         },
         "gates": gates,
         "baseline_comparison": baseline_summary,
@@ -482,6 +644,12 @@ def aggregate(
         "scope": (
             "Production process --mode burst on one private real NEF group; aggregate "
             "performance, determinism, Metal, and measured-only integration evidence. "
+            + (
+                "The complete native sensor frame is decoded and geometry-gated. "
+                if args.full_frame
+                else "A preview-derived native ROI is decoded. "
+            )
+            +
             "This is not calibrated sensor/lens ground truth or competitor quality evidence."
         ),
     }
@@ -524,9 +692,24 @@ def main() -> int:
 
     corpus_digest, source_bytes = corpus_identity(sources)
     host = host_record()
+    free_disk_bytes_before = shutil.disk_usage(root).free
+    if free_disk_bytes_before < args.minimum_free_disk_mib * MIB:
+        raise SystemExit(
+            "qualification requires at least "
+            f"{args.minimum_free_disk_mib} MiB free on the output volume"
+        )
     source_revision = run_checked(
         ["git", "rev-parse", "HEAD"], capture_output=True
     ).stdout.strip()
+    source_tracked_tree_clean = (
+        subprocess.run(["git", "diff", "--quiet"], check=False).returncode == 0
+        and subprocess.run(["git", "diff", "--cached", "--quiet"], check=False).returncode
+        == 0
+    )
+    if not source_tracked_tree_clean:
+        raise SystemExit(
+            "qualification requires a clean tracked source tree so evidence maps to HEAD"
+        )
     temporary = Path(tempfile.mkdtemp(prefix="trueshot-apple-nef-qualification."))
     observations: list[dict[str, Any]] = []
     logs: list[str] = []
@@ -546,6 +729,8 @@ def main() -> int:
             len(sources),
             source_bytes,
             source_revision,
+            source_tracked_tree_clean,
+            free_disk_bytes_before,
         )
         print(json.dumps(record, indent=2, sort_keys=True))
         if args.record:

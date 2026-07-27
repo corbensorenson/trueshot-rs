@@ -456,7 +456,7 @@ impl NikonCompressionMeta {
                 );
             }
         } else {
-            tracing::info!(
+            tracing::debug!(
                 "Lossless 0x46/0x30: using Nikon fixed Huffman tree (not stored in MakerNote)"
             );
         }
@@ -1294,7 +1294,7 @@ impl NikonDecompressor {
                         row_str.push_str(&format!("[{}:{}] ", color, val));
                     }
                 }
-                tracing::info!("Bayer row {}: {}", y, row_str);
+                tracing::debug!("Bayer row {}: {}", y, row_str);
             }
         }
 

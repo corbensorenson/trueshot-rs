@@ -219,10 +219,13 @@ pub struct NativeSequenceMemoryEstimate {
     pub fusion_output_bytes: u64,
     pub worker_scratch_bytes: u64,
     pub demosaic_scratch_bytes: u64,
+    pub release_input_before_postprocess: bool,
     pub peak_memory_bytes: u64,
 }
 
 impl NativeSequenceMemoryEstimate {
+    pub const MAX_REUSABLE_INPUT_ARENA_BYTES: u64 = 512 * 1024 * 1024;
+
     pub fn estimate(
         frame_count: usize,
         width: usize,
@@ -314,12 +317,22 @@ impl NativeSequenceMemoryEstimate {
             .and_then(|value| value.checked_add(12 * 1024 * 1024))
             .and_then(|value| value.checked_add(demosaic_scratch_bytes))
             .context("Native postprocess peak estimate overflow")?;
+        let release_input_before_postprocess =
+            input_arena_bytes > Self::MAX_REUSABLE_INPUT_ARENA_BYTES;
+        let postprocess_peak = if release_input_before_postprocess {
+            postprocess_peak
+        } else {
+            postprocess_peak
+                .checked_add(input_arena_bytes)
+                .context("Native retained-arena postprocess estimate overflow")?
+        };
         let peak_memory_bytes = fusion_peak.max(postprocess_peak);
         Ok(Self {
             input_arena_bytes,
             fusion_output_bytes,
             worker_scratch_bytes,
             demosaic_scratch_bytes,
+            release_input_before_postprocess,
             // Reserve 15% for allocator fragmentation and library internals.
             peak_memory_bytes: peak_memory_bytes + peak_memory_bytes / 7,
         })
@@ -445,6 +458,8 @@ pub struct PipelinePressureSample {
     pub writer_wait_seconds: f64,
     pub available_memory_ratio: f64,
     pub major_page_faults: u64,
+    /// File-backed faults expected from one demand-paged pass over the inputs.
+    pub expected_source_page_faults: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,7 +512,14 @@ impl AdaptiveDecodeController {
             sample.writer_wait_seconds > (sample.decode_seconds * 0.35).max(0.050);
         let memory_pressure =
             sample.available_memory_ratio.is_finite() && sample.available_memory_ratio < 0.15;
-        let paging_pressure = sample.major_page_faults >= 32;
+        // mmap-backed RAW ingestion normally incurs one major fault per source
+        // page. Back off only when faults materially exceed that expected pass;
+        // otherwise a cold cache would be misclassified as swap pressure.
+        let page_fault_headroom = sample.expected_source_page_faults / 4 + 32;
+        let paging_pressure = sample.major_page_faults
+            > sample
+                .expected_source_page_faults
+                .saturating_add(page_fault_headroom);
         let throughput_regressed = prior_throughput
             .is_some_and(|prior| throughput < prior * 0.82 && sample.decode_seconds > 0.050);
 
@@ -877,6 +899,35 @@ mod tests {
     }
 
     #[test]
+    fn full_sensor_estimate_releases_input_before_rgb_postprocess() {
+        let full_sensor = NativeSequenceMemoryEstimate::estimate(
+            21,
+            8280,
+            5520,
+            8,
+            256,
+            4,
+            20,
+            24,
+            1024,
+            486_198_848,
+            false,
+        )
+        .unwrap();
+        assert!(full_sensor.release_input_before_postprocess);
+        assert!(
+            full_sensor.input_arena_bytes
+                > NativeSequenceMemoryEstimate::MAX_REUSABLE_INPUT_ARENA_BYTES
+        );
+
+        let roi = NativeSequenceMemoryEstimate::estimate(
+            21, 1310, 1304, 8, 256, 4, 20, 24, 1024, 0, false,
+        )
+        .unwrap();
+        assert!(!roi.release_input_before_postprocess);
+    }
+
+    #[test]
     fn reclaimable_memory_is_overflow_safe_and_capped_to_physical_ram() {
         assert_eq!(
             reclaimable_memory_bytes(16_384, 10, 20, 5, u64::MAX),
@@ -910,6 +961,7 @@ mod tests {
             writer_wait_seconds: 0.5,
             available_memory_ratio: 0.5,
             major_page_faults: 0,
+            expected_source_page_faults: 0,
         };
         assert_eq!(controller.observe(pressure).workers, 6);
 
@@ -927,5 +979,25 @@ mod tests {
             ..stable
         };
         assert_eq!(controller.observe(paging).workers, 6);
+    }
+
+    #[test]
+    fn adaptive_workers_ignore_one_expected_mmap_source_pass() {
+        let mut controller = AdaptiveDecodeController::new(8, 12);
+        let cold_cache = PipelinePressureSample {
+            decoded_megapixels: 960.0,
+            decode_seconds: 2.5,
+            writer_wait_seconds: 0.0,
+            available_memory_ratio: 0.5,
+            major_page_faults: 57_404,
+            expected_source_page_faults: 60_694,
+        };
+        assert!(!controller.observe(cold_cache).changed);
+
+        let amplified = PipelinePressureSample {
+            major_page_faults: 80_000,
+            ..cold_cache
+        };
+        assert_eq!(controller.observe(amplified).workers, 6);
     }
 }

@@ -50,6 +50,17 @@ impl NativeGroupArena {
         self.storage.capacity() * std::mem::size_of::<u16>()
     }
 
+    /// Return retained native storage before a larger downstream stage.
+    ///
+    /// Ordinary ROI groups keep their allocation for reuse. Full-sensor groups
+    /// can release the arena once fusion no longer borrows it so postprocessing
+    /// does not overlap an unnecessary multi-gigabyte input buffer.
+    pub fn release(&mut self) -> usize {
+        let released = self.capacity_bytes();
+        self.storage = Vec::new();
+        released
+    }
+
     fn prepare(&mut self, frame_count: usize, width: usize, height: usize) -> Result<&mut [u16]> {
         let frame_pixels = width
             .checked_mul(height)
@@ -498,6 +509,16 @@ mod tests {
             assert_eq!(storage.len(), 3 * 256 * 256);
         }
         assert_eq!(arena.capacity_bytes(), capacity);
+    }
+
+    #[test]
+    fn native_group_arena_releases_oversized_storage() {
+        let mut arena = NativeGroupArena::default();
+        arena.prepare(3, 64, 32).unwrap();
+        let retained = arena.capacity_bytes();
+        assert!(retained >= 3 * 64 * 32 * std::mem::size_of::<u16>());
+        assert_eq!(arena.release(), retained);
+        assert_eq!(arena.capacity_bytes(), 0);
     }
 
     #[test]
