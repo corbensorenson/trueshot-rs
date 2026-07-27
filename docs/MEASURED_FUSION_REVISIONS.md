@@ -41,9 +41,19 @@ plaintext project sibling.
 
 ## Refusion
 
-Run the same burst input and processing configuration used for the base. Clear
-projects expose an exact absolute argument. For encrypted projects, download
-the JSON from the Inspector and provide that downloaded path:
+Current base reports contain a strict `trueshot.fusion.replay.v1` capsule that
+binds all processing controls and the SHA-256 of every project-local calibration
+profile. After saving the edit, choose **Run measured revision**. The local
+server queues the work, reconstructs arguments only from that capsule, sends the
+exact base report and edit through a bounded stdin envelope, and launches only
+the packaged sibling `trueshot` processor without a shell. Progress, bounded
+failure diagnostics, and cancellation remain in the Inspector. On completion,
+the Inspector selects the exact edit-digest-matched result and operator map.
+
+The manual CLI route remains available. Run the same burst input and processing
+configuration used for the base. Clear projects expose an exact absolute
+argument. For encrypted projects, download the JSON from the Inspector and
+provide that downloaded path:
 
 ```text
 trueshot process --mode burst <existing options> --fusion-edits <revision.json>
@@ -54,9 +64,16 @@ changed base, crop, frame order, or capture identity fails closed. Successful
 output adds `_edit_<digest-prefix>` to the filename and emits
 `*_fusion_edit_map.png`; value `255` marks every exact operator-selected pixel.
 
-## Current Boundary
+## Security Boundaries
 
-Authoring and deterministic CLI refusion are implemented. One-click local
-server execution is still pending. Manual glare and boundary controls will only
-be added with physical constraints that cannot weaken measured-only archival
-semantics.
+- Project, report, edit, profile, and output paths are canonicalized and cannot
+  escape through symbolic links.
+- Encrypted report and edit artifacts are authenticated in bounded memory
+  without plaintext project siblings.
+- Encrypted RAW input currently fails closed because random-access RAW decoding
+  needs an authenticated seekable reader; TrueShot does not stage decrypted RAW
+  files as a convenience workaround.
+- Output-scope revision artifacts are encrypted immediately after the local
+  processor closes them and remain covered by the background stability sweep.
+- Manual glare and boundary controls remain unavailable until their edits can
+  preserve physical visibility and measured-only archival constraints.

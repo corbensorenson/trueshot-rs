@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { AlertTriangle, CheckCircle2, Copy, Crosshair, Download, Gauge, Layers3, Loader2, Save, ScanSearch, ShieldCheck, Trash2, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Copy, Crosshair, Download, Gauge, Layers3, Loader2, Play, Save, ScanSearch, ShieldCheck, Square, Trash2, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 import {
   createLicenseTrial,
   createFusionEdit,
+  executeFusionRevision,
+  getFusionRevision,
+  cancelFusionRevision,
   fetchFusionArtifact,
   getLicenseBundles,
   getLicenseStatus,
@@ -12,6 +15,7 @@ import {
   type FusionEditOperation,
   type FusionEditReason,
   type FusionEditReceipt,
+  type FusionRevisionJob,
   type FusionReportInventory,
   type LicenseBundleInfo,
 } from '../api/client';
@@ -108,6 +112,7 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
   const [editNote, setEditNote] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
   const [editReceipt, setEditReceipt] = useState<FusionEditReceipt | null>(null);
+  const [revisionJob, setRevisionJob] = useState<FusionRevisionJob | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
 
   const report = useMemo(
@@ -116,15 +121,20 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
   );
   const artifact = report?.artifacts[layer] ?? null;
 
-  const loadReports = useCallback(async () => {
+  const loadReports = useCallback(async (preferredEditDigest?: string) => {
     if (!projectId) return;
     setLoading(true);
     setError(null);
     try {
       const result = await listFusionReports(projectId);
       setInventory(result);
-      setSelectedPath(current => result.reports.some(item => item.report_path === current)
-        ? current : result.reports[0]?.report_path ?? '');
+      setSelectedPath(current => {
+        const preferred = preferredEditDigest
+          ? result.reports.find(item => item.fusion_edit_digest === preferredEditDigest)
+          : null;
+        return preferred?.report_path ?? (result.reports.some(item => item.report_path === current)
+          ? current : result.reports[0]?.report_path ?? '');
+      });
       setLocked(false);
     } catch (requestError) {
       const entitlement = entitlementMessage(requestError);
@@ -190,7 +200,36 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
     setEditReason('motion');
     setEditNote('');
     setEditReceipt(null);
+    setRevisionJob(null);
   }, [selectedPath]);
+
+  useEffect(() => {
+    if (!open || !projectId || !revisionJob || !['pending', 'running'].includes(revisionJob.status)) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      getFusionRevision(projectId, revisionJob.id)
+        .then(job => {
+          if (cancelled) return;
+          setRevisionJob(job);
+          if (job.status === 'completed') {
+            toast.success('Measured revision completed and published.');
+            setLayer('edit');
+            void loadReports(editReceipt?.digest);
+          } else if (job.status === 'failed') {
+            setError(job.last_error ?? 'Measured revision failed.');
+          } else if (job.status === 'cancelled') {
+            toast('Measured revision cancelled.');
+          }
+        })
+        .catch(pollError => {
+          if (!cancelled) setError(pollError instanceof Error ? pollError.message : 'Revision status unavailable.');
+        });
+    }, 750);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, projectId, revisionJob, editReceipt?.digest, loadReports]);
 
   const startTrial = async () => {
     setUnlockBusy(true);
@@ -326,6 +365,28 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
     anchor.download = editReceipt.download_filename;
     anchor.click();
     URL.revokeObjectURL(url);
+  };
+
+  const runMeasuredRevision = async () => {
+    if (!projectId || !report || !editReceipt) return;
+    setError(null);
+    try {
+      const job = await executeFusionRevision(projectId, report, editReceipt);
+      setRevisionJob(job);
+      toast.success('Measured revision queued on this Mac.');
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : 'Revision execution failed.');
+    }
+  };
+
+  const stopMeasuredRevision = async () => {
+    if (!projectId || !revisionJob) return;
+    try {
+      await cancelFusionRevision(projectId, revisionJob.id);
+      toast('Cancellation requested at the next durable boundary.');
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : 'Cancellation failed.');
+    }
   };
 
   if (!open || !projectId) return null;
@@ -511,7 +572,27 @@ export const FusionInspector = ({ projectId, open, onClose }: FusionInspectorPro
                           <button onClick={downloadEditDocument} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-accent-cyan"><Download className="h-3.5 w-3.5" />Download revision JSON</button>
                           {editReceipt.cli_argument && <button onClick={() => void copyRefusionArgument()} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-accent-cyan"><Copy className="h-3.5 w-3.5" />Copy exact refusion argument</button>}
                         </div>
-                        {editReceipt.encrypted && <div className="mt-2 text-[10px] leading-relaxed text-amber-300">The project copy is encrypted. Download this in-memory JSON, then pass the downloaded file to <code>--fusion-edits</code>.</div>}
+                        <button
+                          onClick={() => void runMeasuredRevision()}
+                          disabled={!report.revision_executable || Boolean(revisionJob && ['pending', 'running'].includes(revisionJob.status))}
+                          className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-400 px-3 py-2.5 text-xs font-black uppercase tracking-wider text-black disabled:opacity-35"
+                        >
+                          {revisionJob && ['pending', 'running'].includes(revisionJob.status) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                          {revisionJob && ['pending', 'running'].includes(revisionJob.status) ? 'Processing locally' : 'Run measured revision'}
+                        </button>
+                        {!report.revision_executable && <div className="mt-2 text-[10px] leading-relaxed text-amber-300">This base lacks a signed replay capsule. Rerun native fusion once with the current build to enable one-click execution.</div>}
+                        {revisionJob && (
+                          <div className="mt-2 rounded-md border border-white/10 bg-black/15 p-2">
+                            <div className="flex items-center justify-between gap-2 text-[10px]">
+                              <span className="font-bold uppercase tracking-wider text-[color:var(--ts-text)]">{humanize(revisionJob.status)}</span>
+                              <span className="tabular-nums text-[color:var(--ts-muted)]">{Math.round(revisionJob.progress * 100)}%</span>
+                            </div>
+                            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-emerald-400 transition-all duration-500" style={{ width: `${Math.max(2, revisionJob.progress * 100)}%` }} /></div>
+                            {['pending', 'running'].includes(revisionJob.status) && <button onClick={() => void stopMeasuredRevision()} className="mt-2 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-red-300"><Square className="h-3 w-3" />Cancel</button>}
+                            {revisionJob.last_error && <div className="mt-2 text-[10px] text-red-300">{revisionJob.last_error}</div>}
+                          </div>
+                        )}
+                        {editReceipt.encrypted && <div className="mt-2 text-[10px] leading-relaxed text-emerald-300">The edit remains encrypted at rest and is authenticated in memory before bounded local execution.</div>}
                         <div className="mt-2 text-[10px] text-[color:var(--ts-muted)]">{editReceipt.edited_pixels.toLocaleString()} pixels · {editReceipt.encrypted ? 'encrypted at rest' : 'local project storage'}</div>
                       </div>
                     )}

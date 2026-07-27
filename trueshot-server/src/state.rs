@@ -33,6 +33,7 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     pub scheduler: Arc<Scheduler>,
     pub job_queue: Arc<JobQueue>,
+    pub fusion_revision_executor: Arc<crate::fusion_revision::FusionRevisionExecutor>,
     pub camera_manager: Arc<AsyncMutex<CameraManager>>,
     pub inventory: Arc<Inventory>,
     pub turntable: Arc<AsyncMutex<Option<Box<dyn Turntable>>>>,

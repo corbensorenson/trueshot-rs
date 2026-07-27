@@ -35,6 +35,10 @@ use trueshot_core::export::{
     save_u8_map_png_with_digest, PlyExportOptions,
 };
 use trueshot_core::fusion_edit::FusionEditDocument;
+use trueshot_core::fusion_replay::{
+    FusionReplayArtifact, FusionReplayCapsule, FusionRevisionEnvelope, FUSION_REPLAY_SCHEMA,
+    MAX_FUSION_REVISION_ENVELOPE_BYTES,
+};
 use trueshot_core::gaussian_splatting::{Camera as GsCamera, GaussianSplatTrainer, TrainingConfig};
 use trueshot_core::gpu::{get_gpu_context, GpuAhdEngine};
 use trueshot_core::intrinsics::{
@@ -258,6 +262,10 @@ enum Commands {
         /// Source-bound measured-frame edit document for one immutable burst revision
         #[arg(long)]
         fusion_edits: Option<PathBuf>,
+
+        /// Read a server-validated edit and exact base report envelope from stdin
+        #[arg(long)]
+        fusion_revision_stdin: bool,
 
         /// Skip the second CFA-safe pass when depth regularization changes a focus plane
         #[arg(long)]
@@ -661,6 +669,7 @@ fn main() -> Result<()> {
             sensor_correction_profile,
             lens_psf_profile,
             fusion_edits,
+            fusion_revision_stdin,
             no_depth_refusion,
             trial,
             trial_days,
@@ -683,6 +692,7 @@ fn main() -> Result<()> {
             sensor_correction_profile,
             lens_psf_profile,
             fusion_edits,
+            fusion_revision_stdin,
             no_depth_refusion,
             trial,
             trial_days,
@@ -802,6 +812,7 @@ fn cmd_process(
     sensor_correction_profile: Option<PathBuf>,
     lens_psf_profile: Option<PathBuf>,
     fusion_edits: Option<PathBuf>,
+    fusion_revision_stdin: bool,
     no_depth_refusion: bool,
     trial: bool,
     trial_days: Option<i64>,
@@ -818,11 +829,25 @@ fn cmd_process(
     if (sensor_noise_profile.is_some()
         || sensor_correction_profile.is_some()
         || lens_psf_profile.is_some()
-        || fusion_edits.is_some())
+        || fusion_edits.is_some()
+        || fusion_revision_stdin)
         && mode != Mode::Burst
     {
         anyhow::bail!("Sensor calibration profiles currently apply only to --mode burst");
     }
+    if fusion_edits.is_some() && fusion_revision_stdin {
+        anyhow::bail!("--fusion-edits and --fusion-revision-stdin are mutually exclusive");
+    }
+    let fusion_revision = if fusion_revision_stdin {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .take((MAX_FUSION_REVISION_ENVELOPE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .context("Read bounded fusion revision envelope from stdin")?;
+        Some(FusionRevisionEnvelope::from_json_bytes(&bytes)?)
+    } else {
+        None
+    };
     let mut license_manager = init_license_manager()?;
     let required = process_required_features(mode);
     ensure_cli_license(&mut license_manager, &required, trial, trial_days)?;
@@ -874,6 +899,7 @@ fn cmd_process(
             sensor_correction_profile.as_deref(),
             lens_psf_profile.as_deref(),
             fusion_edits.as_deref(),
+            fusion_revision.as_ref(),
             !no_depth_refusion,
             Some(&inventory_ctx),
             Some(&mut run_state),
@@ -2190,6 +2216,7 @@ fn run_burst_pipeline(
     sensor_correction_profile_path: Option<&Path>,
     lens_psf_profile_path: Option<&Path>,
     fusion_edits_path: Option<&Path>,
+    fusion_revision: Option<&FusionRevisionEnvelope>,
     depth_consistent_refusion: bool,
     _inventory_ctx: Option<&InventoryContext>,
     mut run_state: Option<&mut RunStateManager>,
@@ -2266,10 +2293,13 @@ fn run_burst_pipeline(
             profile.calibration_id
         );
     }
-    let fusion_edit = fusion_edits_path
-        .map(FusionEditDocument::load_json)
-        .transpose()
-        .context("Load measured-source fusion edit document")?;
+    let fusion_edit = match fusion_revision {
+        Some(envelope) => Some(envelope.edit.clone()),
+        None => fusion_edits_path
+            .map(FusionEditDocument::load_json)
+            .transpose()
+            .context("Load measured-source fusion edit document")?,
+    };
     let fusion_edit_digest = fusion_edit
         .as_ref()
         .map(FusionEditDocument::digest)
@@ -2340,6 +2370,25 @@ fn run_burst_pipeline(
     );
     let mut failures = Vec::new();
     let mut fusion_edit_target_seen = false;
+    let replay_capsule = build_fusion_replay_capsule(
+        input,
+        output,
+        quality,
+        jobs,
+        full_frame,
+        no_gpu,
+        export_depth,
+        full_resolution_preview,
+        preview_max_dimension,
+        deghost_strength,
+        frequency_separated_deghosting,
+        glare_spread_um,
+        glare_aware_focus,
+        depth_consistent_refusion,
+        sensor_noise_profile_path,
+        sensor_correction_profile_path,
+        lens_psf_profile_path,
+    )?;
 
     let mp = MultiProgress::new();
     let seq_pb = mp.add(ProgressBar::new(group_count));
@@ -2361,6 +2410,11 @@ fn run_burst_pipeline(
         let group_edit = fusion_edit
             .as_ref()
             .filter(|edit| edit.capture_group_id == capture_group.group_id);
+        if fusion_edit.is_some() && group_edit.is_none() {
+            seq_pb.set_message(format!("Skipped non-target {}", sequence.meta.bone_id));
+            seq_pb.inc(1);
+            continue;
+        }
         if group_edit.is_some() {
             fusion_edit_target_seen = true;
         }
@@ -2373,12 +2427,16 @@ fn run_burst_pipeline(
             let base_output =
                 burst_group_output_path(output, sequence, &capture_group.group_id, None);
             let base_report = fusion_report_path_for_output(&base_output);
-            let actual_report_sha256 = sha256_file(&base_report).with_context(|| {
-                format!(
-                    "Verify immutable base fusion report for edit {}",
-                    edit.capture_group_id
-                )
-            })?;
+            let actual_report_sha256 = if let Some(envelope) = fusion_revision {
+                hex::encode(Sha256::digest(envelope.base_report_json.as_bytes()))
+            } else {
+                sha256_file(&base_report).with_context(|| {
+                    format!(
+                        "Verify immutable base fusion report for edit {}",
+                        edit.capture_group_id
+                    )
+                })?
+            };
             if actual_report_sha256 != edit.base_report_sha256 {
                 anyhow::bail!(
                     "Fusion edit base report digest mismatch: expected {}, observed {}",
@@ -2754,6 +2812,12 @@ fn run_burst_pipeline(
                 "frequency_separated_deghosting": frequency_separated_deghosting,
                 "archival_policy": "measured_sources_only_no_generative_reconstruction"
             });
+            if let Some(replay) = replay_capsule.as_ref() {
+                fusion_report_value
+                    .as_object_mut()
+                    .expect("fusion report literal is an object")
+                    .insert("replay".to_string(), serde_json::to_value(replay)?);
+            }
             let report = fusion_report_value
                 .as_object_mut()
                 .expect("fusion report literal is an object");
@@ -3329,6 +3393,113 @@ fn fusion_revision_group_id(capture_group_id: &str, edit_digest: &str) -> String
     digest.update([0]);
     digest.update(edit_digest.as_bytes());
     hex::encode(digest.finalize())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_fusion_replay_capsule(
+    input: &Path,
+    output: &Path,
+    quality: Quality,
+    jobs: Option<usize>,
+    full_frame: bool,
+    no_gpu: bool,
+    export_depth: bool,
+    full_resolution_preview: bool,
+    preview_max_dimension: usize,
+    deghost_strength: f32,
+    frequency_separated_deghosting: bool,
+    glare_spread_um: f32,
+    glare_aware_focus: bool,
+    depth_consistent_refusion: bool,
+    sensor_noise_profile_path: Option<&Path>,
+    sensor_correction_profile_path: Option<&Path>,
+    lens_psf_profile_path: Option<&Path>,
+) -> Result<Option<FusionReplayCapsule>> {
+    let input_layout = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(input)
+    };
+    let output_layout = if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(output)
+    };
+    let Some(input_layout_parent) = input_layout.parent() else {
+        return Ok(None);
+    };
+    let Some(output_layout_parent) = output_layout.parent() else {
+        return Ok(None);
+    };
+    if input_layout.file_name().and_then(|name| name.to_str()) != Some("raw")
+        || output_layout.file_name().and_then(|name| name.to_str()) != Some("output")
+        || input_layout_parent != output_layout_parent
+    {
+        return Ok(None);
+    }
+    let input = input
+        .canonicalize()
+        .with_context(|| format!("Resolve replay input {}", input.display()))?;
+    let output = output
+        .canonicalize()
+        .with_context(|| format!("Resolve replay output {}", output.display()))?;
+    let project_root = output
+        .parent()
+        .context("Replay output has no project root")?;
+    let profile = |path: Option<&Path>| -> Result<Option<FusionReplayArtifact>> {
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("Resolve replay profile {}", path.display()))?;
+        let Ok(relative) = canonical.strip_prefix(project_root) else {
+            return Ok(None);
+        };
+        Ok(Some(FusionReplayArtifact {
+            project_relative_path: relative.to_string_lossy().replace('\\', "/"),
+            sha256: sha256_file(&canonical)?,
+        }))
+    };
+    let sensor_noise_profile = profile(sensor_noise_profile_path)?;
+    if sensor_noise_profile.is_none() && sensor_noise_profile_path.is_some() {
+        return Ok(None);
+    }
+    let sensor_correction_profile = profile(sensor_correction_profile_path)?;
+    if sensor_correction_profile.is_none() && sensor_correction_profile_path.is_some() {
+        return Ok(None);
+    }
+    let lens_psf_profile = profile(lens_psf_profile_path)?;
+    if lens_psf_profile.is_none() && lens_psf_profile_path.is_some() {
+        return Ok(None);
+    }
+    let replay = FusionReplayCapsule {
+        schema: FUSION_REPLAY_SCHEMA.to_string(),
+        project_layout: "raw_output_siblings".to_string(),
+        quality: match quality {
+            Quality::Low => "low",
+            Quality::Medium => "medium",
+            Quality::High => "high",
+            Quality::Ultra => "ultra",
+        }
+        .to_string(),
+        jobs,
+        full_frame,
+        gpu_enabled: !no_gpu,
+        export_depth,
+        full_resolution_preview,
+        preview_max_dimension,
+        deghost_strength,
+        frequency_separated_deghosting,
+        glare_spread_um,
+        glare_aware_focus,
+        depth_consistent_refusion,
+        sensor_noise_profile,
+        sensor_correction_profile,
+        lens_psf_profile,
+    };
+    replay.validate()?;
+    Ok(Some(replay))
 }
 
 fn native_fusion_config(quality: Quality) -> NativeFusionConfig {

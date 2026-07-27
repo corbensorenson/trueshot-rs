@@ -20,6 +20,7 @@ mod focus_evidence;
 pub mod focus_grouping;
 pub mod fusion_edit;
 pub mod fusion_engine;
+pub mod fusion_replay;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod grade_stats;

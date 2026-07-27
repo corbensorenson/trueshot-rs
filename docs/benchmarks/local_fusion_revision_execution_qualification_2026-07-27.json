@@ -1,0 +1,110 @@
+{
+  "schema": "trueshot.benchmark.local-fusion-revision-execution.v1",
+  "date": "2026-07-27",
+  "platform": {
+    "os": "macOS 15.0",
+    "architecture": "arm64",
+    "processor": "Apple M1",
+    "build_profile": "unoptimized development",
+    "license_mode": "explicit local development bypass"
+  },
+  "fixture": {
+    "distribution": "private",
+    "camera": "Nikon Z 9",
+    "frames": 21,
+    "focus_planes": 7,
+    "exposures_per_plane": 3,
+    "input_bytes": 994391434,
+    "roi": {
+      "x": 2890,
+      "y": 3088,
+      "width": 1310,
+      "height": 1304
+    },
+    "sensor_noise_profile": "uncalibrated",
+    "lens_psf_profile": "ideal_thin_lens_explicit_fallback"
+  },
+  "replay_contract": {
+    "schema": "trueshot.fusion.replay.v1",
+    "transport": "bounded_stdin_revision_envelope",
+    "project_layout": "raw_output_siblings",
+    "quality": "ultra",
+    "jobs": 2,
+    "full_frame": false,
+    "gpu_requested": true,
+    "preview_max_dimension": 1600,
+    "deghost_strength": 1.0,
+    "frequency_separated_deghosting": true,
+    "glare_spread_um": 80.0,
+    "glare_aware_focus": true,
+    "depth_consistent_refusion": true,
+    "profile_artifacts": []
+  },
+  "identity": {
+    "capture_group_id": "625cb984f0f34e6d87b14967cbbb9d5f16782fee7c3f23b461602aa0dc28993a",
+    "base_report_sha256": "678f12643e3b6aa1b2a155e25dc559340e4e5eca7fab5b28b22f1ff2c84dd793",
+    "edit_digest": "567667e5089412a91726bf15bb37350d067f9cb6c3da9ebfde0e282287354d0d",
+    "revision_group_id": "fac065f36386124991e97bd2443c5557fa8ff39ec77226253a7cb3d45e1910a6"
+  },
+  "edit": {
+    "operation_count": 1,
+    "edited_pixels": 1,
+    "source_frame": 6,
+    "reason": "focus",
+    "rect": {
+      "x": 982,
+      "y": 326,
+      "width": 1,
+      "height": 1
+    },
+    "policy": "aligned_uncensored_measured_frame_only_atomic_fail_closed"
+  },
+  "result": {
+    "status": "pass",
+    "base_report_unchanged": true,
+    "distinct_revision_identity": true,
+    "archival_policy": "measured_sources_only_no_generative_reconstruction",
+    "revision_report_sha256": "9cbf64d788336df7b404431d496828e5c938c27b8e8df3594dccc7113f988783",
+    "revision_tiff_sha256": "21955a9e889e963e791d0021326d845c56508ec9371f04a189c8a21c5b793d7c",
+    "revision_tiff_bytes": 13666422,
+    "operator_map_sha256": "81c7348ed54dcdee8ba26018bb8bdfdba208a010ba74545860af6f03479033b7",
+    "operator_map_selected_pixels": 1
+  },
+  "observed_debug_performance": {
+    "backend": "cpu_ahd",
+    "gpu_fallback": "qualified_metal_unavailable",
+    "admitted_peak_memory_bytes": 329651958,
+    "decode_seconds": 19.314184459,
+    "fusion_seconds": 51.33360125,
+    "demosaic_and_postprocess_seconds": 1.945458042,
+    "processing_before_export_seconds": 72.793743291,
+    "major_page_faults": 0
+  },
+  "validation": {
+    "strict_rust_clippy_core_cli_server": "pass",
+    "fusion_replay_unit_tests": {
+      "passed": 2,
+      "failed": 0
+    },
+    "fusion_edit_unit_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "cli_burst_pipeline_tests": {
+      "passed": 11,
+      "failed": 0
+    },
+    "server_fusion_revision_tests": {
+      "passed": 10,
+      "failed": 0
+    },
+    "dashboard_focused_strict_lint": "pass",
+    "dashboard_production_build": "pass"
+  },
+  "limitations": [
+    "This is a private-fixture integration and provenance qualification, not a redistributable CI fixture.",
+    "The executable replay engine was exercised directly through its production bounded stdin envelope; the HTTP queue was compiled and linted but not exercised end to end in this record.",
+    "The debug run used CPU AHD after no compatible Metal adapter was available and is not a release performance claim.",
+    "No exact sensor-noise or retained real lens profile was supplied, so this does not qualify posterior calibration or optical quality."
+  ]
+}

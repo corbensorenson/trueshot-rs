@@ -11145,6 +11145,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-stream",
+ "async-trait",
  "awc",
  "base64 0.22.1",
  "chrono",

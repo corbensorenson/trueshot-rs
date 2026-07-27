@@ -9,6 +9,7 @@ use crate::fs_safety::{
     project_size_bytes, resolve_project_child, resolve_project_child_file, resolve_project_dir,
     resolve_project_file,
 };
+use crate::fusion_revision::{preflight as preflight_fusion_revision, FusionRevisionJobPayload};
 use crate::licensing::require_license_feature;
 use crate::state::AppState;
 use actix_files::NamedFile;
@@ -25,8 +26,10 @@ use tokio::io::AsyncWriteExt;
 use trueshot_core::fusion_edit::{
     FusionEditDocument, FusionEditOperation, FUSION_EDIT_SCHEMA, MAX_FUSION_EDIT_BYTES,
 };
+use trueshot_core::fusion_replay::FusionReplayCapsule;
 use trueshot_core::licensing::Feature;
 use utoipa::ToSchema;
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_FUSION_REPORT_BYTES: usize = 2 * 1024 * 1024;
@@ -86,7 +89,18 @@ pub struct FusionReportSummary {
     pub frame_count: Option<u16>,
     pub crop_origin_x: Option<u32>,
     pub crop_origin_y: Option<u32>,
+    pub fusion_edit_digest: Option<String>,
     pub editable_base: bool,
+    pub revision_executable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ExecuteFusionRevisionRequest {
+    pub request_id: Option<Uuid>,
+    pub report_path: String,
+    pub report_sha256: String,
+    pub edit_path: String,
+    pub edit_digest: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1286,6 +1300,267 @@ pub async fn create_fusion_edit(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/projects/{id}/fusion-revisions",
+    tag = "project",
+    params(("id" = String, Path, description = "Project id")),
+    request_body = ExecuteFusionRevisionRequest,
+    responses(
+        (status = 202, description = "Measured revision queued", body = serde_json::Value),
+        (status = 400, description = "Invalid or non-replayable revision"),
+        (status = 401, description = "Unauthorized"),
+        (status = 402, description = "Advanced Capture add-on required"),
+        (status = 409, description = "Revision identity changed")
+    )
+)]
+#[post("/api/projects/{id}/fusion-revisions")]
+pub async fn execute_fusion_revision(
+    req: HttpRequest,
+    path: web::Path<String>,
+    json: web::Json<ExecuteFusionRevisionRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    if let Err(resp) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "fusion_inspector",
+    ) {
+        return resp;
+    }
+    let id = path.into_inner();
+    let payload = FusionRevisionJobPayload {
+        schema: "trueshot.fusion.revision-job.v1".to_string(),
+        project_id: id.clone(),
+        report_path: json.report_path.clone(),
+        report_sha256: json.report_sha256.clone(),
+        edit_path: json.edit_path.clone(),
+        edit_digest: json.edit_digest.clone(),
+    };
+    if let Err(error) = payload.validate() {
+        return HttpResponse::BadRequest().body(error.to_string());
+    }
+    let config = state.config.clone();
+    let preflight_payload = payload.clone();
+    match tokio::task::spawn_blocking(move || {
+        preflight_fusion_revision(&config, &preflight_payload)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return HttpResponse::Conflict().body(error.to_string()),
+        Err(error) => return HttpResponse::InternalServerError().body(error.to_string()),
+    }
+
+    let request_id = json.request_id.unwrap_or_else(Uuid::new_v4);
+    let payload_value = match serde_json::to_value(&payload) {
+        Ok(value) => value,
+        Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
+    };
+    let (record, created) = match state
+        .job_queue
+        .enqueue(
+            request_id,
+            crate::fusion_revision::FUSION_REVISION_JOB_KIND,
+            "Measured HDR/focus revision",
+            &payload_value,
+            1,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => return HttpResponse::InternalServerError().body(error.to_string()),
+    };
+    if !created {
+        let matches = state
+            .job_queue
+            .get_job_detail(record.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|(existing, existing_payload)| {
+                existing.kind == crate::fusion_revision::FUSION_REVISION_JOB_KIND
+                    && existing_payload == payload_value
+            });
+        if !matches {
+            return HttpResponse::Conflict().body("Request id is already bound to another job");
+        }
+    }
+    if created {
+        let job = match state.fusion_revision_executor.build_job(
+            record.id,
+            &state.config,
+            payload.clone(),
+        ) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = state
+                    .job_queue
+                    .sync_job_info(
+                        record.id,
+                        "failed",
+                        0.0,
+                        None,
+                        Some(Utc::now()),
+                        Some(error.to_string()),
+                    )
+                    .await;
+                return HttpResponse::InternalServerError().body(error.to_string());
+            }
+        };
+        if let Err(error) = state.scheduler.submit_with_id(record.id, job).await {
+            let _ = state
+                .job_queue
+                .sync_job_info(
+                    record.id,
+                    "failed",
+                    0.0,
+                    None,
+                    Some(Utc::now()),
+                    Some(error.to_string()),
+                )
+                .await;
+            return HttpResponse::InternalServerError().body(error.to_string());
+        }
+    }
+    log_audit(
+        &req,
+        &state,
+        AuditEvent::new(
+            audit_actor(&req).0,
+            audit_actor(&req).1,
+            "project.fusion_revision.execute",
+            id,
+            if created { "queued" } else { "idempotent" },
+            audit_actor(&req).2,
+            serde_json::json!({
+                "job_id": record.id,
+                "request_id": request_id,
+                "report_sha256": payload.report_sha256,
+                "edit_digest": payload.edit_digest
+            }),
+        ),
+    );
+    HttpResponse::Accepted().json(record)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/projects/{id}/fusion-revisions/{job_id}",
+    tag = "project",
+    params(
+        ("id" = String, Path, description = "Project id"),
+        ("job_id" = Uuid, Path, description = "Revision job id")
+    ),
+    responses(
+        (status = 200, description = "Measured revision job"),
+        (status = 401, description = "Unauthorized"),
+        (status = 402, description = "Advanced Capture add-on required"),
+        (status = 404, description = "Not found")
+    )
+)]
+#[get("/api/projects/{id}/fusion-revisions/{job_id}")]
+pub async fn get_fusion_revision(
+    req: HttpRequest,
+    path: web::Path<(String, Uuid)>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    if let Err(resp) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "fusion_inspector",
+    ) {
+        return resp;
+    }
+    let (project_id, job_id) = path.into_inner();
+    match state.job_queue.get_job_detail(job_id).await {
+        Ok(Some((record, payload)))
+            if record.kind == crate::fusion_revision::FUSION_REVISION_JOB_KIND
+                && payload
+                    .get("project_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(project_id.as_str()) =>
+        {
+            HttpResponse::Ok().json(record)
+        }
+        Ok(_) => HttpResponse::NotFound().body("Fusion revision job not found"),
+        Err(error) => HttpResponse::InternalServerError().body(error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/projects/{id}/fusion-revisions/{job_id}/cancel",
+    tag = "project",
+    params(
+        ("id" = String, Path, description = "Project id"),
+        ("job_id" = Uuid, Path, description = "Revision job id")
+    ),
+    responses(
+        (status = 202, description = "Cancellation requested"),
+        (status = 401, description = "Unauthorized"),
+        (status = 402, description = "Advanced Capture add-on required"),
+        (status = 404, description = "Not found")
+    )
+)]
+#[post("/api/projects/{id}/fusion-revisions/{job_id}/cancel")]
+pub async fn cancel_fusion_revision(
+    req: HttpRequest,
+    path: web::Path<(String, Uuid)>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    if let Err(resp) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "fusion_inspector",
+    ) {
+        return resp;
+    }
+    let (project_id, job_id) = path.into_inner();
+    let belongs = state
+        .job_queue
+        .get_job_detail(job_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|(record, payload)| {
+            record.kind == crate::fusion_revision::FUSION_REVISION_JOB_KIND
+                && payload
+                    .get("project_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(project_id.as_str())
+        });
+    if !belongs || !state.fusion_revision_executor.cancel(job_id) {
+        return HttpResponse::NotFound().body("Active fusion revision job not found");
+    }
+    log_audit(
+        &req,
+        &state,
+        AuditEvent::new(
+            audit_actor(&req).0,
+            audit_actor(&req).1,
+            "project.fusion_revision.cancel",
+            project_id,
+            "requested",
+            audit_actor(&req).2,
+            serde_json::json!({ "job_id": job_id }),
+        ),
+    );
+    HttpResponse::Accepted().json(serde_json::json!({
+        "job_id": job_id,
+        "status": "cancellation_requested"
+    }))
+}
+
+#[utoipa::path(
     get,
     path = "/api/projects/{id}/license",
     tag = "project",
@@ -2005,12 +2280,29 @@ fn parse_fusion_report_summary(
         .and_then(|origin| origin.get("y"))
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| u32::try_from(value).ok());
+    let fusion_edit_digest = object
+        .get("fusion_edit")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|edit| bounded_string(edit.get("digest"), 64))
+        .filter(|value| valid_lower_sha256(value));
     let editable_base = capture_group_id.is_some()
         && capture_group_id == revision_group_id
         && frame_count.is_some()
         && crop_origin_x.is_some()
         && crop_origin_y.is_some()
         && object.get("fusion_edit").is_none();
+    let revision_executable = editable_base
+        && object
+            .get("replay")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<FusionReplayCapsule>(value).ok())
+            .is_some_and(|replay| replay.validate().is_ok());
+    if editable_base && !revision_executable {
+        warnings.push(
+            "This base report predates deterministic one-click replay; rerun native fusion."
+                .to_string(),
+        );
+    }
 
     Ok(FusionReportSummary {
         report_path: logical_path.to_string(),
@@ -2057,7 +2349,9 @@ fn parse_fusion_report_summary(
         frame_count,
         crop_origin_x,
         crop_origin_y,
+        fusion_edit_digest,
         editable_base,
+        revision_executable,
     })
 }
 
@@ -2516,6 +2810,25 @@ mod tests {
             "boundary_trimap": "capture_boundary_trimap.png",
             "overlay": "capture_fusion_overlay.png",
             "archival_policy": "measured_sources_only_no_generative_reconstruction",
+            "replay": {
+                "schema": "trueshot.fusion.replay.v1",
+                "project_layout": "raw_output_siblings",
+                "quality": "ultra",
+                "jobs": 2,
+                "full_frame": false,
+                "gpu_enabled": true,
+                "export_depth": false,
+                "full_resolution_preview": false,
+                "preview_max_dimension": 1600,
+                "deghost_strength": 1.0,
+                "frequency_separated_deghosting": true,
+                "glare_spread_um": 80.0,
+                "glare_aware_focus": true,
+                "depth_consistent_refusion": true,
+                "sensor_noise_profile": null,
+                "sensor_correction_profile": null,
+                "lens_psf_profile": null
+            },
             "physical_focus_policy": "calibrated_breathing_pupil_field_psf",
             "boundary_policy": "single_traceable_measured_focus_plane_no_cross_depth_interpolation",
             "glare_policy": "focus_evidence_suppression_only_measured_radiance_unchanged",
@@ -2667,6 +2980,7 @@ mod tests {
             summary.artifacts["edit"].path,
             "capture_fusion_edit_map.png"
         );
+        assert_eq!(summary.fusion_edit_digest, Some("c".repeat(64)));
         assert!(summary.artifacts["edit"].present);
         assert!(summary.integrity_complete);
     }

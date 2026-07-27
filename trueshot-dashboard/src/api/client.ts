@@ -666,7 +666,9 @@ export interface FusionReportSummary {
     frame_count?: number | null;
     crop_origin_x?: number | null;
     crop_origin_y?: number | null;
+    fusion_edit_digest?: string | null;
     editable_base: boolean;
+    revision_executable: boolean;
 }
 
 export interface FusionReportInventory {
@@ -748,6 +750,64 @@ export const createFusionEdit = async (
     );
     if (!res.ok) throw new Error(await res.text());
     return res.json();
+};
+
+export interface FusionRevisionJob {
+    id: string;
+    request_id?: string | null;
+    kind: string;
+    name: string;
+    status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+    progress: number;
+    attempts: number;
+    max_attempts: number;
+    created_at: string;
+    started_at?: string | null;
+    finished_at?: string | null;
+    last_error?: string | null;
+}
+
+export const executeFusionRevision = async (
+    projectId: string,
+    report: Pick<FusionReportSummary, 'report_path' | 'report_sha256'>,
+    edit: Pick<FusionEditReceipt, 'path' | 'digest'>,
+): Promise<FusionRevisionJob> => {
+    const res = await fetchAuthed(
+        `${API_Base}/projects/${encodeURIComponent(projectId)}/fusion-revisions`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                request_id: crypto.randomUUID(),
+                report_path: report.report_path,
+                report_sha256: report.report_sha256,
+                edit_path: edit.path,
+                edit_digest: edit.digest,
+            }),
+        },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+};
+
+export const getFusionRevision = async (
+    projectId: string,
+    jobId: string,
+): Promise<FusionRevisionJob> => {
+    const res = await fetchAuthed(
+        `${API_Base}/projects/${encodeURIComponent(projectId)}/fusion-revisions/${encodeURIComponent(jobId)}`,
+        { headers: authHeaders() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+};
+
+export const cancelFusionRevision = async (projectId: string, jobId: string): Promise<void> => {
+    const res = await fetchAuthed(
+        `${API_Base}/projects/${encodeURIComponent(projectId)}/fusion-revisions/${encodeURIComponent(jobId)}/cancel`,
+        { method: 'POST', headers: authHeaders() },
+    );
+    if (!res.ok) throw new Error(await res.text());
 };
 
 export type MeshEditOp =

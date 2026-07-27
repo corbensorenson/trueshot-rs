@@ -48,6 +48,11 @@ pub trait Job: Send + Sync + 'static {
     /// `progress_tx` can be used to send progress updates (0.0 - 1.0)
     async fn execute(&self, progress_tx: mpsc::Sender<f32>) -> Result<()>;
 
+    /// Report whether an execution error was caused by an operator cancellation.
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
     /// Optional serialization for remote dispatch.
     /// Return None to indicate this job must run locally.
     fn remote_payload(&self) -> Option<RemoteJobPayload> {
@@ -153,7 +158,11 @@ impl Scheduler {
                         }
                         Err(e) => {
                             if let Some(mut info) = jobs_map.get_mut(&job_id) {
-                                info.status = JobStatus::Failed(e.to_string());
+                                info.status = if job_task.is_cancelled() {
+                                    JobStatus::Cancelled
+                                } else {
+                                    JobStatus::Failed(e.to_string())
+                                };
                                 info.finished_at = Some(Utc::now());
                             }
                             if let Some(obs) = observer.as_ref() {
@@ -161,7 +170,11 @@ impl Scheduler {
                                     obs.on_job_update(info);
                                 }
                             }
-                            tracing::error!("Job failed: {}: {:?}", job_id, e);
+                            if job_task.is_cancelled() {
+                                tracing::info!("Job cancelled: {}", job_id);
+                            } else {
+                                tracing::error!("Job failed: {}: {:?}", job_id, e);
+                            }
                         }
                     }
 

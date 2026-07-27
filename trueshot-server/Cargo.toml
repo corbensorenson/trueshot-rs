@@ -20,6 +20,7 @@ trueshot-core = { path = "../trueshot-core", features = ["wgpu", "vision", "gpu"
 trueshot-device-manager = { path = "../trueshot-device-manager", features = ["real_cam"] }
 config = "0.15.6"
 anyhow = "1.0"
+async-trait = "0.1"
 gltf = "1.4"
 nalgebra = "0.32"
 awc = "3.1"

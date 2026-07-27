@@ -34,6 +34,7 @@ mod auth_store;
 mod config;
 mod distributed_bus;
 mod fs_safety;
+mod fusion_revision;
 mod guest;
 mod intervalometer;
 mod licensing;
@@ -495,6 +496,7 @@ async fn main() -> std::io::Result<()> {
         event_bus,
         scheduler,
         job_queue: job_queue.clone(),
+        fusion_revision_executor: Arc::new(fusion_revision::FusionRevisionExecutor::default()),
         camera_manager,
         inventory,
         turntable,
@@ -517,10 +519,19 @@ async fn main() -> std::io::Result<()> {
         std::time::Duration::from_secs(config.server.job_retry_interval_seconds.unwrap_or(30));
     let queue_bootstrap = job_queue.clone();
     let scheduler_bootstrap = state.scheduler.clone();
+    let fusion_executor_bootstrap = state.fusion_revision_executor.clone();
+    let queue_config = state.config.clone();
     tokio::spawn(async move {
         if let Ok(pending) = queue_bootstrap.load_pending_jobs().await {
             for job in pending {
-                schedule_queue_job(queue_bootstrap.clone(), scheduler_bootstrap.clone(), job).await;
+                schedule_queue_job(
+                    queue_bootstrap.clone(),
+                    scheduler_bootstrap.clone(),
+                    fusion_executor_bootstrap.clone(),
+                    queue_config.clone(),
+                    job,
+                )
+                .await;
             }
         }
         let mut interval = tokio::time::interval(retry_interval);
@@ -528,8 +539,14 @@ async fn main() -> std::io::Result<()> {
             interval.tick().await;
             if let Ok(retries) = queue_bootstrap.load_retry_jobs().await {
                 for job in retries {
-                    schedule_queue_job(queue_bootstrap.clone(), scheduler_bootstrap.clone(), job)
-                        .await;
+                    schedule_queue_job(
+                        queue_bootstrap.clone(),
+                        scheduler_bootstrap.clone(),
+                        fusion_executor_bootstrap.clone(),
+                        queue_config.clone(),
+                        job,
+                    )
+                    .await;
                 }
             }
         }
@@ -703,6 +720,9 @@ async fn main() -> std::io::Result<()> {
             .service(api::project::download_output_file)
             .service(api::project::download_fusion_artifact)
             .service(api::project::create_fusion_edit)
+            .service(api::project::execute_fusion_revision)
+            .service(api::project::get_fusion_revision)
+            .service(api::project::cancel_fusion_revision)
             .service(api::project::download_processed_file)
             .service(api::project::get_imu_diagnostics)
             .service(api::project::get_project_license)
@@ -844,10 +864,62 @@ fn parse_openapi_args() -> Option<Option<PathBuf>> {
 async fn schedule_queue_job(
     job_queue: Arc<JobQueue>,
     scheduler: Arc<Scheduler>,
+    fusion_executor: Arc<fusion_revision::FusionRevisionExecutor>,
+    config: Config,
     job: QueueJobPayload,
 ) {
     if let Err(err) = job_queue.mark_pending(job.id).await {
         tracing::warn!("Failed to mark job pending {}: {}", job.id, err);
+    }
+    if job.kind == fusion_revision::FUSION_REVISION_JOB_KIND {
+        let payload: fusion_revision::FusionRevisionJobPayload =
+            match serde_json::from_value(job.payload.clone()) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    let _ = job_queue
+                        .sync_job_info(
+                            job.id,
+                            "failed",
+                            0.0,
+                            None,
+                            Some(Utc::now()),
+                            Some(format!("Invalid fusion revision payload: {error}")),
+                        )
+                        .await;
+                    return;
+                }
+            };
+        let revision = match fusion_executor.build_job(job.id, &config, payload) {
+            Ok(revision) => revision,
+            Err(error) => {
+                let _ = job_queue
+                    .sync_job_info(
+                        job.id,
+                        "failed",
+                        0.0,
+                        None,
+                        Some(Utc::now()),
+                        Some(error.to_string()),
+                    )
+                    .await;
+                return;
+            }
+        };
+        if let Err(error) = scheduler.submit_with_id(job.id, revision).await {
+            if !error.to_string().contains("Job id already exists") {
+                let _ = job_queue
+                    .sync_job_info(
+                        job.id,
+                        "failed",
+                        0.0,
+                        None,
+                        Some(Utc::now()),
+                        Some(error.to_string()),
+                    )
+                    .await;
+            }
+        }
+        return;
     }
     let job_payload = job.payload.clone();
     let unified = match crate::api::jobs::build_job_from_payload(&job.kind, job_payload) {
