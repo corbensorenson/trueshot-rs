@@ -1337,6 +1337,7 @@ fn run_burst_pipeline(
                 height,
                 num_cpus::get(),
                 fusion_config.tile_size,
+                fusion_config.focus_coarse_stride,
                 fusion_config.analysis_max_dimension,
             )?;
             let memory_permit =
@@ -1382,6 +1383,8 @@ fn run_burst_pipeline(
                 radiance_anchor,
                 noise_model_calibrated: _,
                 depth_refusion_pixels: _,
+                visibility_adjusted_pixels: _,
+                visibility_constrained: _,
             } = fused;
             let rgb_cam: [[f32; 4]; 3] = [
                 [1.0, 0.0, 0.0, 0.0],

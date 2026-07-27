@@ -45,6 +45,8 @@ pub struct Z9Metadata {
     pub camera_model: String,
     /// Verified sensor-domain normalization limits for this camera profile.
     pub sensor_levels: Option<SensorLevels>,
+    /// Verified physical sensor geometry required by aperture-space methods.
+    pub sensor_geometry: Option<SensorGeometry>,
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
     pub rows_per_strip: u32,
@@ -65,9 +67,15 @@ pub struct SensorLevels {
     pub white: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SensorGeometry {
+    pub pixel_pitch_um: f32,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SensorProfile {
     levels: SensorLevels,
+    geometry: SensorGeometry,
     cfa_pattern: [u8; 4],
 }
 
@@ -91,6 +99,10 @@ fn verified_sensor_profile(make: &str, model: &str, bits_per_sample: u16) -> Opt
             levels: SensorLevels {
                 black: 1008,
                 white: 15311,
+            },
+            // Nikon publishes 35.9 mm across the 8,256-pixel FX image area.
+            geometry: SensorGeometry {
+                pixel_pitch_um: 35_900.0 / 8_256.0,
             },
             cfa_pattern: Z9_CFA_PATTERN,
         });
@@ -677,6 +689,7 @@ impl Z9NefParser {
             camera_make: camera_make.to_owned(),
             camera_model: camera_model.to_owned(),
             sensor_levels: profile.map(|profile| profile.levels),
+            sensor_geometry: profile.map(|profile| profile.geometry),
             strip_offsets,
             strip_byte_counts,
             rows_per_strip,
@@ -2335,6 +2348,7 @@ mod tests {
                 white: 15311
             }
         );
+        assert!((profile.geometry.pixel_pitch_um - 35_900.0 / 8_256.0).abs() < 1e-6);
         assert!(verified_sensor_profile("NIKON CORPORATION", "NIKON Z 8", 14).is_none());
         assert!(verified_sensor_profile("NIKON CORPORATION", "NIKON Z 9", 12).is_none());
     }

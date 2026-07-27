@@ -20,6 +20,7 @@ pub const FUSION_FLAG_OUTLIER_REJECTED: u8 = 1 << 1;
 pub const FUSION_FLAG_SOURCE_FALLBACK: u8 = 1 << 2;
 pub const FUSION_FLAG_UNCALIBRATED_NOISE: u8 = 1 << 3;
 pub const FUSION_FLAG_CENSOR_CONFLICT: u8 = 1 << 4;
+pub const FUSION_FLAG_VISIBILITY_CORRECTED: u8 = 1 << 5;
 
 #[derive(Debug, Clone)]
 pub struct NativeFusionConfig {
@@ -27,6 +28,10 @@ pub struct NativeFusionConfig {
     pub tile_size: usize,
     /// Context used by the focus operator. Values below two are promoted.
     pub halo: usize,
+    /// Globally aligned block edge for low-resolution regional focus evidence.
+    pub focus_coarse_stride: usize,
+    /// Native Laplacian residual contribution at detail edges.
+    pub focus_detail_edge_weight: f32,
     /// Maximum edge of compact alignment images.
     pub analysis_max_dimension: usize,
     /// Pyramid levels used by the compact alignment implementation.
@@ -49,6 +54,9 @@ pub struct NativeFusionConfig {
     /// Re-sample corrected focus hypotheses so regularization affects pixels,
     /// not only the exported depth map.
     pub depth_consistent_refusion: bool,
+    /// Project the focus-selection surface onto the aperture-valid set when
+    /// verified physical sensor geometry is available.
+    pub aperture_visibility_correction: bool,
     /// Robust bracket-motion rejection strength. Zero disables rejection.
     pub deghost_strength: f32,
 }
@@ -58,6 +66,8 @@ impl Default for NativeFusionConfig {
         Self {
             tile_size: 256,
             halo: 3,
+            focus_coarse_stride: 4,
+            focus_detail_edge_weight: 1.0,
             analysis_max_dimension: 512,
             // The legacy multiscale implementation does not warp residuals
             // between levels. One high-resolution compact FFT is exact.
@@ -69,6 +79,7 @@ impl Default for NativeFusionConfig {
             sensor_noise_profile: None,
             regularize_depth: true,
             depth_consistent_refusion: true,
+            aperture_visibility_correction: true,
             deghost_strength: 1.0,
         }
     }
@@ -140,6 +151,11 @@ pub struct NativeFusionResult {
     /// Pixels whose dominant focus hypothesis changed after confidence- and
     /// edge-aware depth regularization.
     pub depth_refusion_pixels: usize,
+    /// Pixels whose focus coordinate was changed by the aperture visibility
+    /// projection, including sub-plane changes.
+    pub visibility_adjusted_pixels: usize,
+    /// True when verified sensor geometry permitted the visibility projection.
+    pub visibility_constrained: bool,
 }
 
 impl NativeFusionResult {
@@ -193,6 +209,7 @@ struct PhysicalFocusModel {
     diopters: Vec<f32>,
     focal_length_mm: f32,
     aperture: f32,
+    pixel_pitch_mm: Option<f32>,
 }
 
 impl PhysicalFocusModel {
@@ -244,6 +261,51 @@ impl PhysicalFocusModel {
             self.distances_m[best + 1],
         );
         left.min(right) / left.max(right).max(1e-8)
+    }
+
+    fn sensor_distance_at_index(&self, index: f32) -> f32 {
+        object_to_sensor_distance_mm(self.focal_length_mm, self.distance_at_index(index))
+    }
+
+    fn index_at_sensor_distance(&self, sensor_distance_mm: f32) -> f32 {
+        let object_distance_mm =
+            self.focal_length_mm * sensor_distance_mm / (sensor_distance_mm - self.focal_length_mm);
+        let diopter = 1000.0 / object_distance_mm;
+        index_in_monotonic_coordinates(&self.diopters, diopter)
+    }
+}
+
+fn index_in_monotonic_coordinates(coordinates: &[f32], value: f32) -> f32 {
+    if coordinates.len() <= 1 {
+        return 0.0;
+    }
+    let last_index = coordinates.len() - 1;
+    let ascending = coordinates[0] < coordinates[last_index];
+    if (ascending && value <= coordinates[0]) || (!ascending && value >= coordinates[0]) {
+        return 0.0;
+    }
+    if (ascending && value >= coordinates[last_index])
+        || (!ascending && value <= coordinates[last_index])
+    {
+        return last_index as f32;
+    }
+    let mut low = 0usize;
+    let mut high = last_index;
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if (ascending && coordinates[middle] <= value)
+            || (!ascending && coordinates[middle] >= value)
+        {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let denominator = coordinates[high] - coordinates[low];
+    if denominator.abs() <= 1e-8 {
+        low as f32
+    } else {
+        low as f32 + ((value - coordinates[low]) / denominator).clamp(0.0, 1.0)
     }
 }
 
@@ -327,10 +389,33 @@ pub fn fuse_native_group(
             },
         )?;
 
+    let visibility_constrained = focus_steps > 1
+        && config.aperture_visibility_correction
+        && focus_model
+            .as_ref()
+            .is_some_and(|model| model.pixel_pitch_mm.is_some());
+    let needs_depth_correction =
+        focus_steps > 1 && (config.regularize_depth || visibility_constrained);
     let mut depth_refusion_pixels = 0;
-    if config.regularize_depth && focus_steps > 1 {
+    let mut visibility_adjusted_pixels = 0;
+    let mut visibility_mask = None;
+    if needs_depth_correction {
         let unregularized_depth = config.depth_consistent_refusion.then(|| depth.clone());
-        regularize_depth_map(&bayer, &mut depth, &confidence, width, height);
+        if config.regularize_depth {
+            regularize_depth_map(&bayer, &mut depth, &confidence, width, height);
+        }
+        if visibility_constrained {
+            let (adjusted_pixels, correction_mask) = project_aperture_visibility(
+                &mut depth,
+                focus_model
+                    .as_ref()
+                    .expect("visibility model was checked above"),
+                width,
+                height,
+            );
+            visibility_adjusted_pixels = adjusted_pixels;
+            visibility_mask = Some(correction_mask);
+        }
         if let Some(unregularized_depth) = unregularized_depth {
             depth_refusion_pixels = refuse_regularized_depth(
                 group,
@@ -348,6 +433,16 @@ pub fn fuse_native_group(
                 &mut fusion_flags,
             )?;
         }
+    }
+    if let Some(visibility_mask) = &visibility_mask {
+        fusion_flags
+            .iter_mut()
+            .zip(visibility_mask)
+            .for_each(|(flags, corrected)| {
+                if *corrected {
+                    *flags |= FUSION_FLAG_VISIBILITY_CORRECTED;
+                }
+            });
     }
     let foreground_mask = infer_foreground_mask(&bayer, width, height);
     let metric_depth_m = focus_model.as_ref().map(|model| {
@@ -391,6 +486,8 @@ pub fn fuse_native_group(
             .iter()
             .all(|calibration| calibration.noise_model.calibrated),
         depth_refusion_pixels,
+        visibility_adjusted_pixels,
+        visibility_constrained,
     })
 }
 
@@ -431,6 +528,12 @@ fn validate_group(
     }
     if !config.deghost_strength.is_finite() || !(0.0..=2.0).contains(&config.deghost_strength) {
         anyhow::bail!("Native fusion deghost strength must be between 0 and 2");
+    }
+    if !(1..=16).contains(&config.focus_coarse_stride)
+        || !config.focus_detail_edge_weight.is_finite()
+        || !(0.0..=2.0).contains(&config.focus_detail_edge_weight)
+    {
+        anyhow::bail!("Native fusion scale-decoupled focus configuration is invalid");
     }
     let reference = &group.metadata[0];
     for (index, metadata) in group.metadata.iter().enumerate() {
@@ -555,12 +658,31 @@ fn physical_focus_model(
         );
         return None;
     }
-
+    let pixel_pitch_mm = reference
+        .sensor_geometry
+        .map(|geometry| geometry.pixel_pitch_um * 0.001)
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+        .and_then(|pitch| {
+            let consistent = group.metadata.iter().all(|metadata| {
+                metadata.sensor_geometry.is_some_and(|geometry| {
+                    (geometry.pixel_pitch_um * 0.001 - pitch).abs() <= pitch * 0.001
+                })
+            });
+            if consistent {
+                Some(pitch)
+            } else {
+                tracing::warn!(
+                    "Aperture visibility correction disabled: inconsistent sensor geometry"
+                );
+                None
+            }
+        });
     Some(PhysicalFocusModel {
         distances_m,
         diopters,
         focal_length_mm,
         aperture,
+        pixel_pitch_mm,
     })
 }
 
@@ -581,6 +703,11 @@ fn defocus_circle_mm(
     let subject_image_mm = focal_length_mm * subject_mm / (subject_mm - focal_length_mm);
     let entrance_pupil_mm = focal_length_mm / aperture;
     entrance_pupil_mm * (focused_image_mm - subject_image_mm).abs() / subject_image_mm
+}
+
+fn object_to_sensor_distance_mm(focal_length_mm: f32, object_distance_m: f32) -> f32 {
+    let object_distance_mm = object_distance_m * 1000.0;
+    focal_length_mm * object_distance_mm / (object_distance_mm - focal_length_mm)
 }
 
 fn build_calibrations(
@@ -841,7 +968,10 @@ fn process_band(
     flags_output: &mut [u8],
 ) -> Result<()> {
     let width = group.width;
-    let halo = config.halo.max(2);
+    let halo = config
+        .halo
+        .max(config.focus_coarse_stride.saturating_mul(2))
+        .max(2);
     let tile_size = config.tile_size.max(16);
     for x0 in (0..width).step_by(tile_size) {
         let x1 = (x0 + tile_size).min(width);
@@ -865,6 +995,8 @@ fn process_band(
         let mut focus_metric = vec![0.0f32; ext_pixels];
         let mut best_score = vec![f32::NEG_INFINITY; tile_pixels];
         let mut second_score = vec![f32::NEG_INFINITY; tile_pixels];
+        let mut best_detail_score = vec![f32::NEG_INFINITY; tile_pixels];
+        let mut second_detail_score = vec![f32::NEG_INFINITY; tile_pixels];
         let mut best_value = vec![0.0f32; tile_pixels];
         let mut second_value = vec![0.0f32; tile_pixels];
         let mut best_uncertainty = vec![f32::INFINITY; tile_pixels];
@@ -930,6 +1062,15 @@ fn process_band(
                 ext_width,
                 ext_height,
             );
+            let coarse_focus = CoarseFocusGrid::build(
+                &focus_metric,
+                &plane_valid,
+                ext_width,
+                ext_height,
+                ext_x0,
+                ext_y0,
+                config.focus_coarse_stride,
+            );
 
             for tile_y in 0..tile_height {
                 let ext_y = band_y0 + tile_y - ext_y0;
@@ -941,8 +1082,14 @@ fn process_band(
                         previous_score[tile_index] = f32::NEG_INFINITY;
                         continue;
                     }
-                    let metric =
+                    let fine_metric =
                         smoothed_metric(&focus_metric, ext_width, ext_height, ext_x, ext_y);
+                    let coarse_metric = coarse_focus.sample(x0 + tile_x, band_y0 + tile_y);
+                    let detail_residual = (fine_metric - coarse_metric).max(0.0);
+                    let edge_gate =
+                        (detail_residual / (0.25 * coarse_metric + 1e-8)).clamp(0.0, 1.0);
+                    let metric = coarse_metric
+                        + config.focus_detail_edge_weight * edge_gate * detail_residual;
                     let value = plane_bayer[ext_index];
                     if best_score[tile_index].is_finite()
                         && usize::from(best_plane[tile_index]) + 1 == focus
@@ -951,12 +1098,14 @@ fn process_band(
                     }
                     if metric > best_score[tile_index] {
                         second_score[tile_index] = best_score[tile_index];
+                        second_detail_score[tile_index] = best_detail_score[tile_index];
                         second_value[tile_index] = best_value[tile_index];
                         second_uncertainty[tile_index] = best_uncertainty[tile_index];
                         second_source[tile_index] = best_source[tile_index];
                         second_flags[tile_index] = best_flags[tile_index];
                         second_plane[tile_index] = best_plane[tile_index];
                         best_score[tile_index] = metric;
+                        best_detail_score[tile_index] = fine_metric;
                         best_value[tile_index] = value;
                         best_uncertainty[tile_index] = plane_uncertainty[ext_index];
                         best_source[tile_index] = plane_source[ext_index];
@@ -970,6 +1119,7 @@ fn process_band(
                         right_score[tile_index] = f32::NEG_INFINITY;
                     } else if metric > second_score[tile_index] {
                         second_score[tile_index] = metric;
+                        second_detail_score[tile_index] = fine_metric;
                         second_value[tile_index] = value;
                         second_uncertainty[tile_index] = plane_uncertainty[ext_index];
                         second_source[tile_index] = plane_source[ext_index];
@@ -996,7 +1146,17 @@ fn process_band(
                     0.0
                 };
                 let best = best_score[tile_index].max(0.0);
-                let separation = ((best - second) / (best + second + 1e-8)).clamp(0.0, 1.0);
+                let regional_separation =
+                    ((best - second) / (best + second + 1e-8)).clamp(0.0, 1.0);
+                let best_detail = best_detail_score[tile_index].max(0.0);
+                let second_detail = second_detail_score[tile_index].max(0.0);
+                let detail_separation = if second_detail_score[tile_index].is_finite() {
+                    ((best_detail - second_detail) / (best_detail + second_detail + 1e-8))
+                        .clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let separation = regional_separation.max(detail_separation);
                 let best_weight = if second_is_valid {
                     0.5 + 0.5 * separation
                 } else {
@@ -1523,6 +1683,82 @@ fn compute_focus_metric(
     }
 }
 
+struct CoarseFocusGrid {
+    values: Vec<f32>,
+    width: usize,
+    height: usize,
+    first_block_x: usize,
+    first_block_y: usize,
+    stride: usize,
+}
+
+impl CoarseFocusGrid {
+    fn build(
+        metric: &[f32],
+        valid: &[bool],
+        width: usize,
+        height: usize,
+        origin_x: usize,
+        origin_y: usize,
+        stride: usize,
+    ) -> Self {
+        let stride = stride.max(1);
+        let first_block_x = origin_x / stride;
+        let first_block_y = origin_y / stride;
+        let last_block_x = (origin_x + width.saturating_sub(1)) / stride;
+        let last_block_y = (origin_y + height.saturating_sub(1)) / stride;
+        let grid_width = last_block_x - first_block_x + 1;
+        let grid_height = last_block_y - first_block_y + 1;
+        let mut values = vec![0.0f32; grid_width * grid_height];
+
+        for grid_y in 0..grid_height {
+            let block_y = first_block_y + grid_y;
+            let global_y0 = (block_y * stride).max(origin_y);
+            let global_y1 = ((block_y + 1) * stride).min(origin_y + height);
+            for grid_x in 0..grid_width {
+                let block_x = first_block_x + grid_x;
+                let global_x0 = (block_x * stride).max(origin_x);
+                let global_x1 = ((block_x + 1) * stride).min(origin_x + width);
+                let mut sum = 0.0f32;
+                let mut count = 0usize;
+                for global_y in global_y0..global_y1 {
+                    let local_y = global_y - origin_y;
+                    for global_x in global_x0..global_x1 {
+                        let local_x = global_x - origin_x;
+                        let index = local_y * width + local_x;
+                        if valid[index] {
+                            sum += metric[index];
+                            count += 1;
+                        }
+                    }
+                }
+                values[grid_y * grid_width + grid_x] = sum / count.max(1) as f32;
+            }
+        }
+
+        Self {
+            values,
+            width: grid_width,
+            height: grid_height,
+            first_block_x,
+            first_block_y,
+            stride,
+        }
+    }
+
+    fn sample(&self, global_x: usize, global_y: usize) -> f32 {
+        let block_x = global_x / self.stride;
+        let block_y = global_y / self.stride;
+        let x = block_x
+            .saturating_sub(self.first_block_x)
+            .min(self.width - 1);
+        let y = block_y
+            .saturating_sub(self.first_block_y)
+            .min(self.height - 1);
+        self.values[y * self.width + x]
+    }
+}
+
 fn smoothed_metric(metric: &[f32], width: usize, height: usize, x: usize, y: usize) -> f32 {
     let x0 = x.saturating_sub(1);
     let y0 = y.saturating_sub(1);
@@ -1541,6 +1777,103 @@ fn smoothed_metric(metric: &[f32], width: usize, height: usize, x: usize, y: usi
     let trim = usize::from(count >= 7);
     let kept = &values[trim..count - trim];
     kept.iter().sum::<f32>() / kept.len().max(1) as f32
+}
+
+/// Foreground-favored projection of the continuous sensor-distance surface
+/// onto the aperture-valid set from Jacobs, Baek, and Levoy. In log sensor
+/// distance, the one-sided constraint is a max-plus distance transform and
+/// can be solved with two bounded raster passes instead of per-label dilation.
+fn project_aperture_visibility(
+    depth: &mut [f32],
+    model: &PhysicalFocusModel,
+    width: usize,
+    height: usize,
+) -> (usize, Vec<bool>) {
+    let Some(pixel_pitch_mm) = model.pixel_pitch_mm else {
+        return (0, vec![false; depth.len()]);
+    };
+    if width == 0 || height == 0 || depth.len() != width * height || model.distances_m.len() < 2 {
+        return (0, vec![false; depth.len()]);
+    }
+    let aperture_radius_mm = model.focal_length_mm / (2.0 * model.aperture);
+    // The paper recommends doubling the theoretical halo extent for real
+    // compound lenses whose pupils deviate from the paraxial thin-lens model.
+    let conservative_aperture_radius_mm = 2.0 * aperture_radius_mm;
+    let axial_cost = pixel_pitch_mm / conservative_aperture_radius_mm;
+    let diagonal_cost = axial_cost * std::f32::consts::SQRT_2;
+    if !axial_cost.is_finite() || axial_cost <= 0.0 {
+        return (0, vec![false; depth.len()]);
+    }
+
+    let focus_denominator = (model.distances_m.len() - 1) as f32;
+    let original = depth.to_vec();
+    let mut log_sensor_surface: Vec<f32> = depth
+        .iter()
+        .map(|value| {
+            model
+                .sensor_distance_at_index(value.clamp(0.0, 1.0) * focus_denominator)
+                .ln()
+        })
+        .collect();
+
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let mut value = log_sensor_surface[index];
+            if x > 0 {
+                value = value.max(log_sensor_surface[index - 1] - axial_cost);
+            }
+            if y > 0 {
+                value = value.max(log_sensor_surface[index - width] - axial_cost);
+                if x > 0 {
+                    value = value.max(log_sensor_surface[index - width - 1] - diagonal_cost);
+                }
+                if x + 1 < width {
+                    value = value.max(log_sensor_surface[index - width + 1] - diagonal_cost);
+                }
+            }
+            log_sensor_surface[index] = value;
+        }
+    }
+    for y in (0..height).rev() {
+        for x in (0..width).rev() {
+            let index = y * width + x;
+            let mut value = log_sensor_surface[index];
+            if x + 1 < width {
+                value = value.max(log_sensor_surface[index + 1] - axial_cost);
+            }
+            if y + 1 < height {
+                value = value.max(log_sensor_surface[index + width] - axial_cost);
+                if x > 0 {
+                    value = value.max(log_sensor_surface[index + width - 1] - diagonal_cost);
+                }
+                if x + 1 < width {
+                    value = value.max(log_sensor_surface[index + width + 1] - diagonal_cost);
+                }
+            }
+            log_sensor_surface[index] = value;
+        }
+    }
+
+    let mut adjusted = 0usize;
+    let mut correction_mask = Vec::with_capacity(depth.len());
+    for ((output, original), log_sensor_distance) in
+        depth.iter_mut().zip(original).zip(log_sensor_surface)
+    {
+        let corrected_index = model.index_at_sensor_distance(log_sensor_distance.exp());
+        let corrected_depth = corrected_index / focus_denominator;
+        let corrected = (corrected_depth - original).abs() > 1e-5;
+        adjusted += usize::from(corrected);
+        correction_mask.push(corrected);
+        *output = corrected_depth;
+    }
+    tracing::info!(
+        "Aperture visibility projection adjusted {} / {} pixels ({:.2}%)",
+        adjusted,
+        depth.len(),
+        adjusted as f64 * 100.0 / depth.len() as f64
+    );
+    (adjusted, correction_mask)
 }
 
 fn regularize_depth_map(
@@ -1749,7 +2082,7 @@ fn bilinear_f64(image: &Array2<f64>, x: f64, y: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nef::parser::{SensorLevels, Z9Metadata};
+    use crate::nef::parser::{SensorGeometry, SensorLevels, Z9Metadata};
     use crate::sensor_noise::{
         IsoNoiseModel, SensorNoiseModel, SensorNoiseProfile, SENSOR_NOISE_PROFILE_SCHEMA,
     };
@@ -1768,6 +2101,9 @@ mod tests {
             sensor_levels: Some(SensorLevels {
                 black: 0,
                 white: 16_383,
+            }),
+            sensor_geometry: Some(SensorGeometry {
+                pixel_pitch_um: 35_900.0 / 8_256.0,
             }),
             strip_offsets: vec![],
             strip_byte_counts: vec![],
@@ -1798,11 +2134,13 @@ mod tests {
     }
 
     fn physical_model(distances_m: &[f32]) -> PhysicalFocusModel {
+        let focal_length_mm = 105.0;
         PhysicalFocusModel {
             distances_m: distances_m.to_vec(),
             diopters: distances_m.iter().map(|distance| 1.0 / distance).collect(),
-            focal_length_mm: 105.0,
+            focal_length_mm,
             aperture: 8.0,
+            pixel_pitch_mm: Some(35.9 / 8_256.0),
         }
     }
 
@@ -1841,6 +2179,7 @@ mod tests {
         .unwrap();
         let model = physical_focus_model(&group, 3, 1).unwrap();
         assert_eq!(model.diopters, vec![4.0, 2.0, 1.0]);
+        assert!(model.pixel_pitch_mm.is_some());
 
         metadata[2].focus_distance = Some(0.4);
         let nonmonotonic = NativeFrameGroup::from_parts(
@@ -1860,6 +2199,143 @@ mod tests {
         let wide = defocus_circle_mm(105.0, 2.8, 0.5, 0.6);
         let stopped_down = defocus_circle_mm(105.0, 11.0, 0.5, 0.6);
         assert!(wide > stopped_down * 3.9);
+    }
+
+    #[test]
+    fn aperture_projection_enforces_the_sensor_surface_slope_bound() {
+        let model = physical_model(&[0.5, 0.8]);
+        let width = 1024;
+        let mut depth = vec![1.0f32; width];
+        depth[..width / 2].fill(0.0);
+        let (adjusted, correction_mask) = project_aperture_visibility(&mut depth, &model, width, 1);
+        assert!(adjusted > 0);
+        assert_eq!(
+            correction_mask
+                .iter()
+                .filter(|corrected| **corrected)
+                .count(),
+            adjusted
+        );
+        assert_eq!(depth[width / 4], 0.0, "foreground anchors moved");
+        assert!(
+            depth[width - 1] > 0.99,
+            "distant background was needlessly changed"
+        );
+
+        let pitch = model.pixel_pitch_mm.unwrap();
+        let conservative_aperture_radius = 2.0 * model.focal_length_mm / (2.0 * model.aperture);
+        let maximum_log_step = pitch / conservative_aperture_radius;
+        let sensor_surface: Vec<f32> = depth
+            .iter()
+            .map(|value| model.sensor_distance_at_index(*value).ln())
+            .collect();
+        let observed = sensor_surface
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            observed <= maximum_log_step * 1.001,
+            "visibility slope {observed} exceeded {maximum_log_step}"
+        );
+    }
+
+    #[test]
+    fn aperture_projection_preserves_a_one_pixel_foreground_structure() {
+        let model = physical_model(&[0.5, 0.8]);
+        let width = 1024;
+        let center = width / 2;
+        let mut depth = vec![1.0f32; width];
+        depth[center] = 0.0;
+        let (adjusted, correction_mask) = project_aperture_visibility(&mut depth, &model, width, 1);
+        assert!(adjusted > 0);
+        assert!(!correction_mask[center]);
+        assert_eq!(depth[center], 0.0);
+        assert!(depth[center - 1] < 1.0);
+        assert!(depth[center + 1] < 1.0);
+    }
+
+    #[test]
+    fn aperture_projection_enforces_two_dimensional_chamfer_bounds() {
+        let model = physical_model(&[0.5, 0.8]);
+        let width = 96;
+        let height = 80;
+        let center = (height / 2) * width + width / 2;
+        let mut depth = vec![1.0f32; width * height];
+        depth[center] = 0.0;
+        project_aperture_visibility(&mut depth, &model, width, height);
+
+        let pitch = model.pixel_pitch_mm.unwrap();
+        let conservative_aperture_radius = 2.0 * model.focal_length_mm / (2.0 * model.aperture);
+        let axial_bound = pitch / conservative_aperture_radius;
+        let diagonal_bound = axial_bound * std::f32::consts::SQRT_2;
+        let sensor_surface: Vec<f32> = depth
+            .iter()
+            .map(|value| model.sensor_distance_at_index(*value).ln())
+            .collect();
+        for y in 0..height {
+            for x in 0..width {
+                let index = y * width + x;
+                if x + 1 < width {
+                    assert!(
+                        (sensor_surface[index + 1] - sensor_surface[index]).abs()
+                            <= axial_bound * 1.001
+                    );
+                }
+                if y + 1 < height {
+                    assert!(
+                        (sensor_surface[index + width] - sensor_surface[index]).abs()
+                            <= axial_bound * 1.001
+                    );
+                    if x + 1 < width {
+                        assert!(
+                            (sensor_surface[index + width + 1] - sensor_surface[index]).abs()
+                                <= diagonal_bound * 1.001
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn coarse_focus_regions_are_globally_aligned_and_compact() {
+        let full_width = 32;
+        let full_height = 24;
+        let stride = 4;
+        let metric: Vec<f32> = (0..full_height)
+            .flat_map(|y| (0..full_width).map(move |x| (x / stride + 10 * (y / stride)) as f32))
+            .collect();
+        let valid = vec![true; metric.len()];
+        let full = CoarseFocusGrid::build(&metric, &valid, full_width, full_height, 0, 0, stride);
+        assert_eq!(
+            full.values.len(),
+            (full_width / stride) * (full_height / stride)
+        );
+
+        let origin_x = 5;
+        let origin_y = 3;
+        let crop_width = 20;
+        let crop_height = 17;
+        let mut cropped_metric = Vec::with_capacity(crop_width * crop_height);
+        for y in origin_y..origin_y + crop_height {
+            cropped_metric.extend_from_slice(
+                &metric[y * full_width + origin_x..y * full_width + origin_x + crop_width],
+            );
+        }
+        let cropped = CoarseFocusGrid::build(
+            &cropped_metric,
+            &vec![true; cropped_metric.len()],
+            crop_width,
+            crop_height,
+            origin_x,
+            origin_y,
+            stride,
+        );
+        for y in 4..20 {
+            for x in 8..24 {
+                assert_eq!(cropped.sample(x, y), full.sample(x, y));
+            }
+        }
     }
 
     #[test]
@@ -2046,6 +2522,11 @@ mod tests {
             metadata.height = height as u32;
             metadata.cam_mul = [1.0; 4];
         }
+        let mut physical_metadata = frame_metadata.clone();
+        for (metadata, distance) in physical_metadata.iter_mut().zip([0.5, 0.8]) {
+            metadata.focus_distance = Some(distance);
+            metadata.aperture = Some(8.0);
+        }
         let group = NativeFrameGroup::from_parts(
             &pixels,
             2,
@@ -2092,12 +2573,43 @@ mod tests {
             "synthetic focus quality: PSNR={psnr:.3}dB depth_accuracy={:.3}%",
             depth_accuracy * 100.0
         );
-        assert!(psnr >= 40.0, "focus stack PSNR regressed to {psnr:.3} dB");
+        assert!(psnr >= 44.0, "focus stack PSNR regressed to {psnr:.3} dB");
         assert!(
             depth_accuracy >= 0.98,
             "focus depth accuracy regressed to {:.2}%",
             depth_accuracy * 100.0
         );
+
+        let physical_group = NativeFrameGroup::from_parts(
+            &pixels,
+            2,
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            physical_metadata,
+        )
+        .unwrap();
+        let physical_result = fuse_native_group(
+            &physical_group,
+            &meta(2, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                tile_size: 32,
+                minimum_alignment_score: 2.0,
+                regularize_depth: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(physical_result.visibility_constrained);
+        assert!(physical_result.visibility_adjusted_pixels > 0);
+        let flagged = physical_result
+            .fusion_flags
+            .iter()
+            .filter(|flags| **flags & FUSION_FLAG_VISIBILITY_CORRECTED != 0)
+            .count();
+        assert_eq!(flagged, physical_result.visibility_adjusted_pixels);
     }
 
     fn box_blur(input: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {

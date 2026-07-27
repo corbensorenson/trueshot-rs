@@ -114,9 +114,10 @@ Not yet qualified:
   uncertainty calibration. Validated profile persistence and production loading
   are implemented.
 - Held-out calibration of the implemented nonuniform diopter/thin-lens
-  sub-plane depth path, plus lens-breathing and aperture-constrained occlusion
-  correction. Native fusion already exports unquantized metric depth when
-  complete focus distance, focal length, and aperture metadata are valid.
+  sub-plane depth and conservative aperture-visibility projection, plus
+  lens-breathing calibration, measured halo-energy/MTF gates, and mixed-pixel
+  trimaps. Native fusion exports unquantized metric depth and per-pixel
+  visibility-correction provenance when complete verified geometry is valid.
 - Deterministic uncertainty-driven exposure and focus acquisition scheduling.
 - Release-mode Apple Silicon timing, memory, thermal, and energy baselines.
 
