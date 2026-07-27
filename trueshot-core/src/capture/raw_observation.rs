@@ -18,7 +18,7 @@ const MAX_PROBE_TILES: usize = 4_096;
 const MAX_FOCUS_PLANES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RawObservationConfig {
     pub tile_columns: u16,
     pub tile_rows: u16,
@@ -40,7 +40,7 @@ impl Default for RawObservationConfig {
 }
 
 impl RawObservationConfig {
-    fn validate(self) -> Result<Self> {
+    pub fn validate(self) -> Result<Self> {
         let tiles = usize::from(self.tile_columns)
             .checked_mul(usize::from(self.tile_rows))
             .context("RAW observation tile count overflow")?;
@@ -107,7 +107,8 @@ pub struct RawAssimilationReport {
     pub accumulated_focus_planes: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FocusPlaneEvidence {
     diopters: f32,
     score: f32,
@@ -115,7 +116,8 @@ struct FocusPlaneEvidence {
     weight: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ObservationIdentity {
     camera_make: String,
     camera_model: String,
@@ -127,7 +129,8 @@ struct ObservationIdentity {
     roi: [u32; 4],
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawPosteriorAccumulator {
     pub radiance_anchor_exposure: f32,
     identity: Option<ObservationIdentity>,
@@ -256,6 +259,117 @@ impl RawPosteriorAccumulator {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_restored(
+        &self,
+        posterior: &CapturePosterior,
+        sensor_profile: &SensorNoiseProfile,
+        expected_sensor_range_dn: f32,
+        expected_aperture: f32,
+    ) -> Result<()> {
+        if !self.radiance_anchor_exposure.is_finite()
+            || self.radiance_anchor_exposure <= 0.0
+            || relative_error(
+                self.radiance_anchor_exposure,
+                posterior.radiance_anchor_exposure,
+            ) > 1e-6
+        {
+            anyhow::bail!("Restored RAW accumulator anchor is invalid or inconsistent");
+        }
+        let identity = self
+            .identity
+            .as_ref()
+            .context("Restored RAW accumulator has no observation identity")?;
+        if identity.camera_make.trim().is_empty()
+            || identity.camera_model.trim().is_empty()
+            || identity.bits_per_sample == 0
+            || identity.sensor_calibration_id != sensor_profile.calibration_id
+            || !sensor_profile.matches(
+                &identity.camera_make,
+                &identity.camera_model,
+                identity.bits_per_sample,
+            )
+            || !identity.sensor_range_dn.is_finite()
+            || identity.sensor_range_dn <= 0.0
+            || relative_error(identity.sensor_range_dn, expected_sensor_range_dn) > 1e-6
+            || identity.roi[2] == 0
+            || identity.roi[3] == 0
+            || identity
+                .focal_length_mm
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            || identity
+                .aperture
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            || identity.aperture.map_or(true, |value| {
+                relative_error(value, expected_aperture) > 1e-6
+            })
+        {
+            anyhow::bail!("Restored RAW accumulator identity is invalid");
+        }
+        if self.focus_planes.len() > MAX_PROBE_TILES {
+            anyhow::bail!("Restored RAW accumulator exceeds the focus-probe limit");
+        }
+        for (&probe_id, planes) in &self.focus_planes {
+            if planes.is_empty() || planes.len() > MAX_FOCUS_PLANES {
+                anyhow::bail!("Restored focus probe {probe_id} has an invalid plane count");
+            }
+            for (index, plane) in planes.iter().enumerate() {
+                if !plane.diopters.is_finite()
+                    || plane.diopters < 0.0
+                    || !plane.score.is_finite()
+                    || plane.score <= 0.0
+                    || !plane.variance.is_finite()
+                    || plane.variance <= 0.0
+                    || !plane.weight.is_finite()
+                    || plane.weight < 0.0
+                {
+                    anyhow::bail!("Restored focus probe {probe_id} contains invalid evidence");
+                }
+                if index > 0 {
+                    let previous = planes[index - 1];
+                    let tolerance = previous
+                        .diopters
+                        .abs()
+                        .max(plane.diopters.abs())
+                        .mul_add(0.001, 1e-4);
+                    if plane.diopters <= previous.diopters
+                        || plane.diopters - previous.diopters <= tolerance
+                        || relative_error(previous.weight, plane.weight) > 1e-6
+                    {
+                        anyhow::bail!(
+                            "Restored focus probe {probe_id} is unsorted, duplicated, or reweighted"
+                        );
+                    }
+                }
+            }
+        }
+        validate_restored_posterior_probe_ids(posterior)
+    }
+}
+
+fn validate_restored_posterior_probe_ids(posterior: &CapturePosterior) -> Result<()> {
+    if posterior.radiance.len() > MAX_PROBE_TILES * 4 || posterior.focus.len() > MAX_PROBE_TILES {
+        anyhow::bail!("Restored adaptive posterior exceeds the probe limit");
+    }
+    let mut radiance_ids = posterior
+        .radiance
+        .iter()
+        .map(|probe| probe.probe_id)
+        .collect::<Vec<_>>();
+    radiance_ids.sort_unstable();
+    if radiance_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        anyhow::bail!("Restored adaptive radiance probe identities are duplicated");
+    }
+    let mut focus_ids = posterior
+        .focus
+        .iter()
+        .map(|probe| probe.probe_id)
+        .collect::<Vec<_>>();
+    focus_ids.sort_unstable();
+    if focus_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        anyhow::bail!("Restored adaptive focus probe identities are duplicated");
+    }
+    Ok(())
 }
 
 pub fn observe_nef_roi(

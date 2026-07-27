@@ -68,6 +68,18 @@ async runtime, blocks symlink escapes, enforces the advanced-capture
 entitlement on every route, and uses generation checks to reject concurrent
 session advancement.
 
+Every accepted start, assimilation, or termination is persisted before the
+live generation advances. Checkpoints are immutable, schema-versioned
+generations under the local projects directory. Publication uses a unique
+same-directory partial, file sync, no-replace hard-link publication, directory
+sync, and bounded two-generation retention. Each envelope seals the canonical
+payload with SHA-256; restore revalidates sensor identity, posterior
+accumulators, contiguous frame attribution, termination state, and the
+deterministically recomputed next decision. Startup removes orphan partials,
+loads the newest valid generation, and can discard a corrupt newest generation
+only after an older generation passes every restore invariant. If publication
+fails, the in-memory session remains at its prior generation.
+
 The API deliberately returns an absolute focus-diopter request rather than
 converting it to an uncalibrated relative lens step. Until a body/lens pair has
 an absolute drive calibration and EXIF readback qualification, the existing
@@ -141,8 +153,6 @@ archival output.
   focus from captured RAW metadata; unsupported lenses must fail closed.
 - Feed measured motion, readout/settle latency, thermals, and lens travel time
   back into the posterior after each capture.
-- Persist active server sessions and completed trace artifacts atomically so a
-  process restart can resume or close them without losing attribution.
 - Connect the session API to the dashboard capture flow after absolute
   body/lens focus-drive calibration is available.
 - Validate at least 20% capture-time reduction at equal quality, or higher

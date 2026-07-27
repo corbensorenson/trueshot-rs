@@ -43,7 +43,11 @@ The local adaptive API does not infer success from a shutter acknowledgement.
 It accepts a completed project-local NEF, performs a bounded selective RAW ROI
 decode, verifies ISO/shutter/focus metadata against the staged candidate, and
 atomically commits measured posterior, runtime telemetry, provenance, and the
-next decision. Rejected captures do not advance the session.
+next decision. Rejected captures do not advance the session. Accepted
+transitions are checksum-sealed and durably published as immutable local
+generations before the in-memory generation advances. Startup revalidates the
+entire state machine and can recover from an interrupted or corrupt newest
+generation using the retained prior checkpoint.
 
 Absolute focus candidates are not mapped onto the current relative
 `drive_focus` command. That mapping remains disabled until each supported

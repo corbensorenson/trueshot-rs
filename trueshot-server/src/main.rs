@@ -485,6 +485,9 @@ async fn main() -> std::io::Result<()> {
         .map_err(|e| std::io::Error::other(e.to_string()))?,
     );
     let license_gate = Arc::new(Mutex::new(licensing::LicenseGate::initialize()));
+    let adaptive_capture =
+        api::adaptive_capture::AdaptiveCaptureSessions::load(&config.paths.projects_dir)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
 
     let state = web::Data::new(AppState {
         config: config.clone(),
@@ -500,9 +503,7 @@ async fn main() -> std::io::Result<()> {
         system_stats,
         scan_wizard: Arc::new(AsyncMutex::new(ScanWizardState::default())),
         intervalometer: Arc::new(AsyncMutex::new(IntervalometerState::new())),
-        adaptive_capture: Arc::new(AsyncMutex::new(
-            api::adaptive_capture::AdaptiveCaptureSessions::default(),
-        )),
+        adaptive_capture: Arc::new(AsyncMutex::new(adaptive_capture)),
         calibration_session: Arc::new(AsyncMutex::new(state::CalibrationSession::default())),
         audit,
         license_gate,

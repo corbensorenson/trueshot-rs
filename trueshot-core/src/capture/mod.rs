@@ -17,6 +17,7 @@ pub use adaptive_planner::{
 };
 pub use adaptive_session::{
     AdaptiveSessionStatus, CaptureRuntimeTelemetry, MeasuredAdaptiveSession,
+    MeasuredAdaptiveSessionSnapshot, MEASURED_ADAPTIVE_SESSION_SCHEMA,
 };
 pub use focus_stack::{FocusStackConfig, FocusStacker, StackAlgorithm, StackDirection};
 pub use hdr::{calculate_bracket_evs, HdrAlgorithm, HdrConfig, HdrMerger};

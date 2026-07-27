@@ -15,6 +15,9 @@ use crate::sensor_noise::SensorNoiseProfile;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+pub const MEASURED_ADAPTIVE_SESSION_SCHEMA: &str = "trueshot.measured-adaptive-session.v1";
+const MAX_SESSION_CANDIDATES: usize = 100_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CaptureRuntimeTelemetry {
     /// Measured wall time from initiating this camera action through durable
@@ -47,8 +50,24 @@ pub struct AdaptiveSessionStatus {
     pub termination: Option<AdaptiveCaptureTermination>,
 }
 
+#[derive(Debug, Clone)]
 pub struct MeasuredAdaptiveSession {
     sensor_profile: SensorNoiseProfile,
+    candidates: Vec<CaptureCandidate>,
+    planner_config: AdaptivePlannerConfig,
+    posterior: CapturePosterior,
+    accumulator: RawPosteriorAccumulator,
+    provenance: AdaptiveCaptureProvenance,
+    decision: CapturePlanDecision,
+    retained_frame_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeasuredAdaptiveSessionSnapshot {
+    schema: String,
+    sensor_profile: SensorNoiseProfile,
+    sensor_calibration_id: String,
     candidates: Vec<CaptureCandidate>,
     planner_config: AdaptivePlannerConfig,
     posterior: CapturePosterior,
@@ -114,12 +133,79 @@ impl MeasuredAdaptiveSession {
         &self.provenance
     }
 
+    pub fn sensor_profile(&self) -> &SensorNoiseProfile {
+        &self.sensor_profile
+    }
+
     pub fn next_candidate(&self) -> Option<CaptureCandidate> {
         self.decision.selected.map(|utility| utility.candidate)
     }
 
     pub fn is_complete(&self) -> bool {
         self.provenance.termination.is_some()
+    }
+
+    pub fn snapshot(&self) -> MeasuredAdaptiveSessionSnapshot {
+        MeasuredAdaptiveSessionSnapshot {
+            schema: MEASURED_ADAPTIVE_SESSION_SCHEMA.to_string(),
+            sensor_profile: self.sensor_profile.clone(),
+            sensor_calibration_id: self.sensor_profile.calibration_id.clone(),
+            candidates: self.candidates.clone(),
+            planner_config: self.planner_config,
+            posterior: self.posterior.clone(),
+            accumulator: self.accumulator.clone(),
+            provenance: self.provenance.clone(),
+            decision: self.decision.clone(),
+            retained_frame_count: self.retained_frame_count,
+        }
+    }
+
+    pub fn restore(mut snapshot: MeasuredAdaptiveSessionSnapshot) -> Result<Self> {
+        if snapshot.schema != MEASURED_ADAPTIVE_SESSION_SCHEMA
+            || snapshot.sensor_calibration_id.trim().is_empty()
+            || snapshot.candidates.is_empty()
+            || snapshot.candidates.len() > MAX_SESSION_CANDIDATES
+            || snapshot.retained_frame_count == 0
+        {
+            anyhow::bail!("Measured adaptive session snapshot identity or bounds are invalid");
+        }
+        snapshot.sensor_profile.calibration_id = snapshot.sensor_calibration_id;
+        snapshot.sensor_profile.validate()?;
+        if snapshot.provenance.sensor_calibration_id != snapshot.sensor_profile.calibration_id {
+            anyhow::bail!("Adaptive session calibration identity changed in provenance");
+        }
+        snapshot.accumulator.validate_restored(
+            &snapshot.posterior,
+            &snapshot.sensor_profile,
+            snapshot.planner_config.sensor_range_dn,
+            snapshot.planner_config.aperture,
+        )?;
+        validate_snapshot_trace(
+            &snapshot.provenance,
+            &snapshot.posterior,
+            &snapshot.decision,
+            snapshot.retained_frame_count,
+        )?;
+        let recomputed = plan_next_capture(
+            &snapshot.posterior,
+            &snapshot.candidates,
+            &snapshot.sensor_profile,
+            snapshot.planner_config,
+        )
+        .context("Recompute restored adaptive capture decision")?;
+        if recomputed != snapshot.decision {
+            anyhow::bail!("Restored adaptive capture decision is stale or inconsistent");
+        }
+        Ok(Self {
+            sensor_profile: snapshot.sensor_profile,
+            candidates: snapshot.candidates,
+            planner_config: snapshot.planner_config,
+            posterior: snapshot.posterior,
+            accumulator: snapshot.accumulator,
+            provenance: snapshot.provenance,
+            decision: snapshot.decision,
+            retained_frame_count: snapshot.retained_frame_count,
+        })
     }
 
     /// Assimilate the completed RAW selected by the current decision.
@@ -212,6 +298,48 @@ impl MeasuredAdaptiveSession {
             self.retained_frame_count,
         )
     }
+}
+
+fn validate_snapshot_trace(
+    provenance: &AdaptiveCaptureProvenance,
+    posterior: &CapturePosterior,
+    decision: &CapturePlanDecision,
+    retained_frame_count: u32,
+) -> Result<()> {
+    let frame_count = retained_frame_count as usize;
+    if provenance.termination.is_some() {
+        provenance.validate(frame_count)?;
+    } else {
+        provenance.validate_partial(frame_count)?;
+    }
+    let mut executed = provenance
+        .iterations
+        .iter()
+        .filter_map(|iteration| iteration.executed_frame_index)
+        .collect::<Vec<_>>();
+    executed.sort_unstable();
+    let expected = (1..retained_frame_count).collect::<Vec<_>>();
+    if executed != expected {
+        anyhow::bail!("Adaptive session retained frame attribution is not contiguous");
+    }
+    if provenance.termination.is_some() {
+        let final_iteration = provenance
+            .iterations
+            .last()
+            .context("Completed adaptive session has no final iteration")?;
+        if final_iteration.executed_frame_index.is_some()
+            || final_iteration.posterior != *posterior
+            || final_iteration.decision != *decision
+            || provenance.iterations.len() != frame_count
+        {
+            anyhow::bail!("Completed adaptive session final state is inconsistent");
+        }
+    } else if decision.selected.is_none()
+        || provenance.iterations.len() != frame_count.saturating_sub(1)
+    {
+        anyhow::bail!("Active adaptive session staged state is inconsistent");
+    }
+    Ok(())
 }
 
 fn finish_stopped_decision(
@@ -368,6 +496,22 @@ mod tests {
             .collect()
     }
 
+    fn active_session() -> MeasuredAdaptiveSession {
+        MeasuredAdaptiveSession::start(
+            observation(0.01, 1.0, 0.05),
+            profile(),
+            candidates(),
+            AdaptivePlannerConfig {
+                target_radiance_variance: 1e-6,
+                target_focus_variance_diopters2: 1e-6,
+                minimum_hdr_information_nats: 0.0,
+                minimum_focus_information_nats: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn session_verifies_assimilates_and_retains_valid_provenance() {
         let mut session = MeasuredAdaptiveSession::start(
@@ -405,19 +549,7 @@ mod tests {
 
     #[test]
     fn rejected_raw_does_not_advance_session() {
-        let mut session = MeasuredAdaptiveSession::start(
-            observation(0.01, 1.0, 0.05),
-            profile(),
-            candidates(),
-            AdaptivePlannerConfig {
-                target_radiance_variance: 1e-6,
-                target_focus_variance_diopters2: 1e-6,
-                minimum_hdr_information_nats: 0.0,
-                minimum_focus_information_nats: 0.0,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut session = active_session();
         let before = session.status();
         let mut wrong = observation(0.02, 1.0, 0.01);
         wrong.sensor_exposure = 0.02 / 64.0;
@@ -432,5 +564,65 @@ mod tests {
             )
             .is_err());
         assert_eq!(session.status(), before);
+    }
+
+    #[test]
+    fn active_snapshot_round_trip_preserves_the_next_transition() {
+        let mut original = active_session();
+        let bytes = serde_json::to_vec(&original.snapshot()).unwrap();
+        let snapshot: MeasuredAdaptiveSessionSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let mut restored = MeasuredAdaptiveSession::restore(snapshot).unwrap();
+        assert_eq!(original.status(), restored.status());
+
+        let selected = original.next_candidate().unwrap();
+        assert_eq!(Some(selected), restored.next_candidate());
+        let captured = observation(selected.shutter_seconds, selected.focus_diopters, 0.01);
+        let telemetry = CaptureRuntimeTelemetry {
+            capture_elapsed_ms: 31.0,
+            motion_pixels_per_second: 0.1,
+            thermal_load: 0.02,
+        };
+        let original_report = original
+            .assimilate_selected(captured.clone(), telemetry)
+            .unwrap();
+        let restored_report = restored.assimilate_selected(captured, telemetry).unwrap();
+        assert_eq!(original_report, restored_report);
+        assert_eq!(original.status(), restored.status());
+        assert_eq!(original.provenance(), restored.provenance());
+    }
+
+    #[test]
+    fn completed_snapshot_round_trip_retains_valid_terminal_trace() {
+        let mut session = active_session();
+        session
+            .terminate(AdaptiveCaptureTermination::OperatorStopped)
+            .unwrap();
+        let restored = MeasuredAdaptiveSession::restore(session.snapshot()).unwrap();
+        assert!(restored.is_complete());
+        assert_eq!(session.status(), restored.status());
+        restored.provenance().validate(1).unwrap();
+    }
+
+    #[test]
+    fn restore_rejects_stale_plan_anchor_attribution_and_calibration() {
+        let snapshot = active_session().snapshot();
+
+        let mut stale_plan = snapshot.clone();
+        stale_plan.decision.stop_hdr = !stale_plan.decision.stop_hdr;
+        assert!(MeasuredAdaptiveSession::restore(stale_plan).is_err());
+
+        let mut wrong_anchor = snapshot.clone();
+        wrong_anchor.posterior.radiance_anchor_exposure *= 2.0;
+        assert!(MeasuredAdaptiveSession::restore(wrong_anchor).is_err());
+
+        let mut wrong_frames = snapshot.clone();
+        wrong_frames.retained_frame_count = 2;
+        assert!(MeasuredAdaptiveSession::restore(wrong_frames).is_err());
+
+        let mut wrong_calibration = snapshot;
+        wrong_calibration
+            .sensor_calibration_id
+            .push_str("-tampered");
+        assert!(MeasuredAdaptiveSession::restore(wrong_calibration).is_err());
     }
 }

@@ -250,14 +250,33 @@ impl AdaptiveCaptureProvenance {
     }
 
     pub fn validate(&self, frame_count: usize) -> Result<()> {
-        if self.schema != ADAPTIVE_CAPTURE_PROVENANCE_SCHEMA
-            || self.sensor_calibration_id.trim().is_empty()
-            || self.iterations.is_empty()
-        {
-            anyhow::bail!("Adaptive capture provenance identity or iterations are invalid");
-        }
+        self.validate_partial(frame_count)?;
         if self.termination.is_none() {
             anyhow::bail!("Adaptive capture provenance has no termination reason");
+        }
+        let mut verified = self.clone();
+        let termination = verified
+            .termination
+            .take()
+            .context("Adaptive capture termination disappeared")?;
+        verified.finish(termination)?;
+        Ok(())
+    }
+
+    /// Validate either an active or completed trace. Active traces may be
+    /// empty before the first planned measurement executes, but every recorded
+    /// active iteration must have a retained frame.
+    pub fn validate_partial(&self, frame_count: usize) -> Result<()> {
+        if self.schema != ADAPTIVE_CAPTURE_PROVENANCE_SCHEMA
+            || self.sensor_calibration_id.trim().is_empty()
+        {
+            anyhow::bail!("Adaptive capture provenance identity is invalid");
+        }
+        if self.iterations.is_empty() {
+            if self.termination.is_some() || self.stop_hdr || self.stop_focus {
+                anyhow::bail!("Empty adaptive capture provenance has invalid stopping state");
+            }
+            return Ok(());
         }
         let mut executed = std::collections::BTreeSet::new();
         for (expected, iteration) in self.iterations.iter().enumerate() {
@@ -284,12 +303,16 @@ impl AdaptiveCaptureProvenance {
         {
             anyhow::bail!("Adaptive capture final stopping state is inconsistent");
         }
-        let mut verified = self.clone();
-        let termination = verified
-            .termination
-            .take()
-            .context("Adaptive capture termination disappeared")?;
-        verified.finish(termination)?;
+        if self.termination.is_none() {
+            if self.stop_hdr && self.stop_focus {
+                anyhow::bail!("Active adaptive capture trace has already stopped both objectives");
+            }
+            if self.iterations.iter().any(|iteration| {
+                iteration.decision.selected.is_none() || iteration.executed_frame_index.is_none()
+            }) {
+                anyhow::bail!("Active adaptive capture trace contains an unexecuted decision");
+            }
+        }
         Ok(())
     }
 }
