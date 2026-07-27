@@ -146,6 +146,7 @@ use utoipa::OpenApi;
         crate::api::hardware::turntable_rotate,
         crate::api::hardware::scan_hardware,
         crate::api::adaptive_capture::start_adaptive_capture,
+        crate::api::adaptive_capture::capture_next_adaptive,
         crate::api::adaptive_capture::assimilate_adaptive_capture,
         crate::api::adaptive_capture::get_adaptive_capture,
         crate::api::adaptive_capture::get_adaptive_capture_provenance,

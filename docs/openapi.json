@@ -794,6 +794,61 @@
         }
       }
     },
+    "/api/cameras/adaptive/{session_id}/capture-next": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "operationId": "capture_next_adaptive",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Adaptive session UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Recommended RAW captured, verified, and assimilated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Focus confirmation, camera options, RAW, or telemetry rejected"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Feature not licensed"
+          },
+          "404": {
+            "description": "Session or camera not found"
+          },
+          "409": {
+            "description": "Capture already active or session advanced"
+          },
+          "500": {
+            "description": "Camera, storage, encryption, or checkpoint failure"
+          }
+        }
+      }
+    },
     "/api/cameras/adaptive/{session_id}/observe": {
       "post": {
         "tags": [
@@ -3129,7 +3184,7 @@
           {
             "name": "scope",
             "in": "query",
-            "description": "output|processed|all (default output)",
+            "description": "raw|output|processed|all (all excludes raw; default output)",
             "required": false,
             "schema": {
               "type": "string",

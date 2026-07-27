@@ -277,6 +277,7 @@ pub async fn set_camera_config(
                 fps: None,
                 iso: json.iso.clone(),
                 shutter_speed: json.shutter_speed.clone(),
+                aperture: json.aperture.clone(),
                 wb: json.wb.clone(),
             },
         );

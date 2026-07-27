@@ -178,60 +178,12 @@ impl Camera for GPhotoCamera {
     }
 
     fn capture(&self, config: &CameraConfig) -> Result<PathBuf> {
-        if config.has_requested_settings() {
-            self.set_config(config)?;
-        }
-        let cam = self.camera.lock().unwrap();
-        let path_info =
-            block_on(cam.capture_image()).map_err(|e| anyhow!("Capture failed: {}", e))?;
-        let camera_name = path_info.name();
-        let destination = unique_capture_path(&camera_name)?;
-        let partial = partial_path(&destination);
-        let downloaded = block_on(cam.fs().download_to(
-            &path_info.folder(),
-            &camera_name,
-            &partial,
-        ))
-        .map_err(|error| {
-            let _ = fs::remove_file(&partial);
-            anyhow!("Captured {camera_name} but failed to download it: {error}")
-        })?;
-        drop(downloaded);
-        let publish_result = (|| -> Result<()> {
-            let size = fs::metadata(&partial)
-                .with_context(|| format!("Inspect downloaded capture {}", partial.display()))?
-                .len();
-            if size == 0 {
-                return Err(anyhow!(
-                    "Camera returned an empty capture for {camera_name}"
-                ));
-            }
-            fs::File::open(&partial)
-                .with_context(|| format!("Open downloaded capture {}", partial.display()))?
-                .sync_all()
-                .with_context(|| format!("Sync downloaded capture {}", partial.display()))?;
-            fs::rename(&partial, &destination).with_context(|| {
-                format!(
-                    "Publish downloaded capture {} as {}",
-                    partial.display(),
-                    destination.display()
-                )
-            })
-        })();
-        if let Err(error) = publish_result {
-            let _ = fs::remove_file(&partial);
-            return Err(error);
-        }
-        if let Some(parent) = destination.parent() {
-            if let Err(error) = fs::File::open(parent).and_then(|directory| directory.sync_all()) {
-                tracing::warn!(
-                    "Capture {} is published but directory sync failed: {}",
-                    destination.display(),
-                    error
-                );
-            }
-        }
-        Ok(destination)
+        let root = default_capture_root()?;
+        self.capture_into(config, &root)
+    }
+
+    fn capture_to(&self, config: &CameraConfig, directory: &Path) -> Result<PathBuf> {
+        self.capture_into(config, directory)
     }
 
     fn capture_preview(&self) -> Result<Vec<u8>> {
@@ -395,14 +347,12 @@ impl Camera for GPhotoCamera {
                 } else {
                     "Far 1"
                 }
+            } else if step < -5 {
+                "Near 3"
+            } else if step < -2 {
+                "Near 2"
             } else {
-                if step < -5 {
-                    "Near 3"
-                } else if step < -2 {
-                    "Near 2"
-                } else {
-                    "Near 1"
-                }
+                "Near 1"
             };
 
             match widget {
@@ -428,6 +378,66 @@ impl Camera for GPhotoCamera {
         }
 
         Err(anyhow!("Camera exposes no supported manual focus widget"))
+    }
+}
+
+impl GPhotoCamera {
+    fn capture_into(&self, config: &CameraConfig, directory: &Path) -> Result<PathBuf> {
+        if config.has_requested_settings() {
+            self.set_config(config)?;
+        }
+        let directory = prepare_capture_directory(directory)?;
+        let cam = self.camera.lock().unwrap();
+        let path_info =
+            block_on(cam.capture_image()).map_err(|e| anyhow!("Capture failed: {}", e))?;
+        let camera_name = path_info.name();
+        let destination = unique_capture_path_in(&directory, &camera_name);
+        let partial = partial_path(&destination);
+        let downloaded = block_on(cam.fs().download_to(
+            &path_info.folder(),
+            &camera_name,
+            &partial,
+        ))
+        .map_err(|error| {
+            let _ = fs::remove_file(&partial);
+            anyhow!("Captured {camera_name} but failed to download it: {error}")
+        })?;
+        drop(downloaded);
+        let publish_result = (|| -> Result<()> {
+            let size = fs::metadata(&partial)
+                .with_context(|| format!("Inspect downloaded capture {}", partial.display()))?
+                .len();
+            if size == 0 {
+                return Err(anyhow!(
+                    "Camera returned an empty capture for {camera_name}"
+                ));
+            }
+            fs::File::open(&partial)
+                .with_context(|| format!("Open downloaded capture {}", partial.display()))?
+                .sync_all()
+                .with_context(|| format!("Sync downloaded capture {}", partial.display()))?;
+            fs::rename(&partial, &destination).with_context(|| {
+                format!(
+                    "Publish downloaded capture {} as {}",
+                    partial.display(),
+                    destination.display()
+                )
+            })
+        })();
+        if let Err(error) = publish_result {
+            let _ = fs::remove_file(&partial);
+            return Err(error);
+        }
+        if let Some(parent) = destination.parent() {
+            if let Err(error) = fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+                tracing::warn!(
+                    "Capture {} is published but directory sync failed: {}",
+                    destination.display(),
+                    error
+                );
+            }
+        }
+        Ok(destination)
     }
 }
 
@@ -498,17 +508,32 @@ fn verify_setting(
     Ok(())
 }
 
-fn unique_capture_path(camera_name: &str) -> Result<PathBuf> {
-    let root = std::env::var_os("TRUESHOT_CAPTURE_DIR")
+fn default_capture_root() -> Result<PathBuf> {
+    std::env::var_os("TRUESHOT_CAPTURE_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::data_local_dir().map(|path| path.join("TrueShot").join("captures")))
-        .context("Cannot determine local TrueShot capture directory")?;
-    fs::create_dir_all(&root)
-        .with_context(|| format!("Create capture directory {}", root.display()))?;
+        .context("Cannot determine local TrueShot capture directory")
+}
+
+fn prepare_capture_directory(directory: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(directory)
+        .with_context(|| format!("Create capture directory {}", directory.display()))?;
+    let metadata = fs::symlink_metadata(directory)
+        .with_context(|| format!("Inspect capture directory {}", directory.display()))?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "Capture destination must be a real directory, not a symlink"
+        ));
+    }
+    fs::canonicalize(directory)
+        .with_context(|| format!("Canonicalize capture directory {}", directory.display()))
+}
+
+fn unique_capture_path_in(root: &Path, camera_name: &str) -> PathBuf {
     let safe_name = safe_camera_filename(camera_name);
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
-    Ok(root.join(format!("{timestamp}_{}_{}", Uuid::new_v4(), safe_name)))
+    root.join(format!("{timestamp}_{}_{}", Uuid::new_v4(), safe_name))
 }
 
 fn safe_camera_filename(camera_name: &str) -> String {
@@ -566,5 +591,21 @@ mod tests {
         );
         assert_eq!(safe_camera_filename("a b?.nef"), "a_b_.nef");
         assert_eq!(safe_camera_filename(".."), "capture.bin");
+    }
+
+    #[test]
+    fn destination_capture_directory_is_canonical_and_real() {
+        let base = std::env::temp_dir().join(format!("trueshot-gphoto-{}", Uuid::new_v4()));
+        let capture = base.join("capture");
+        let canonical = prepare_capture_directory(&capture).unwrap();
+        assert_eq!(canonical, fs::canonicalize(&capture).unwrap());
+
+        #[cfg(unix)]
+        {
+            let link = base.join("capture-link");
+            std::os::unix::fs::symlink(&capture, &link).unwrap();
+            assert!(prepare_capture_directory(&link).is_err());
+        }
+        fs::remove_dir_all(base).unwrap();
     }
 }

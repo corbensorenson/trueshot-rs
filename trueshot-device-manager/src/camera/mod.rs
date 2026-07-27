@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod insta360;
 pub mod kinect;
@@ -55,6 +55,13 @@ pub trait Camera: Send + Sync {
     /// actual locally available capture. Adapters must fail on unsupported or
     /// unapplied settings rather than fabricate success or a path.
     fn capture(&self, config: &CameraConfig) -> Result<PathBuf>;
+    /// Capture directly into an already-authorized directory and publish the
+    /// file durably before returning.
+    fn capture_to(&self, _config: &CameraConfig, _directory: &Path) -> Result<PathBuf> {
+        Err(anyhow::anyhow!(
+            "Destination-scoped capture is not supported by this camera"
+        ))
+    }
     fn capture_preview(&self) -> Result<Vec<u8>>;
     fn set_config(&self, config: &CameraConfig) -> Result<()>;
     fn battery_level(&self) -> Result<u8>;

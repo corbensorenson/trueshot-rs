@@ -1,21 +1,34 @@
+use crate::at_rest::{
+    encrypt_file_in_place, policy_for_project, require_master_key, ProjectKeyStore,
+};
 use crate::auth::require_admin;
+use crate::fs_safety::ensure_project_id;
 use crate::licensing::require_license_feature;
 use crate::state::AppState;
 use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Instant;
 use trueshot_core::capture::{
-    build_camera_candidates, observe_nef_reference, observe_nef_roi, AdaptiveCaptureTermination,
-    AdaptivePlannerConfig, AdaptiveSessionStatus, CaptureRuntimeTelemetry, MeasuredAdaptiveSession,
-    MeasuredAdaptiveSessionSnapshot, RawAssimilationReport, RawObservationConfig,
+    build_camera_candidates, observe_nef_reference, observe_nef_roi,
+    resolve_camera_candidate_options, AdaptiveCaptureTermination, AdaptivePlannerConfig,
+    AdaptiveSessionStatus, CameraOptionSelection, CaptureCandidate, CaptureRuntimeTelemetry,
+    MeasuredAdaptiveSession, MeasuredAdaptiveSessionSnapshot, RawAssimilationReport,
+    RawObservationConfig,
 };
 use trueshot_core::licensing::Feature;
 use trueshot_core::nef::raw_data::Roi;
 use trueshot_core::sensor_noise::SensorNoiseProfile;
+use trueshot_device_manager::CameraConfig;
 use uuid::Uuid;
 
 const MAX_ADAPTIVE_SESSIONS: usize = 32;
@@ -35,10 +48,13 @@ pub struct AdaptiveCaptureSessions {
 #[derive(Clone)]
 struct ServerAdaptiveSession {
     camera_id: String,
+    project_id: Option<String>,
+    aperture_option: Option<String>,
     core: MeasuredAdaptiveSession,
     roi: Roi,
     observation_config: RawObservationConfig,
     generation: u64,
+    capture_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,6 +63,10 @@ struct DurableSessionSnapshot {
     schema: String,
     session_id: String,
     camera_id: String,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    aperture_option: Option<String>,
     generation: u64,
     roi: [u32; 4],
     observation_config: RawObservationConfig,
@@ -284,6 +304,8 @@ fn durable_payload(session_id: Uuid, session: &ServerAdaptiveSession) -> Durable
         schema: SERVER_SESSION_SCHEMA.to_string(),
         session_id: session_id.to_string(),
         camera_id: session.camera_id.clone(),
+        project_id: session.project_id.clone(),
+        aperture_option: session.aperture_option.clone(),
         generation: session.generation,
         roi: [
             session.roi.x,
@@ -405,6 +427,8 @@ fn read_durable_session(
     payload.observation_config.validate()?;
     Ok(ServerAdaptiveSession {
         camera_id: payload.camera_id,
+        project_id: payload.project_id,
+        aperture_option: payload.aperture_option,
         core: MeasuredAdaptiveSession::restore(payload.core)?,
         roi: Roi {
             x: payload.roi[0],
@@ -414,6 +438,7 @@ fn read_durable_session(
         },
         observation_config: payload.observation_config,
         generation: payload.generation,
+        capture_active: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -439,8 +464,11 @@ impl From<RoiRequest> for Roi {
 #[derive(Debug, Deserialize)]
 pub struct StartAdaptiveCaptureRequest {
     pub camera_id: String,
-    pub reference_path: PathBuf,
-    pub sensor_profile: SensorNoiseProfile,
+    pub project_id: String,
+    /// Project-relative path such as `raw/reference.NEF`.
+    pub reference_raw_path: String,
+    /// Project-relative calibrated profile JSON path.
+    pub sensor_profile_path: String,
     pub roi: RoiRequest,
     pub focus_diopters: Vec<f32>,
     pub readout_ms: f32,
@@ -455,6 +483,7 @@ pub struct StartAdaptiveCaptureRequest {
 pub struct AdaptiveCaptureResponse {
     pub session_id: Uuid,
     pub camera_id: String,
+    pub project_id: Option<String>,
     pub generation: u64,
     pub status: AdaptiveSessionStatus,
 }
@@ -469,6 +498,30 @@ pub struct AssimilateAdaptiveCaptureRequest {
 pub struct AdaptiveAssimilationResponse {
     pub session_id: Uuid,
     pub generation: u64,
+    pub report: RawAssimilationReport,
+    pub status: AdaptiveSessionStatus,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CaptureNextAdaptiveRequest {
+    /// The operator has moved an uncalibrated lens to the recommended physical
+    /// distance. The completed NEF remains the authority and is rejected on a
+    /// metadata mismatch.
+    pub confirmed_focus_diopters: f32,
+    #[serde(default)]
+    pub motion_pixels_per_second: f32,
+    #[serde(default)]
+    pub thermal_load: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CaptureNextAdaptiveResponse {
+    pub session_id: Uuid,
+    pub generation: u64,
+    pub capture_path: String,
+    pub selected: CaptureCandidate,
+    pub camera_options: CameraOptionSelection,
+    pub measured_capture_elapsed_ms: f32,
     pub report: RawAssimilationReport,
     pub status: AdaptiveSessionStatus,
 }
@@ -521,7 +574,64 @@ pub async fn start_adaptive_capture(
         };
         profile.capabilities.clone()
     };
-    let candidates = match build_camera_candidates(
+    let reference_path = match project_asset_file(
+        &state.config.paths.projects_dir,
+        &json.project_id,
+        &json.reference_raw_path,
+        &["raw"],
+    ) {
+        Ok(path) => path,
+        Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
+    };
+    let sensor_profile_path = match project_asset_file(
+        &state.config.paths.projects_dir,
+        &json.project_id,
+        &json.sensor_profile_path,
+        &["raw", "processed"],
+    ) {
+        Ok(path) => path,
+        Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
+    };
+    if reference_path.extension().and_then(|value| value.to_str()) == Some("enc")
+        || sensor_profile_path
+            .extension()
+            .and_then(|value| value.to_str())
+            == Some("enc")
+    {
+        return HttpResponse::BadRequest().body(
+            "Adaptive capture currently requires seekable plaintext project assets; decrypt this project scope before starting",
+        );
+    }
+    let roi = Roi::from(json.roi);
+    let decode_roi = roi.clone();
+    let observation_config = json.observation;
+    let (sensor_profile, reference) = match tokio::task::spawn_blocking({
+        move || {
+            let sensor_profile = SensorNoiseProfile::load_json(&sensor_profile_path)?;
+            let reference = observe_nef_reference(
+                &reference_path,
+                decode_roi,
+                &sensor_profile,
+                observation_config,
+            )?;
+            anyhow::Ok((sensor_profile, reference))
+        }
+    })
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => return HttpResponse::BadRequest().body(error.to_string()),
+        Err(error) => {
+            return HttpResponse::InternalServerError()
+                .body(format!("Adaptive reference task failed: {error}"))
+        }
+    };
+    let aperture_option =
+        match declared_aperture_option(&capabilities.aperture_options, reference.aperture) {
+            Ok(option) => option,
+            Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
+        };
+    let mut candidates = match build_camera_candidates(
         &capabilities.shutter_speed_options,
         &capabilities.iso_options,
         &json.focus_diopters,
@@ -531,42 +641,18 @@ pub async fn start_adaptive_capture(
         Ok(report) => report.candidates,
         Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
     };
+    candidates.retain(|candidate| sensor_profile.model_for_iso(candidate.iso).is_some());
+    if candidates.is_empty() {
+        return HttpResponse::BadRequest()
+            .body("Camera exposes no candidate ISO with exact sensor calibration");
+    }
     if candidates.len() > MAX_API_CANDIDATES {
         return HttpResponse::BadRequest().body(format!(
-            "Adaptive API candidate grid has {} entries; limit is {}",
+            "Exact-calibration adaptive grid has {} entries; limit is {}. Reduce focus planes or camera shutter options",
             candidates.len(),
             MAX_API_CANDIDATES
         ));
     }
-    let reference_path =
-        match project_local_file(&state.config.paths.projects_dir, &json.reference_path) {
-            Ok(path) => path,
-            Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
-        };
-    let sensor_profile = json.sensor_profile.clone();
-    let roi = Roi::from(json.roi);
-    let decode_roi = roi.clone();
-    let observation_config = json.observation;
-    let reference = match tokio::task::spawn_blocking({
-        let sensor_profile = sensor_profile.clone();
-        move || {
-            observe_nef_reference(
-                &reference_path,
-                decode_roi,
-                &sensor_profile,
-                observation_config,
-            )
-        }
-    })
-    .await
-    {
-        Ok(Ok(observation)) => observation,
-        Ok(Err(error)) => return HttpResponse::BadRequest().body(error.to_string()),
-        Err(error) => {
-            return HttpResponse::InternalServerError()
-                .body(format!("Adaptive reference task failed: {error}"))
-        }
-    };
     let core = match MeasuredAdaptiveSession::start(
         reference,
         sensor_profile.clone(),
@@ -595,10 +681,13 @@ pub async fn start_adaptive_capture(
         session_id,
         ServerAdaptiveSession {
             camera_id: camera_id.clone(),
+            project_id: Some(json.project_id.clone()),
+            aperture_option: Some(aperture_option),
             core,
             roi,
             observation_config,
             generation: 0,
+            capture_active: Arc::new(AtomicBool::new(false)),
         },
     ) {
         return HttpResponse::InternalServerError()
@@ -607,8 +696,303 @@ pub async fn start_adaptive_capture(
     HttpResponse::Created().json(AdaptiveCaptureResponse {
         session_id,
         camera_id,
+        project_id: Some(json.project_id.clone()),
         generation: 0,
         status,
+    })
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/cameras/adaptive/{session_id}/capture-next",
+    tag = "hardware",
+    params(("session_id" = String, Path, description = "Adaptive session UUID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Recommended RAW captured, verified, and assimilated", body = serde_json::Value),
+        (status = 400, description = "Focus confirmation, camera options, RAW, or telemetry rejected"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Feature not licensed"),
+        (status = 404, description = "Session or camera not found"),
+        (status = 409, description = "Capture already active or session advanced"),
+        (status = 500, description = "Camera, storage, encryption, or checkpoint failure")
+    )
+)]
+#[post("/api/cameras/adaptive/{session_id}/capture-next")]
+pub async fn capture_next_adaptive(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    json: web::Json<CaptureNextAdaptiveRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    if let Err(response) = require_admin(&req) {
+        return response;
+    }
+    if let Err(response) = require_license_feature(
+        &state,
+        Feature::AdvancedCaptureAutomation,
+        "advanced_capture_automation",
+    ) {
+        return response;
+    }
+    let session_id = path.into_inner();
+    if !json.confirmed_focus_diopters.is_finite()
+        || json.confirmed_focus_diopters < 0.0
+        || !json.motion_pixels_per_second.is_finite()
+        || json.motion_pixels_per_second < 0.0
+        || !json.thermal_load.is_finite()
+        || json.thermal_load < 0.0
+    {
+        return HttpResponse::BadRequest().body("Adaptive capture confirmation is invalid");
+    }
+
+    let session = {
+        let sessions = state.adaptive_capture.lock().await;
+        let Some(session) = sessions.sessions.get(&session_id).cloned() else {
+            return HttpResponse::NotFound().body("Adaptive capture session not found");
+        };
+        let Some(selected) = session.core.next_candidate() else {
+            return HttpResponse::BadRequest().body("Adaptive capture session has no next action");
+        };
+        let focus_tolerance = (selected.focus_diopters.abs() * 0.01).max(0.01);
+        if (json.confirmed_focus_diopters - selected.focus_diopters).abs() > focus_tolerance {
+            return HttpResponse::BadRequest().body(format!(
+                "Confirmed focus {:.6} D does not match recommended {:.6} D",
+                json.confirmed_focus_diopters, selected.focus_diopters
+            ));
+        }
+        if session.project_id.is_none() || session.aperture_option.is_none() {
+            return HttpResponse::BadRequest().body(
+                "Legacy adaptive session cannot automate capture; create a project-bound session",
+            );
+        }
+        session
+    };
+    let capture_lease = match AdaptiveCaptureLease::acquire(&session.capture_active) {
+        Ok(lease) => lease,
+        Err(message) => return HttpResponse::Conflict().body(message),
+    };
+
+    let result = execute_capture_next(session_id, &session, &json, &state, capture_lease).await;
+    let mut sessions = state.adaptive_capture.lock().await;
+    let completed = match result {
+        Ok(completed) => completed,
+        Err((status, message)) => return HttpResponse::build(status).body(message),
+    };
+    let (report, advanced) = match sessions.assimilate(
+        session_id,
+        session.generation,
+        completed.observation,
+        CaptureRuntimeTelemetry {
+            capture_elapsed_ms: completed.elapsed_ms,
+            motion_pixels_per_second: json.motion_pixels_per_second,
+            thermal_load: json.thermal_load,
+        },
+    ) {
+        Ok(transition) => transition,
+        Err(error) if error.to_string().contains("advanced concurrently") => {
+            return HttpResponse::Conflict().body(error.to_string())
+        }
+        Err(error) => return persistence_error_response(&error),
+    };
+    HttpResponse::Ok().json(CaptureNextAdaptiveResponse {
+        session_id,
+        generation: advanced.generation,
+        capture_path: completed.project_path,
+        selected: completed.selected,
+        camera_options: completed.camera_options,
+        measured_capture_elapsed_ms: completed.elapsed_ms,
+        report,
+        status: advanced.core.status(),
+    })
+}
+
+struct CompletedAdaptiveCapture {
+    project_path: String,
+    selected: CaptureCandidate,
+    camera_options: CameraOptionSelection,
+    elapsed_ms: f32,
+    observation: trueshot_core::capture::RawCaptureObservation,
+    _capture_lease: AdaptiveCaptureLease,
+}
+
+struct AdaptiveCaptureLease {
+    active: Arc<AtomicBool>,
+}
+
+impl AdaptiveCaptureLease {
+    fn acquire(active: &Arc<AtomicBool>) -> Result<Self, &'static str> {
+        active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "An adaptive camera transaction is already active for this session")?;
+        Ok(Self {
+            active: Arc::clone(active),
+        })
+    }
+}
+
+impl Drop for AdaptiveCaptureLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+async fn execute_capture_next(
+    _session_id: Uuid,
+    session: &ServerAdaptiveSession,
+    _request: &CaptureNextAdaptiveRequest,
+    state: &web::Data<AppState>,
+    capture_lease: AdaptiveCaptureLease,
+) -> Result<CompletedAdaptiveCapture, (actix_web::http::StatusCode, String)> {
+    use actix_web::http::StatusCode;
+
+    let selected = session
+        .core
+        .next_candidate()
+        .ok_or((StatusCode::BAD_REQUEST, "No next action".to_string()))?;
+    let project_id = session
+        .project_id
+        .as_deref()
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Adaptive session is not project-bound".to_string(),
+        ))?
+        .to_string();
+    let raw_dir = project_raw_directory(&state.config.paths.projects_dir, &project_id)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    let (camera, camera_options, aperture_option) = {
+        let manager = state.camera_manager.lock().await;
+        let camera = manager.get_camera_by_id(&session.camera_id).ok_or((
+            StatusCode::NOT_FOUND,
+            "Adaptive session camera is not connected".to_string(),
+        ))?;
+        let profile = manager.registry.get_profile(&session.camera_id).ok_or((
+            StatusCode::BAD_REQUEST,
+            "Camera has no registered capabilities".to_string(),
+        ))?;
+        let options = resolve_camera_candidate_options(
+            &profile.capabilities.shutter_speed_options,
+            &profile.capabilities.iso_options,
+            selected,
+        )
+        .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
+        (
+            camera,
+            options,
+            session.aperture_option.clone().ok_or((
+                StatusCode::BAD_REQUEST,
+                "Adaptive session has no verified aperture option".to_string(),
+            ))?,
+        )
+    };
+    let config = CameraConfig {
+        iso: Some(camera_options.iso.clone()),
+        shutter_speed: Some(camera_options.shutter_speed.clone()),
+        aperture: Some(aperture_option),
+        wb: None,
+        capture_target: None,
+        resolution: None,
+        fps: None,
+    };
+    let started = Instant::now();
+    let (capture_result, capture_lease) =
+        tokio::task::spawn_blocking(move || (camera.capture_to(&config, &raw_dir), capture_lease))
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Adaptive camera task failed: {error}"),
+                )
+            })?;
+    let capture_path = capture_result.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Adaptive camera capture failed: {error}"),
+        )
+    })?;
+    let elapsed_ms = started.elapsed().as_secs_f32() * 1_000.0;
+    let sensor_profile = session.core.sensor_profile().clone();
+    let anchor = session.core.status().posterior.radiance_anchor_exposure;
+    let roi = session.roi.clone();
+    let observation_config = session.observation_config;
+    let observation_path = capture_path.clone();
+    let observation = tokio::task::spawn_blocking(move || {
+        observe_nef_roi(
+            &observation_path,
+            roi,
+            &sensor_profile,
+            anchor,
+            observation_config,
+        )
+    })
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Adaptive observation task failed: {error}"),
+        )
+    })?
+    .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+
+    let mut stored_path = capture_path.clone();
+    if policy_for_project(
+        &state.config.paths.projects_dir,
+        &project_id,
+        &state.config.privacy,
+    )
+    .is_some_and(|policy| policy.scopes.iter().any(|scope| scope == "raw"))
+    {
+        let master = require_master_key(&state.config.privacy, &state.config.paths.projects_dir)
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Adaptive RAW encryption key unavailable: {error}"),
+                )
+            })?;
+        let key = ProjectKeyStore::new(&state.config.paths.projects_dir, master)
+            .load_or_create(&project_id)
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Adaptive project key unavailable: {error}"),
+                )
+            })?;
+        stored_path = encrypt_file_in_place(&capture_path, &key, 0)
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Adaptive RAW encryption failed: {error}"),
+                )
+            })?
+            .ok_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Adaptive RAW was not encrypted under the active project policy".to_string(),
+            ))?;
+    }
+    let project_root = std::fs::canonicalize(state.config.paths.projects_dir.join(&project_id))
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Adaptive project path disappeared: {error}"),
+            )
+        })?;
+    let project_path = stored_path
+        .strip_prefix(&project_root)
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Adaptive capture escaped the project".to_string(),
+            )
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(CompletedAdaptiveCapture {
+        project_path,
+        selected,
+        camera_options,
+        elapsed_ms,
+        observation,
+        _capture_lease: capture_lease,
     })
 }
 
@@ -647,6 +1031,14 @@ pub async fn assimilate_adaptive_capture(
     let session_id = path.into_inner();
     let (sensor_profile, anchor, roi, observation_config, expected_generation) = {
         let sessions = state.adaptive_capture.lock().await;
+        if sessions
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| session.capture_active.load(Ordering::Acquire))
+        {
+            return HttpResponse::Conflict()
+                .body("An adaptive camera transaction is already active for this session");
+        }
         let Some(session) = sessions.sessions.get(&session_id) else {
             return HttpResponse::NotFound().body("Adaptive capture session not found");
         };
@@ -685,6 +1077,14 @@ pub async fn assimilate_adaptive_capture(
     let mut sessions = state.adaptive_capture.lock().await;
     if !sessions.sessions.contains_key(&session_id) {
         return HttpResponse::NotFound().body("Adaptive capture session not found");
+    }
+    if sessions
+        .sessions
+        .get(&session_id)
+        .is_some_and(|session| session.capture_active.load(Ordering::Acquire))
+    {
+        return HttpResponse::Conflict()
+            .body("An adaptive camera transaction is already active for this session");
     }
     let (report, session) =
         match sessions.assimilate(session_id, expected_generation, observation, json.telemetry) {
@@ -750,6 +1150,7 @@ pub async fn get_adaptive_capture(
     HttpResponse::Ok().json(AdaptiveCaptureResponse {
         session_id,
         camera_id: session.camera_id.clone(),
+        project_id: session.project_id.clone(),
         generation: session.generation,
         status: session.core.status(),
     })
@@ -826,6 +1227,14 @@ pub async fn terminate_adaptive_capture(
     if !sessions.sessions.contains_key(&session_id) {
         return HttpResponse::NotFound().body("Adaptive capture session not found");
     }
+    if sessions
+        .sessions
+        .get(&session_id)
+        .is_some_and(|session| session.capture_active.load(Ordering::Acquire))
+    {
+        return HttpResponse::Conflict()
+            .body("Cannot terminate while an adaptive camera transaction is active");
+    }
     let session = match sessions.terminate(session_id, json.reason) {
         Ok(session) => session,
         Err(error) => return persistence_error_response(&error),
@@ -833,9 +1242,112 @@ pub async fn terminate_adaptive_capture(
     HttpResponse::Ok().json(AdaptiveCaptureResponse {
         session_id,
         camera_id: session.camera_id.clone(),
+        project_id: session.project_id.clone(),
         generation: session.generation,
         status: session.core.status(),
     })
+}
+
+fn project_raw_directory(projects_root: &Path, project_id: &str) -> anyhow::Result<PathBuf> {
+    if ensure_project_id(project_id).is_err() {
+        anyhow::bail!("Invalid adaptive project id");
+    }
+    let root = std::fs::canonicalize(projects_root)?;
+    let project = std::fs::canonicalize(root.join(project_id))?;
+    if !project.starts_with(&root) {
+        anyhow::bail!("Adaptive project escaped the projects directory");
+    }
+    let raw = project.join("raw");
+    std::fs::create_dir_all(&raw)?;
+    let metadata = std::fs::symlink_metadata(&raw)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        anyhow::bail!("Adaptive project RAW destination must be a real directory");
+    }
+    let raw = std::fs::canonicalize(raw)?;
+    if !raw.starts_with(&project) {
+        anyhow::bail!("Adaptive project RAW destination escaped the project");
+    }
+    Ok(raw)
+}
+
+fn project_asset_file(
+    projects_root: &Path,
+    project_id: &str,
+    relative: &str,
+    allowed_scopes: &[&str],
+) -> anyhow::Result<PathBuf> {
+    if ensure_project_id(project_id).is_err() {
+        anyhow::bail!("Invalid adaptive project id");
+    }
+    let relative = Path::new(relative);
+    if relative.is_absolute() || relative.as_os_str().is_empty() {
+        anyhow::bail!("Adaptive project asset path must be relative");
+    }
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        anyhow::bail!("Adaptive project asset path contains traversal");
+    }
+    let scope = relative
+        .components()
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .context("Adaptive project asset has no scope")?;
+    if !allowed_scopes.contains(&scope) {
+        anyhow::bail!(
+            "Adaptive project asset must be under one of: {}",
+            allowed_scopes.join(", ")
+        );
+    }
+    let root = std::fs::canonicalize(projects_root)?;
+    let project = std::fs::canonicalize(root.join(project_id))?;
+    let scope_root = std::fs::canonicalize(project.join(scope))?;
+    let requested = project.join(relative);
+    let metadata = std::fs::symlink_metadata(&requested)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        anyhow::bail!("Adaptive project asset must be a regular non-symlink file");
+    }
+    let requested = std::fs::canonicalize(requested)?;
+    if !project.starts_with(&root)
+        || !scope_root.starts_with(&project)
+        || !requested.starts_with(&scope_root)
+    {
+        anyhow::bail!("Adaptive project asset escaped its authorized scope");
+    }
+    Ok(requested)
+}
+
+fn declared_aperture_option(
+    options: &[String],
+    measured_aperture: Option<f32>,
+) -> anyhow::Result<String> {
+    let measured = measured_aperture.context("Adaptive reference RAW has no physical aperture")?;
+    if !measured.is_finite() || measured <= 0.0 {
+        anyhow::bail!("Adaptive reference aperture is invalid");
+    }
+    options
+        .iter()
+        .filter_map(|option| {
+            let normalized = option
+                .trim()
+                .trim_start_matches(['f', 'F'])
+                .trim_start_matches('/')
+                .trim();
+            let parsed = normalized.parse::<f32>().ok()?;
+            let relative_error = (parsed - measured).abs() / measured;
+            (parsed.is_finite() && parsed > 0.0 && relative_error <= 0.001).then_some(option)
+        })
+        .min()
+        .cloned()
+        .context("Reference aperture is not an exact camera-declared option")
 }
 
 fn project_local_file(projects_root: &Path, requested: &Path) -> anyhow::Result<PathBuf> {
@@ -939,6 +1451,8 @@ mod tests {
         .unwrap();
         ServerAdaptiveSession {
             camera_id: "camera-z9".to_string(),
+            project_id: None,
+            aperture_option: None,
             core,
             roi: Roi {
                 x: 0,
@@ -948,6 +1462,7 @@ mod tests {
             },
             observation_config: RawObservationConfig::default(),
             generation: 0,
+            capture_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -985,6 +1500,74 @@ mod tests {
             assert!(project_local_file(&root, &link).is_err());
         }
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn project_asset_gate_is_scope_bound_and_rejects_symlinks() {
+        let base = temporary_projects();
+        let project = base.join("product");
+        fs::create_dir_all(project.join("raw")).unwrap();
+        fs::create_dir_all(project.join("processed")).unwrap();
+        let raw = project.join("raw/reference.NEF");
+        let profile = project.join("processed/noise.json");
+        fs::write(&raw, b"raw").unwrap();
+        fs::write(&profile, b"{}").unwrap();
+
+        assert_eq!(
+            project_asset_file(&base, "product", "raw/reference.NEF", &["raw"]).unwrap(),
+            fs::canonicalize(&raw).unwrap()
+        );
+        assert!(project_asset_file(&base, "product", "processed/noise.json", &["raw"]).is_err());
+        assert!(project_asset_file(&base, "product", "../escape", &["raw"]).is_err());
+
+        #[cfg(unix)]
+        {
+            let link = project.join("raw/profile-link.json");
+            std::os::unix::fs::symlink(&profile, &link).unwrap();
+            assert!(
+                project_asset_file(&base, "product", "raw/profile-link.json", &["raw"]).is_err()
+            );
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn aperture_must_round_trip_to_a_declared_camera_option() {
+        let options = vec!["Auto".to_string(), "f/8".to_string(), "11".to_string()];
+        assert_eq!(
+            declared_aperture_option(&options, Some(8.0)).unwrap(),
+            "f/8"
+        );
+        assert!(declared_aperture_option(&options, Some(9.5)).is_err());
+        assert!(declared_aperture_option(&options, None).is_err());
+    }
+
+    #[test]
+    fn capture_lease_is_exclusive_and_releases_on_drop() {
+        let active = Arc::new(AtomicBool::new(false));
+        let first = AdaptiveCaptureLease::acquire(&active).unwrap();
+        assert!(AdaptiveCaptureLease::acquire(&active).is_err());
+        drop(first);
+        assert!(AdaptiveCaptureLease::acquire(&active).is_ok());
+    }
+
+    #[test]
+    fn capture_worker_owns_lease_until_hardware_action_exits() {
+        let active = Arc::new(AtomicBool::new(false));
+        let lease = AdaptiveCaptureLease::acquire(&active).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            drop(lease);
+        });
+        started_rx.recv().unwrap();
+        assert!(active.load(Ordering::Acquire));
+        assert!(AdaptiveCaptureLease::acquire(&active).is_err());
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(!active.load(Ordering::Acquire));
     }
 
     #[cfg(unix)]

@@ -784,6 +784,7 @@ async fn main() -> std::io::Result<()> {
             .service(api::hardware::capture_focus_stack)
             .service(api::hardware::capture_hdr_focus_stack)
             .service(api::adaptive_capture::start_adaptive_capture)
+            .service(api::adaptive_capture::capture_next_adaptive)
             .service(api::adaptive_capture::assimilate_adaptive_capture)
             .service(api::adaptive_capture::get_adaptive_capture)
             .service(api::adaptive_capture::get_adaptive_capture_provenance)

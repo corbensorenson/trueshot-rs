@@ -104,6 +104,8 @@ pub struct CameraSettings {
     pub fps: Option<u32>,
     pub iso: Option<String>,
     pub shutter_speed: Option<String>,
+    #[serde(default)]
+    pub aperture: Option<String>,
     pub wb: Option<String>,
 }
 

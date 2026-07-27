@@ -8,12 +8,12 @@
  * - Save location control (camera/computer/both)
  */
 
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import {
     Camera, Sun, Layers, Focus,
     Play, Square, HardDrive, Folder,
     ChevronDown, ChevronUp, Check, X, Loader2, RefreshCw,
-    Zap, Image, Gauge, Target
+    Zap, Image, Gauge, Target, BrainCircuit
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { ThemeToggleFloating } from './ThemeToggleFloating';
@@ -38,12 +38,13 @@ import {
     type LicenseStatusResponse
 } from '../api/client';
 import { FeatureUnlockPanel } from './FeatureUnlockPanel';
+import { AdaptiveCapturePanel } from './AdaptiveCapturePanel';
 
 // ============================================================================
 // Types
 // ============================================================================
 
-type CaptureMode = 'single' | 'hdr' | 'focus-stack' | 'hdr-focus';
+type CaptureMode = 'single' | 'hdr' | 'focus-stack' | 'hdr-focus' | 'adaptive';
 
 interface HDRConfig {
     bracketCount: 3 | 5 | 7 | 9;
@@ -97,6 +98,32 @@ const formatBundlePrice = (bundle?: LicenseBundleInfo | null) => {
     if (!bundle.price_usd) return 'Contact sales';
     const billing = bundle.billing ? ` ${bundle.billing}` : '';
     return `$${bundle.price_usd}${billing}`;
+};
+
+const buildConnectedCamera = (profile: CameraProfile): ConnectedCamera => {
+    const storage = profile.capabilities.storage_info;
+    const storageTotal = storage ? storage.capacity_gb * 1024 * 1024 * 1024 : 0;
+    const storageUsed = storage ? (storage.capacity_gb - storage.free_gb) * 1024 * 1024 * 1024 : 0;
+    const iso = profile.last_settings?.iso ?? profile.capabilities.iso_options?.[0] ?? 'Auto';
+    const shutter = profile.last_settings?.shutter_speed ?? profile.capabilities.shutter_speed_options?.[0] ?? 'Auto';
+    const aperture = profile.last_settings?.aperture ?? profile.capabilities.aperture_options?.[0] ?? 'Auto';
+    const wb = profile.last_settings?.wb ?? profile.capabilities.wb_options?.[0] ?? 'Auto';
+    return {
+        id: profile.id,
+        name: profile.nickname ?? profile.name,
+        model: profile.name,
+        connected: Boolean(profile.connected),
+        battery: profile.battery_level ?? null,
+        storageUsed,
+        storageTotal,
+        settings: {
+            iso: typeof iso === 'string' ? iso : String(iso),
+            aperture: aperture.toString(),
+            shutterSpeed: typeof shutter === 'string' ? shutter : String(shutter),
+            whiteBalance: wb,
+            focusMode: profile.capabilities.has_autofocus ? 'AF' : 'MF',
+        },
+    };
 };
 
 // ============================================================================
@@ -172,14 +199,10 @@ export default function CameraControlPro() {
     // ========================================================================
 
     useEffect(() => {
-        loadCamera();
-    }, []);
-
-    useEffect(() => {
         refreshEntitlement();
     }, []);
 
-    const loadCamera = async () => {
+    const loadCamera = useCallback(async () => {
         setLoading(true);
         try {
             const cams = await getCameras();
@@ -209,7 +232,11 @@ export default function CameraControlPro() {
             setIntervalStatus(null);
         }
         setLoading(false);
-    };
+    }, []);
+
+    useEffect(() => {
+        loadCamera();
+    }, [loadCamera]);
 
     const refreshEntitlement = async () => {
         try {
@@ -220,32 +247,6 @@ export default function CameraControlPro() {
             setLicenseStatus(null);
             setLicenseBundles([]);
         }
-    };
-
-    const buildConnectedCamera = (profile: CameraProfile): ConnectedCamera => {
-        const storage = profile.capabilities.storage_info;
-        const storageTotal = storage ? storage.capacity_gb * 1024 * 1024 * 1024 : 0;
-        const storageUsed = storage ? (storage.capacity_gb - storage.free_gb) * 1024 * 1024 * 1024 : 0;
-        const iso = profile.last_settings?.iso ?? profile.capabilities.iso_options?.[0] ?? 'Auto';
-        const shutter = profile.last_settings?.shutter_speed ?? profile.capabilities.shutter_speed_options?.[0] ?? 'Auto';
-        const aperture = profile.capabilities.aperture_options?.[0] ?? 'Auto';
-        const wb = profile.last_settings?.wb ?? profile.capabilities.wb_options?.[0] ?? 'Auto';
-        return {
-            id: profile.id,
-            name: profile.nickname ?? profile.name,
-            model: profile.name,
-            connected: Boolean(profile.connected),
-            battery: profile.battery_level ?? null,
-            storageUsed,
-            storageTotal,
-            settings: {
-                iso: typeof iso === 'string' ? iso : String(iso),
-                aperture: aperture.toString(),
-                shutterSpeed: typeof shutter === 'string' ? shutter : String(shutter),
-                whiteBalance: wb,
-                focusMode: profile.capabilities.has_autofocus ? 'AF' : 'MF',
-            },
-        };
     };
 
     const selectCamera = async (cameraId: string) => {
@@ -269,6 +270,7 @@ export default function CameraControlPro() {
 
     const startCapture = async () => {
         if (!camera || isCapturing || !hardwareCameraId) return;
+        if (captureMode === 'adaptive') return;
         if (advancedLocked && captureMode !== 'single') {
             setUnlockError('Advanced capture modes require the Advanced Capture Automation add-on.');
             toast.error('Advanced capture is locked. Start a trial or upgrade to continue.');
@@ -424,6 +426,8 @@ export default function CameraControlPro() {
                 return focusStackConfig.sliceCount;
             case 'hdr-focus':
                 return hdrConfig.bracketCount * focusStackConfig.sliceCount;
+            case 'adaptive':
+                return 0;
             default:
                 return 1;
         }
@@ -435,6 +439,7 @@ export default function CameraControlPro() {
             case 'hdr': return 'HDR Bracket';
             case 'focus-stack': return 'Focus Stack';
             case 'hdr-focus': return 'HDR + Focus Stack';
+            case 'adaptive': return 'Adaptive Evidence';
         }
     };
 
@@ -444,6 +449,7 @@ export default function CameraControlPro() {
             case 'hdr': return `${hdrConfig.bracketCount} shots, ±${hdrConfig.evSpacing * (hdrConfig.bracketCount - 1) / 2} EV`;
             case 'focus-stack': return `${focusStackConfig.sliceCount} focus slices`;
             case 'hdr-focus': return `${focusStackConfig.sliceCount} slices × ${hdrConfig.bracketCount} brackets`;
+            case 'adaptive': return 'Information-gain measured capture';
         }
     };
 
@@ -752,6 +758,14 @@ export default function CameraControlPro() {
                         <Zap size={16} />
                         HDR + FS
                     </button>
+                    <button
+                        className={captureMode === 'adaptive' ? 'active' : ''}
+                        onClick={() => setCaptureMode('adaptive')}
+                        disabled={isCapturing}
+                    >
+                        <BrainCircuit size={16} />
+                        Adaptive
+                    </button>
                 </div>
             </div>
 
@@ -766,12 +780,20 @@ export default function CameraControlPro() {
                         'Focus stacking automation',
                         'HDR + focus stack combined workflows',
                         'Intervalometer and ramped exposure control',
+                        'Measured information-gain capture planning',
                     ]}
                     trialAvailable={trialAvailable}
                     onStartTrial={startAdvancedTrial}
                     onBuy={openAdvancedPurchase}
                     busy={unlockBusy}
                     errorMessage={unlockError}
+                />
+            )}
+
+            {captureMode === 'adaptive' && hardwareCameraId && (
+                <AdaptiveCapturePanel
+                    cameraId={hardwareCameraId}
+                    locked={advancedLocked}
                 />
             )}
 
@@ -985,6 +1007,7 @@ export default function CameraControlPro() {
                 </div>
             )}
 
+            {captureMode !== 'adaptive' && <>
             {/* Save Location */}
             <div className="camera-control-pro__section">
                 <button
@@ -1212,6 +1235,8 @@ export default function CameraControlPro() {
                 )}
             </div>
 
+            </>}
+
             {/* Capture Queue */}
             {captureQueue.length > 0 && (
                 <div className="camera-control-pro__queue">
@@ -1250,7 +1275,7 @@ export default function CameraControlPro() {
             )}
 
             {/* Main Capture Button */}
-            <div className="camera-control-pro__capture">
+            {captureMode !== 'adaptive' && <div className="camera-control-pro__capture">
                 {!isCapturing ? (
                     <button
                         className="camera-control-pro__capture-btn"
@@ -1271,7 +1296,7 @@ export default function CameraControlPro() {
                         <span>CANCEL</span>
                     </button>
                 )}
-            </div>
+            </div>}
         </div>
     );
 }

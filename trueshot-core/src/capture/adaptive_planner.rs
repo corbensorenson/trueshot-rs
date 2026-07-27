@@ -324,6 +324,39 @@ pub struct CandidateBuildReport {
     pub rejected_iso_options: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraOptionSelection {
+    pub shutter_speed: String,
+    pub iso: String,
+}
+
+/// Resolve a numeric planner candidate back to the exact strings declared by
+/// the camera. This is deliberately not a formatter: camera adapters require
+/// byte-for-byte option values for verified setting readback.
+pub fn resolve_camera_candidate_options(
+    shutter_options: &[String],
+    iso_options: &[String],
+    candidate: CaptureCandidate,
+) -> Result<CameraOptionSelection> {
+    validate_candidate(candidate)?;
+    let shutter_speed = shutter_options
+        .iter()
+        .filter(|option| {
+            parse_shutter_seconds(option)
+                .is_some_and(|value| value.to_bits() == candidate.shutter_seconds.to_bits())
+        })
+        .min()
+        .cloned()
+        .context("Selected shutter is no longer declared by the camera")?;
+    let iso = iso_options
+        .iter()
+        .filter(|option| parse_iso(option) == Some(candidate.iso))
+        .min()
+        .cloned()
+        .context("Selected ISO is no longer declared by the camera")?;
+    Ok(CameraOptionSelection { shutter_speed, iso })
+}
+
 /// Convert camera-declared option strings into a bounded, canonical candidate
 /// set. Invalid/automatic modes remain visible in the report and are never
 /// guessed into numeric values.
@@ -1014,6 +1047,28 @@ mod tests {
             .candidates
             .windows(2)
             .all(|pair| !compare_candidate(&pair[0], &pair[1]).is_gt()));
+    }
+
+    #[test]
+    fn selected_candidate_round_trips_to_declared_camera_strings() {
+        let selected = resolve_camera_candidate_options(
+            &["Auto".to_string(), "0.01".to_string(), "1/100".to_string()],
+            &["Auto".to_string(), "ISO 100".to_string(), "100".to_string()],
+            candidate(0.01, 100, 1.0),
+        )
+        .unwrap();
+        assert_eq!(selected.shutter_speed, "0.01");
+        assert_eq!(selected.iso, "100");
+    }
+
+    #[test]
+    fn selected_candidate_fails_if_capabilities_changed() {
+        assert!(resolve_camera_candidate_options(
+            &["1/50".to_string()],
+            &["100".to_string()],
+            candidate(0.01, 100, 1.0),
+        )
+        .is_err());
     }
 
     #[test]

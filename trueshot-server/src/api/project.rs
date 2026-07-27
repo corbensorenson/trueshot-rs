@@ -722,7 +722,7 @@ pub async fn download_output_file(
     tag = "project",
     params(
         ("id" = String, Path, description = "Project id"),
-        ("scope" = Option<String>, Query, description = "output|processed|all (default output)"),
+        ("scope" = Option<String>, Query, description = "raw|output|processed|all (all excludes raw; default output)"),
         ("limit" = Option<usize>, Query, description = "Maximum number of assets to return")
     ),
     responses(
@@ -747,52 +747,66 @@ pub async fn list_project_assets(
 
     let mut assets: Vec<(i64, ProjectAsset)> = Vec::new();
 
-    let add_scope =
-        |root: std::path::PathBuf, prefix: &str, assets: &mut Vec<(i64, ProjectAsset)>| {
-            for entry in WalkDir::new(&root)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(Result::ok)
-            {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                let rel = match path.strip_prefix(&root) {
-                    Ok(rel) => rel,
-                    Err(_) => continue,
-                };
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                let meta = entry.metadata().ok();
-                let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                let modified_at = meta
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64);
-                let modified_label = modified_at.map(|ts| {
-                    DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(ts as u64))
-                        .to_rfc3339()
-                });
-                let path = format!("{}/{}", prefix, rel_str);
-                assets.push((
-                    modified_at.unwrap_or(0),
-                    ProjectAsset {
-                        path,
-                        bytes,
-                        modified_at: modified_label,
-                    },
-                ));
+    let add_scope = |root: std::path::PathBuf,
+                     prefix: &str,
+                     traversal_limit: Option<usize>,
+                     assets: &mut Vec<(i64, ProjectAsset)>| {
+        let mut added = 0usize;
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if traversal_limit.is_some_and(|limit| added >= limit) {
+                break;
             }
-        };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let rel = match path.strip_prefix(&root) {
+                Ok(rel) => rel,
+                Err(_) => continue,
+            };
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let meta = entry.metadata().ok();
+            let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified_at = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            let modified_label = modified_at.map(|ts| {
+                DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(ts as u64))
+                    .to_rfc3339()
+            });
+            let path = format!("{}/{}", prefix, rel_str);
+            assets.push((
+                modified_at.unwrap_or(0),
+                ProjectAsset {
+                    path,
+                    bytes,
+                    modified_at: modified_label,
+                },
+            ));
+            added = added.saturating_add(1);
+        }
+    };
 
     match scope.as_str() {
+        "raw" => {
+            let dir = match resolve_project_child(&state.config.paths.projects_dir, &id, "raw") {
+                Ok(path) => path,
+                Err(resp) => return resp,
+            };
+            add_scope(dir, "raw", Some(limit), &mut assets);
+        }
         "output" => {
             let dir = match resolve_project_child(&state.config.paths.projects_dir, &id, "output") {
                 Ok(path) => path,
                 Err(resp) => return resp,
             };
-            add_scope(dir, "output", &mut assets);
+            add_scope(dir, "output", None, &mut assets);
         }
         "processed" => {
             let dir =
@@ -800,23 +814,23 @@ pub async fn list_project_assets(
                     Ok(path) => path,
                     Err(resp) => return resp,
                 };
-            add_scope(dir, "processed", &mut assets);
+            add_scope(dir, "processed", None, &mut assets);
         }
         "all" => {
             let dir = match resolve_project_child(&state.config.paths.projects_dir, &id, "output") {
                 Ok(path) => path,
                 Err(resp) => return resp,
             };
-            add_scope(dir, "output", &mut assets);
+            add_scope(dir, "output", None, &mut assets);
             let dir =
                 match resolve_project_child(&state.config.paths.projects_dir, &id, "processed") {
                     Ok(path) => path,
                     Err(resp) => return resp,
                 };
-            add_scope(dir, "processed", &mut assets);
+            add_scope(dir, "processed", None, &mut assets);
         }
         _ => {
-            return HttpResponse::BadRequest().body("scope must be output, processed, or all");
+            return HttpResponse::BadRequest().body("scope must be raw, output, processed, or all");
         }
     }
 

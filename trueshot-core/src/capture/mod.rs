@@ -9,11 +9,11 @@ pub mod hdr;
 pub mod raw_observation;
 
 pub use adaptive_planner::{
-    build_camera_candidates, plan_next_capture, AdaptiveCaptureIteration,
-    AdaptiveCaptureProvenance, AdaptiveCaptureTermination, AdaptivePlannerConfig,
-    CandidateBuildReport, CandidateEvaluation, CandidateRejectionReason, CandidateUtility,
-    CaptureCandidate, CapturePlanDecision, CapturePosterior, FocusProbe, RadianceProbe,
-    ADAPTIVE_CAPTURE_PROVENANCE_SCHEMA,
+    build_camera_candidates, plan_next_capture, resolve_camera_candidate_options,
+    AdaptiveCaptureIteration, AdaptiveCaptureProvenance, AdaptiveCaptureTermination,
+    AdaptivePlannerConfig, CameraOptionSelection, CandidateBuildReport, CandidateEvaluation,
+    CandidateRejectionReason, CandidateUtility, CaptureCandidate, CapturePlanDecision,
+    CapturePosterior, FocusProbe, RadianceProbe, ADAPTIVE_CAPTURE_PROVENANCE_SCHEMA,
 };
 pub use adaptive_session::{
     AdaptiveSessionStatus, CaptureRuntimeTelemetry, MeasuredAdaptiveSession,

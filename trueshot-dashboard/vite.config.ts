@@ -42,5 +42,24 @@ export default defineConfig({
         changeOrigin: true,
       }
     }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('/node_modules/')) return undefined
+          if (id.includes('/three/') || id.includes('/@react-three/')) return 'vendor-three'
+          if (id.includes('/@mediapipe/')) return 'vendor-vision'
+          if (
+            id.includes('/react/') ||
+            id.includes('/react-dom/') ||
+            id.includes('/react-router-dom/') ||
+            id.includes('/framer-motion/') ||
+            id.includes('/lucide-react/')
+          ) return 'vendor-react'
+          return 'vendor'
+        }
+      }
+    }
   }
 })

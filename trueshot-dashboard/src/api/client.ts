@@ -540,7 +540,12 @@ export const createProject = async (name: string, description?: string) => {
     return res.json();
 };
 
-export const getProjects = async () => {
+export interface ProjectSummary {
+    name: string;
+    created?: string;
+}
+
+export const getProjects = async (): Promise<ProjectSummary[]> => {
     const res = await fetchAuthed(`${API_Base}/projects`, { headers: authHeaders() });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
@@ -600,7 +605,7 @@ export interface ProjectAsset {
     modified_at?: string | null;
 }
 
-export const listProjectAssets = async (projectId: string, scope: 'output' | 'processed' | 'all' = 'output') => {
+export const listProjectAssets = async (projectId: string, scope: 'raw' | 'output' | 'processed' | 'all' = 'output') => {
     const res = await fetchAuthed(`${API_Base}/projects/${encodeURIComponent(projectId)}/assets?scope=${scope}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(await res.text());
     return res.json() as Promise<ProjectAsset[]>;
@@ -1209,6 +1214,112 @@ export interface HdrFocusStackRequest {
     capture_target?: string | null;
 }
 
+export interface AdaptiveCaptureCandidate {
+    shutter_seconds: number;
+    iso: number;
+    focus_diopters: number;
+    readout_ms: number;
+    settle_ms: number;
+}
+
+export interface AdaptiveCandidateUtility {
+    candidate: AdaptiveCaptureCandidate;
+    hdr_information_nats: number;
+    focus_information_nats: number;
+    capture_cost_ms: number;
+    utility_per_ms: number;
+}
+
+export type AdaptiveCandidateEvaluation =
+    | { status: 'eligible'; utility: AdaptiveCandidateUtility }
+    | {
+        status: 'rejected';
+        candidate: AdaptiveCaptureCandidate;
+        reason: 'missing_exact_iso_calibration' | 'time_budget' | 'thermal_budget' | 'motion_blur';
+        predicted_cost_ms?: number | null;
+    };
+
+export interface AdaptiveCaptureStatus {
+    decision: {
+        selected?: AdaptiveCandidateUtility | null;
+        stop_hdr: boolean;
+        stop_focus: boolean;
+        hdr_target_reached: boolean;
+        focus_target_reached: boolean;
+        rejected_motion: number;
+        rejected_budget: number;
+        rejected_calibration: number;
+        evaluations: AdaptiveCandidateEvaluation[];
+    };
+    posterior: {
+        radiance: Array<{ probe_id: number; mean: number; variance: number; weight: number; cfa_site: number }>;
+        focus: Array<{ probe_id: number; mean_diopters: number; variance_diopters2: number; weight: number }>;
+        radiance_anchor_exposure: number;
+        current_focus_diopters: number;
+        motion_pixels_per_second: number;
+        elapsed_ms: number;
+        thermal_load: number;
+    };
+    retained_frame_count: number;
+    termination?: string | null;
+}
+
+export interface AdaptiveCaptureSession {
+    session_id: string;
+    camera_id: string;
+    project_id?: string | null;
+    generation: number;
+    status: AdaptiveCaptureStatus;
+}
+
+export interface StartAdaptiveCaptureRequest {
+    camera_id: string;
+    project_id: string;
+    reference_raw_path: string;
+    sensor_profile_path: string;
+    roi: { x: number; y: number; width: number; height: number };
+    focus_diopters: number[];
+    readout_ms: number;
+    settle_ms: number;
+    planner?: {
+        remaining_time_ms?: number;
+        maximum_motion_blur_px?: number;
+        maximum_thermal_load?: number;
+        thermal_load_per_second?: number;
+        lens_ms_per_diopter?: number;
+        focus_psf_sigma_diopters?: number;
+        focus_measurement_variance?: number;
+        target_radiance_variance?: number;
+        target_focus_variance_diopters2?: number;
+        minimum_hdr_information_nats?: number;
+        minimum_focus_information_nats?: number;
+    };
+    observation?: {
+        tile_columns?: number;
+        tile_rows?: number;
+        maximum_samples_per_tile_site?: number;
+        minimum_radiance_samples?: number;
+        minimum_focus_samples?: number;
+    };
+}
+
+export interface AdaptiveCaptureStep {
+    session_id: string;
+    generation: number;
+    capture_path: string;
+    selected: AdaptiveCaptureCandidate;
+    camera_options: { shutter_speed: string; iso: string };
+    measured_capture_elapsed_ms: number;
+    report: {
+        radiance_updates: number;
+        censored_constraints: number;
+        censor_conflicts: number;
+        focus_updates: number;
+        accumulated_focus_planes: number;
+    };
+    status: AdaptiveCaptureStatus;
+}
+
 export const getCameras = async (): Promise<CameraProfile[]> => {
     const res = await fetchAuthed(`${API_Base}/cameras`, { headers: authHeaders() });
     if (!res.ok) throw new Error(await res.text());
@@ -1310,6 +1421,63 @@ export const captureHdrFocusStack = async (id: string, payload: HdrFocusStackReq
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(payload)
     });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+};
+
+export const startAdaptiveCapture = async (
+    payload: StartAdaptiveCaptureRequest
+): Promise<AdaptiveCaptureSession> => {
+    const res = await fetchAuthed(`${API_Base}/cameras/adaptive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+};
+
+export const captureNextAdaptive = async (
+    sessionId: string,
+    payload: {
+        confirmed_focus_diopters: number;
+        motion_pixels_per_second: number;
+        thermal_load: number;
+    }
+): Promise<AdaptiveCaptureStep> => {
+    const res = await fetchAuthed(
+        `${API_Base}/cameras/adaptive/${encodeURIComponent(sessionId)}/capture-next`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify(payload),
+        },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+};
+
+export const getAdaptiveCapture = async (sessionId: string): Promise<AdaptiveCaptureSession> => {
+    const res = await fetchAuthed(
+        `${API_Base}/cameras/adaptive/${encodeURIComponent(sessionId)}`,
+        { headers: authHeaders() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+};
+
+export const terminateAdaptiveCapture = async (
+    sessionId: string,
+    reason: 'operator_stopped' | 'hardware_failure'
+): Promise<AdaptiveCaptureSession> => {
+    const res = await fetchAuthed(
+        `${API_Base}/cameras/adaptive/${encodeURIComponent(sessionId)}/terminate`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ reason }),
+        },
+    );
     if (!res.ok) throw new Error(await res.text());
     return res.json();
 };
