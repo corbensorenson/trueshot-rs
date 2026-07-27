@@ -45,7 +45,9 @@ trueshot calibrate-noise \
 ```
 
 The complete capture protocol, paired estimator, holdout gates, and artifact
-provenance are specified in `docs/SENSOR_NOISE_CALIBRATION.md`.
+provenance are specified in `docs/SENSOR_NOISE_CALIBRATION.md`. The same run
+also publishes an independently gated `trueshot.sensor-correction.v1` artifact
+as described in `docs/SENSOR_SPATIAL_CORRECTION.md`.
 
 Use a profile with native burst processing:
 
@@ -54,7 +56,8 @@ trueshot process \
   --mode burst \
   --input /path/to/capture \
   --output /path/to/output \
-  --sensor-noise-profile /path/to/z9-noise.json
+  --sensor-noise-profile /path/to/z9-noise.json \
+  --sensor-correction-profile /path/to/z9-noise_spatial_correction.json
 ```
 
 Loading is bounded to 1 MiB. The schema, camera identity, bit depth, duplicate

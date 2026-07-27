@@ -43,6 +43,7 @@ pub mod resource_manager;
 pub mod scanning;
 pub mod scheduler;
 pub mod sensor_calibration;
+pub mod sensor_correction;
 pub mod sensor_noise;
 pub mod sff;
 pub mod smart_loader;

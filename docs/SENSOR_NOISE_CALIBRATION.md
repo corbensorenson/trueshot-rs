@@ -1,9 +1,9 @@
 # Paired RAW Sensor Calibration
 
 TrueShot fits exact-camera, exact-bit-depth, exact-ISO, per-CFA
-Poisson-Gaussian sensor models from retained NEF evidence. The workflow is
-deliberately fail-closed: no profile is published unless independent holdout
-pairs pass every declared variance and interval-coverage gate.
+Poisson-Gaussian sensor models and an optics-bound spatial correction from
+retained NEF evidence. The workflow is deliberately fail-closed: no profile is
+published unless independent holdout pairs pass every declared gate.
 
 ## Capture Protocol
 
@@ -21,11 +21,13 @@ For every ISO to be supported, capture:
 - A brightest flat whose robust peak reaches at least 90% of usable range.
 - Pair exposures whose per-CFA robust means agree within 1%.
 
-Use a stabilized integrating sphere or high-quality uniform light source.
-Defocus the lens, exclude flickering illumination, avoid gradients and
-vignetting where possible, and allow the camera to reach the operating
-temperature that production captures will use. Capture separate profiles when
-readout mode, bit depth, or material thermal behavior changes.
+Use a stabilized integrating sphere or independently verified uniform light
+source. Exclude flickering illumination and source gradients, and allow the
+camera to reach the operating temperature that production captures will use.
+For spatial correction, capture flat pairs at the near/far endpoints and
+representative interior positions of the intended focus envelope. Capture
+separate profiles when readout mode, bit depth, optics, focus envelope, or
+material thermal behavior changes.
 
 Place the files in one dark directory and one directory per flat level:
 
@@ -59,9 +61,10 @@ trueshot calibrate-noise \
   --output calibration/z9-noise.json
 ```
 
-The command refuses to overwrite an existing profile or report. Choose a new
+The command refuses to overwrite either profile or the report. Choose a new
 output path for every calibration run so prior qualified evidence remains
-immutable.
+immutable. Spatial flat-field capture requirements and runtime semantics are
+specified in `docs/SENSOR_SPATIAL_CORRECTION.md`.
 
 ## Estimator
 
@@ -111,14 +114,17 @@ profile.
 A successful run produces:
 
 - `<name>.json`: the bounded `trueshot.sensor-noise.v1` runtime profile.
+- `<name>_spatial_correction.json`: the bounded
+  `trueshot.sensor-correction.v1` runtime profile.
 - `<name>_calibration_report.json`: the
-  `trueshot.sensor-calibration.artifact.v1` evidence report.
+  `trueshot.sensor-calibration.artifact.v2` evidence report.
 
 The report records configuration, pairing policy, every source path and
-SHA-256, per-ISO `trueshot.sensor-calibration.iso.v1` diagnostics, gate
-failures, publication state, and the completed profile SHA-256. The report is
-written before profile publication and finalized only after the profile
-round-trips through production validation.
+SHA-256, optical identity, per-ISO
+`trueshot.sensor-calibration.iso.v1` diagnostics, spatial holdout metrics,
+gate failures, publication state, and both completed profile SHA-256 values.
+The report is written before publication and finalized only after both
+profiles round-trip through production validation.
 
 Full NEFs are decoded one pair at a time. Only deterministic bounded samples
 are retained, so memory does not grow with full-frame pixel count.
@@ -131,7 +137,8 @@ yet contain a retained real Nikon Z9 dark/flat corpus or a qualified Z9 profile.
 TrueShot must not claim measured Z9 uncertainty coverage until that evidence is
 captured and the report passes.
 
-This profile also does not yet replace separate calibration for lens shading,
-defect pixels, dark-current-versus-exposure/temperature, color response, or
-lens PSF/breathing. Those remain explicit product-quality work rather than
-being folded into invented constants.
+The command now fits lens shading and persistent defects, but those results
+still require retained real integrating-sphere qualification for every
+advertised optical configuration. Dark current versus exposure/temperature,
+color response, and lens PSF/breathing remain separate product-quality work
+rather than invented constants.

@@ -55,6 +55,24 @@ TrueShot should implement its own censored Poisson-Gaussian estimator:
 
 Source: [Bayesian multi-exposure image fusion for robust high dynamic range ptychography](https://arxiv.org/abs/2403.11344).
 
+Implementation state (2026-07-27): TrueShot's paired calibration command now
+fits two independently gated artifacts in one streamed decode pass. Exact-ISO
+noise profiles drive censored Poisson-Gaussian inference and posterior
+uncertainty. An optics-bound spatial profile fits a compact per-CFA
+full-sensor gain grid in the log domain, records the measured focus envelope,
+and identifies only persistent, pair-agreeing defect pixels. Complete flat
+pairs are held out; publication requires corrected p95 relative error at most
+3% and at least 50% improvement. Shadow and near-clipped levels still inform
+the noise model but are excluded from spatial fitting by a retained 10%-85%
+usable-signal gate.
+Native fusion repairs mapped defects from same-CFA neighbors before
+interpolation, applies gain after black subtraction, evaluates clipping in the
+uncorrected sensor domain, and scales variance by gain squared. Camera, sensor
+geometry/bit depth, lens, aperture, focal length, focus envelope, crop
+containment, and Bayer origin mismatches fail closed. The exact correction map
+and profile digest are exported. Retained real integrating-sphere, thermal,
+exposure-duration, and focus-envelope qualification remain.
+
 ### 2. Physical focus coordinates and PSF-aware depth
 
 Scene-adaptive focus acquisition research models each focal slice as a sharp

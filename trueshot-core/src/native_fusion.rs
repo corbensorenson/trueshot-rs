@@ -12,6 +12,7 @@ use crate::focus_evidence::{
 };
 #[cfg(test)]
 use crate::focus_evidence::{compute_focus_metric_scalar, sorted_trimmed_focus_mean_at};
+use crate::sensor_correction::SensorCorrectionProfile;
 use crate::sensor_noise::{SensorNoiseModel, SensorNoiseProfile};
 use crate::smart_loader::NativeFrameGroup;
 use crate::types::Meta;
@@ -30,6 +31,8 @@ pub const FUSION_FLAG_CENSOR_CONFLICT: u8 = 1 << 4;
 pub const FUSION_FLAG_VISIBILITY_CORRECTED: u8 = 1 << 5;
 pub const FUSION_FLAG_BRACKET_ALIGNED: u8 = 1 << 6;
 pub const FUSION_FLAG_DISOCCLUDED: u8 = 1 << 7;
+pub const SENSOR_CORRECTION_FLAT_FIELD: u8 = 1 << 0;
+pub const SENSOR_CORRECTION_DEFECT_REPAIRED: u8 = 1 << 1;
 
 pub const BOUNDARY_TRIMAP_INTERIOR: u8 = 0;
 pub const BOUNDARY_TRIMAP_PSF_SUPPORT: u8 = 128;
@@ -90,6 +93,8 @@ pub struct NativeFusionConfig {
     pub read_noise_dn: f32,
     /// Exact camera/bit-depth/per-ISO photon-transfer calibration.
     pub sensor_noise_profile: Option<SensorNoiseProfile>,
+    /// Exact camera/geometry/optics spatial gain and defect calibration.
+    pub sensor_correction_profile: Option<SensorCorrectionProfile>,
     /// Apply confidence- and edge-aware depth regularization.
     pub regularize_depth: bool,
     /// Re-sample corrected focus hypotheses so regularization affects pixels,
@@ -134,6 +139,7 @@ impl Default for NativeFusionConfig {
             white_level: None,
             read_noise_dn: 3.0,
             sensor_noise_profile: None,
+            sensor_correction_profile: None,
             regularize_depth: true,
             depth_consistent_refusion: true,
             aperture_visibility_correction: true,
@@ -391,6 +397,8 @@ pub struct NativeFusionResult {
     pub source_map: Array2<u16>,
     /// Bitwise `FUSION_FLAG_*` evidence/provenance state.
     pub fusion_flags: Array2<u8>,
+    /// Per-pixel spatial correction provenance.
+    pub sensor_correction_map: Array2<u8>,
     /// Maximum measured glare/bloom evidence across focus hypotheses.
     ///
     /// Zero is no detected influence and 255 is a censored glare core. This
@@ -409,6 +417,10 @@ pub struct NativeFusionResult {
     pub radiance_anchor: f32,
     /// True only when every frame used an exact retained per-ISO profile.
     pub noise_model_calibrated: bool,
+    /// Digest identity of the applied spatial correction artifact.
+    pub sensor_correction_id: Option<String>,
+    /// Pixels whose selected source required persistent-defect replacement.
+    pub defect_repaired_pixels: usize,
     /// Pixels re-sampled after physical/regularized focus correction, including
     /// single-plane mixed-boundary anchoring.
     pub depth_refusion_pixels: usize,
@@ -448,6 +460,7 @@ impl NativeFusionResult {
             + self.radiance_uncertainty.len() * std::mem::size_of::<f32>()
             + self.source_map.len() * std::mem::size_of::<u16>()
             + self.fusion_flags.len()
+            + self.sensor_correction_map.len()
             + self.glare_map.len()
             + self.boundary_trimap.len()
             + self.foreground_mask.len()
@@ -563,6 +576,7 @@ struct HdrSample {
     frame_index: u16,
     censored: bool,
     reference_frame: bool,
+    correction_flags: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -571,6 +585,7 @@ struct HdrEstimate {
     uncertainty: f32,
     source_index: u16,
     flags: u8,
+    correction_flags: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -724,6 +739,7 @@ pub fn fuse_native_group(
     let mut source_map = vec![u16::MAX; pixel_count];
     let mut fusion_flags = vec![0u8; pixel_count];
     let mut glare_map = vec![0u8; pixel_count];
+    let mut sensor_correction_map = vec![0u8; pixel_count];
     let band_rows = config.tile_size.max(16);
     let band_len = width
         .checked_mul(band_rows)
@@ -737,6 +753,7 @@ pub fn fuse_native_group(
         .zip(source_map.par_chunks_mut(band_len))
         .zip(fusion_flags.par_chunks_mut(band_len))
         .zip(glare_map.par_chunks_mut(band_len))
+        .zip(sensor_correction_map.par_chunks_mut(band_len))
         .enumerate()
         .try_for_each(
             |(
@@ -744,12 +761,15 @@ pub fn fuse_native_group(
                 (
                     (
                         (
-                            (((bayer_band, depth_band), confidence_band), uncertainty_band),
-                            source_band,
+                            (
+                                (((bayer_band, depth_band), confidence_band), uncertainty_band),
+                                source_band,
+                            ),
+                            flags_band,
                         ),
-                        flags_band,
+                        glare_band,
                     ),
-                    glare_band,
+                    correction_band,
                 ),
             )|
              -> Result<()> {
@@ -774,6 +794,7 @@ pub fn fuse_native_group(
                     source_band,
                     flags_band,
                     glare_band,
+                    correction_band,
                 )
             },
         )?;
@@ -851,6 +872,7 @@ pub fn fuse_native_group(
                 &mut radiance_uncertainty,
                 &mut source_map,
                 &mut fusion_flags,
+                &mut sensor_correction_map,
             )?;
             depth_refusion_pixels = refused;
             boundary_source_fallback_pixels = boundary_fallbacks;
@@ -868,6 +890,10 @@ pub fn fuse_native_group(
     }
     let foreground_mask = infer_foreground_mask(&bayer, width, height);
     let glare_affected_pixels = glare_map.iter().filter(|value| **value != 0).count();
+    let defect_repaired_pixels = sensor_correction_map
+        .iter()
+        .filter(|flags| **flags & SENSOR_CORRECTION_DEFECT_REPAIRED != 0)
+        .count();
     let metric_depth_m = focus_model.as_ref().map(|model| {
         Array2::from_shape_vec(
             (height, width),
@@ -901,6 +927,8 @@ pub fn fuse_native_group(
             .context("Unable to shape source map output")?,
         fusion_flags: Array2::from_shape_vec((height, width), fusion_flags)
             .context("Unable to shape fusion flags output")?,
+        sensor_correction_map: Array2::from_shape_vec((height, width), sensor_correction_map)
+            .context("Unable to shape sensor correction map output")?,
         glare_map: Array2::from_shape_vec((height, width), glare_map)
             .context("Unable to shape glare diagnostic output")?,
         boundary_trimap: Array2::from_shape_vec((height, width), boundary_trimap)
@@ -913,6 +941,11 @@ pub fn fuse_native_group(
         noise_model_calibrated: calibrations
             .iter()
             .all(|calibration| calibration.noise_model.calibrated),
+        sensor_correction_id: config
+            .sensor_correction_profile
+            .as_ref()
+            .map(|profile| profile.calibration_id.clone()),
+        defect_repaired_pixels,
         depth_refusion_pixels,
         visibility_adjusted_pixels,
         visibility_constrained,
@@ -953,6 +986,26 @@ fn validate_group(
     }
     if let Some(profile) = &config.sensor_noise_profile {
         profile.validate()?;
+    }
+    if let Some(profile) = &config.sensor_correction_profile {
+        profile.validate()?;
+    }
+    if !group.rect.x.is_finite()
+        || !group.rect.y.is_finite()
+        || !group.rect.width.is_finite()
+        || !group.rect.height.is_finite()
+        || group.rect.x < 0.0
+        || group.rect.y < 0.0
+    {
+        anyhow::bail!("Native group crop geometry is invalid");
+    }
+    let (crop_x0, crop_y0, crop_x1, crop_y1) = group.rect.to_bounds();
+    if crop_x1.saturating_sub(crop_x0) != group.width
+        || crop_y1.saturating_sub(crop_y0) != group.height
+        || crop_x0 & 1 != 0
+        || crop_y0 & 1 != 0
+    {
+        anyhow::bail!("Native group crop must exactly match an even-origin Bayer ROI");
     }
     let exposures_per_focus = group.len() / focus_steps;
     if exposures_per_focus > MAX_HDR_EXPOSURES {
@@ -1015,6 +1068,12 @@ fn validate_group(
         {
             anyhow::bail!("Frame {} has invalid white-balance calibration", index);
         }
+        if crop_x1 > metadata.width as usize || crop_y1 > metadata.height as usize {
+            anyhow::bail!(
+                "Native group crop exceeds frame {} sensor dimensions",
+                index
+            );
+        }
         if exposures_per_focus > 1
             && (metadata.exposure_time.is_none()
                 || metadata.aperture.is_none()
@@ -1045,6 +1104,38 @@ fn validate_group(
                     "Sensor noise profile {} has no exact ISO {} model for frame {}",
                     profile.calibration_id,
                     iso,
+                    index
+                );
+            }
+        }
+        if let Some(profile) = &config.sensor_correction_profile {
+            let aperture = metadata
+                .aperture
+                .context("Spatial sensor correction requires aperture metadata")?;
+            let focal_length = metadata
+                .focal_length
+                .context("Spatial sensor correction requires focal-length metadata")?;
+            let lens_model = metadata
+                .lens_model
+                .as_deref()
+                .context("Spatial sensor correction requires lens-model metadata")?;
+            let focus_distance = metadata
+                .focus_distance
+                .context("Spatial sensor correction requires focus-distance metadata")?;
+            if !profile.matches(
+                &metadata.camera_make,
+                &metadata.camera_model,
+                metadata.bits_per_sample,
+                metadata.width,
+                metadata.height,
+                lens_model,
+                aperture,
+                focal_length,
+                focus_distance,
+            ) {
+                anyhow::bail!(
+                    "Sensor correction profile {} does not match frame {} camera, geometry, or optics",
+                    profile.calibration_id,
                     index
                 );
             }
@@ -1979,6 +2070,7 @@ fn process_band(
     source_output: &mut [u16],
     flags_output: &mut [u8],
     glare_output: &mut [u8],
+    correction_output: &mut [u8],
 ) -> Result<()> {
     let width = group.width;
     let halo = config
@@ -2005,6 +2097,7 @@ fn process_band(
         let mut plane_uncertainty = vec![f32::INFINITY; ext_pixels];
         let mut plane_source = vec![u16::MAX; ext_pixels];
         let mut plane_flags = vec![0u8; ext_pixels];
+        let mut plane_correction = vec![0u8; ext_pixels];
         let mut green = vec![0.0f32; ext_pixels];
         let mut focus_metric = vec![0.0f32; ext_pixels];
         let mut smoothed_focus = vec![0.0f32; ext_pixels];
@@ -2021,6 +2114,8 @@ fn process_band(
         let mut second_source = vec![u16::MAX; tile_pixels];
         let mut best_flags = vec![0u8; tile_pixels];
         let mut second_flags = vec![0u8; tile_pixels];
+        let mut best_correction = vec![0u8; tile_pixels];
+        let mut second_correction = vec![0u8; tile_pixels];
         let mut best_plane = vec![0u16; tile_pixels];
         let mut second_plane = vec![0u16; tile_pixels];
         let mut best_glare = vec![0.0f32; tile_pixels];
@@ -2036,6 +2131,7 @@ fn process_band(
             plane_uncertainty.fill(f32::INFINITY);
             plane_source.fill(u16::MAX);
             plane_flags.fill(0);
+            plane_correction.fill(0);
             green.fill(0.0);
             focus_metric.fill(0.0);
             smoothed_focus.fill(0.0);
@@ -2062,6 +2158,7 @@ fn process_band(
                         plane_uncertainty[index] = estimate.uncertainty;
                         plane_source[index] = estimate.source_index;
                         plane_flags[index] = estimate.flags;
+                        plane_correction[index] = estimate.correction_flags;
                         plane_valid[index] = true;
                     }
                 }
@@ -2144,6 +2241,7 @@ fn process_band(
                         second_uncertainty[tile_index] = best_uncertainty[tile_index];
                         second_source[tile_index] = best_source[tile_index];
                         second_flags[tile_index] = best_flags[tile_index];
+                        second_correction[tile_index] = best_correction[tile_index];
                         second_plane[tile_index] = best_plane[tile_index];
                         second_glare[tile_index] = best_glare[tile_index];
                         best_score[tile_index] = metric;
@@ -2152,6 +2250,7 @@ fn process_band(
                         best_uncertainty[tile_index] = plane_uncertainty[ext_index];
                         best_source[tile_index] = plane_source[ext_index];
                         best_flags[tile_index] = plane_flags[ext_index];
+                        best_correction[tile_index] = plane_correction[ext_index];
                         best_plane[tile_index] = focus as u16;
                         best_glare[tile_index] = glare;
                         left_score[tile_index] = if focus > 0 {
@@ -2167,6 +2266,7 @@ fn process_band(
                         second_uncertainty[tile_index] = plane_uncertainty[ext_index];
                         second_source[tile_index] = plane_source[ext_index];
                         second_flags[tile_index] = plane_flags[ext_index];
+                        second_correction[tile_index] = plane_correction[ext_index];
                         second_plane[tile_index] = focus as u16;
                         second_glare[tile_index] = glare;
                     }
@@ -2226,6 +2326,12 @@ fn process_band(
                 flags_output[output_index] = best_flags[tile_index]
                     | if second_is_valid {
                         second_flags[tile_index]
+                    } else {
+                        0
+                    };
+                correction_output[output_index] = best_correction[tile_index]
+                    | if second_is_valid {
+                        second_correction[tile_index]
                     } else {
                         0
                     };
@@ -2313,7 +2419,10 @@ fn fuse_hdr_sample(
     radiance_anchor: f32,
     config: &NativeFusionConfig,
 ) -> Option<HdrEstimate> {
-    let site = ((output_y & 1) << 1) | (output_x & 1);
+    let (crop_x0, crop_y0, _, _) = group.rect.to_bounds();
+    let sensor_output_x = crop_x0 + output_x;
+    let sensor_output_y = crop_y0 + output_y;
+    let site = ((sensor_output_y & 1) << 1) | (sensor_output_x & 1);
     let mut samples = [HdrSample::default(); MAX_HDR_EXPOSURES];
     let mut sample_count = 0usize;
     let mut alignment_flags = 0u8;
@@ -2337,7 +2446,7 @@ fn fuse_hdr_sample(
         if coordinate.aligned {
             alignment_flags |= FUSION_FLAG_BRACKET_ALIGNED;
         }
-        let Some(raw) = sample_same_cfa(
+        let Some((raw, sample_correction_flags)) = sample_corrected_same_cfa(
             frame,
             group.width,
             group.height,
@@ -2345,31 +2454,48 @@ fn fuse_hdr_sample(
             coordinate.y,
             output_x & 1,
             output_y & 1,
+            crop_x0,
+            crop_y0,
+            config.sensor_correction_profile.as_ref(),
         ) else {
             alignment_flags |= FUSION_FLAG_DISOCCLUDED;
             continue;
         };
         let range_dn = calibration.inverse_range.recip();
-        let signal = ((raw - calibration.black) * calibration.inverse_range).max(0.0);
+        let sensor_signal = ((raw - calibration.black) * calibration.inverse_range).max(0.0);
+        let gain = config
+            .sensor_correction_profile
+            .as_ref()
+            .map_or(1.0, |profile| {
+                profile.gain_at(
+                    crop_x0 as f32 + coordinate.x,
+                    crop_y0 as f32 + coordinate.y,
+                    site,
+                )
+            });
+        let signal = sensor_signal * gain;
         let radiance_scale = radiance_anchor / calibration.exposure * calibration.wb_by_site[site];
         let saturation_signal = calibration.noise_model.saturation_signal(range_dn);
-        let censored = signal >= saturation_signal;
+        let censored = sensor_signal >= saturation_signal;
         let radiance = signal * radiance_scale;
         let sensor_variance = calibration.noise_model.normalized_variance(
             site,
-            signal.min(saturation_signal),
+            sensor_signal.min(saturation_signal),
             range_dn,
         );
-        let variance = (sensor_variance * radiance_scale * radiance_scale).max(1e-16);
+        let variance = (sensor_variance * gain * gain * radiance_scale * radiance_scale).max(1e-16);
         if radiance.is_finite() && variance.is_finite() && sample_count < samples.len() {
             samples[sample_count] = HdrSample {
                 radiance,
                 variance,
-                lower_bound: saturation_signal * radiance_scale,
-                fallback_score: calibration.exposure * (1.0 - signal.min(1.0)),
+                lower_bound: saturation_signal * gain * radiance_scale,
+                fallback_score: calibration.exposure * (1.0 - sensor_signal.min(1.0)),
                 frame_index: u16::try_from(frame_index).unwrap_or(u16::MAX),
                 censored,
                 reference_frame: warp.reference_frame,
+                correction_flags: sample_correction_flags
+                    | (u8::from(config.sensor_correction_profile.is_some())
+                        * SENSOR_CORRECTION_FLAT_FIELD),
             };
             sample_count += 1;
         }
@@ -2409,6 +2535,7 @@ fn fuse_hdr_sample(
             uncertainty: f32::INFINITY,
             source_index: u16::MAX,
             flags: flags | FUSION_FLAG_SOURCE_FALLBACK,
+            correction_flags: strongest.correction_flags,
         });
     }
 
@@ -2435,6 +2562,7 @@ fn fuse_hdr_sample(
     let mut dominant_weight = -1.0f32;
     let mut source_index = u16::MAX;
     let mut rejected = false;
+    let mut correction_flags = 0u8;
     for sample in usable.iter() {
         let normalized_residual = if cutoff.is_finite() {
             (sample.radiance - center) / (cutoff * robust_scale)
@@ -2449,6 +2577,9 @@ fn fuse_hdr_sample(
             0.0
         };
         let weight = robust_weight / sample.variance;
+        if weight > 0.0 {
+            correction_flags |= sample.correction_flags;
+        }
         robust_sum += weight * sample.radiance;
         robust_weight_sum += weight;
         if weight > dominant_weight {
@@ -2473,15 +2604,15 @@ fn fuse_hdr_sample(
                 .sqrt();
         }
 
-        let strongest_lower_bound = valid
+        let strongest_censored = valid
             .iter()
             .filter(|sample| sample.censored)
-            .map(|sample| sample.lower_bound)
-            .max_by(f32::total_cmp);
-        if let Some(lower_bound) = strongest_lower_bound {
-            if lower_bound > radiance {
-                if lower_bound <= radiance + cutoff.min(6.0) * uncertainty {
-                    radiance = lower_bound;
+            .max_by(|left, right| left.lower_bound.total_cmp(&right.lower_bound));
+        if let Some(sample) = strongest_censored {
+            if sample.lower_bound > radiance {
+                if sample.lower_bound <= radiance + cutoff.min(6.0) * uncertainty {
+                    radiance = sample.lower_bound;
+                    correction_flags |= sample.correction_flags;
                 } else {
                     flags |= FUSION_FLAG_CENSOR_CONFLICT;
                 }
@@ -2502,6 +2633,7 @@ fn fuse_hdr_sample(
             uncertainty,
             source_index,
             flags,
+            correction_flags,
         })
     } else {
         usable
@@ -2512,6 +2644,7 @@ fn fuse_hdr_sample(
                 uncertainty: sample.variance.sqrt(),
                 source_index: sample.frame_index,
                 flags: flags | FUSION_FLAG_SOURCE_FALLBACK | FUSION_FLAG_OUTLIER_REJECTED,
+                correction_flags: sample.correction_flags,
             })
     }
 }
@@ -2560,95 +2693,104 @@ fn refuse_regularized_depth(
     uncertainty: &mut [f32],
     source_map: &mut [u16],
     fusion_flags: &mut [u8],
+    sensor_correction_map: &mut [u8],
 ) -> Result<(usize, usize)> {
     let width = group.width;
     let focus_denominator = (focus_steps - 1) as f32;
-    let (refusion_pixels, boundary_source_fallback_pixels) = bayer
-        .par_chunks_mut(width)
-        .zip(uncertainty.par_chunks_mut(width))
-        .zip(source_map.par_chunks_mut(width))
-        .zip(fusion_flags.par_chunks_mut(width))
-        .enumerate()
-        .map(
-            |(y, (((output_row, uncertainty_row), source_row), flags_row))|
-             -> Result<(usize, usize)> {
-                let mut changed = 0usize;
-                let mut boundary_fallbacks = 0usize;
-                for (x, output) in output_row.iter_mut().enumerate() {
-                    let index = y * width + x;
-                    let source_focus = source_depth[index].clamp(0.0, 1.0) * focus_denominator;
-                    let regularized_focus =
-                        regularized_depth[index].clamp(0.0, 1.0) * focus_denominator;
-                    let mixed_boundary = boundary_trimap
-                        .get(index)
-                        .is_some_and(|state| *state != BOUNDARY_TRIMAP_INTERIOR);
-                    if !mixed_boundary && source_focus.round() == regularized_focus.round() {
-                        continue;
-                    }
-                    let focus_position = if mixed_boundary {
-                        regularized_focus.round()
-                    } else {
-                        regularized_focus
-                    };
-                    let lower_focus = focus_position.floor() as usize;
-                    let upper_focus = focus_position.ceil() as usize;
-                    let fraction = focus_position - lower_focus as f32;
-                    let sample = |focus: usize| {
-                        let frame_start = focus * exposures_per_focus;
-                        fuse_hdr_sample(
-                            group,
-                            calibrations,
-                            frame_warps,
-                            frame_start,
-                            frame_start + exposures_per_focus,
-                            x,
-                            y,
-                            radiance_anchor,
-                            config,
-                        )
-                    };
-                    let estimate = if lower_focus == upper_focus {
-                        sample(lower_focus)
-                    } else {
-                        match (sample(lower_focus), sample(upper_focus)) {
-                            (Some(lower), Some(upper)) => Some(HdrEstimate {
-                                radiance: lower.radiance
-                                    + (upper.radiance - lower.radiance) * fraction,
-                                uncertainty: ((lower.uncertainty * (1.0 - fraction)).powi(2)
-                                    + (upper.uncertainty * fraction).powi(2))
-                                .sqrt(),
-                                source_index: if fraction < 0.5 {
-                                    lower.source_index
-                                } else {
-                                    upper.source_index
-                                },
-                                flags: lower.flags | upper.flags,
-                            }),
-                            (Some(value), None) | (None, Some(value)) => Some(value),
-                            (None, None) => None,
+    let (refusion_pixels, boundary_source_fallback_pixels) =
+        bayer
+            .par_chunks_mut(width)
+            .zip(uncertainty.par_chunks_mut(width))
+            .zip(source_map.par_chunks_mut(width))
+            .zip(fusion_flags.par_chunks_mut(width))
+            .zip(sensor_correction_map.par_chunks_mut(width))
+            .enumerate()
+            .map(
+                |(
+                    y,
+                    ((((output_row, uncertainty_row), source_row), flags_row), correction_row),
+                )|
+                 -> Result<(usize, usize)> {
+                    let mut changed = 0usize;
+                    let mut boundary_fallbacks = 0usize;
+                    for (x, output) in output_row.iter_mut().enumerate() {
+                        let index = y * width + x;
+                        let source_focus = source_depth[index].clamp(0.0, 1.0) * focus_denominator;
+                        let regularized_focus =
+                            regularized_depth[index].clamp(0.0, 1.0) * focus_denominator;
+                        let mixed_boundary = boundary_trimap
+                            .get(index)
+                            .is_some_and(|state| *state != BOUNDARY_TRIMAP_INTERIOR);
+                        if !mixed_boundary && source_focus.round() == regularized_focus.round() {
+                            continue;
                         }
-                    };
-                    if let Some(estimate) = estimate {
-                        *output = estimate.radiance;
-                        uncertainty_row[x] = estimate.uncertainty;
-                        source_row[x] = estimate.source_index;
-                        flags_row[x] = estimate.flags
-                            | if mixed_boundary {
-                                FUSION_FLAG_SOURCE_FALLBACK
-                            } else {
-                                0
-                            };
-                        changed += 1;
-                        boundary_fallbacks += usize::from(mixed_boundary);
+                        let focus_position = if mixed_boundary {
+                            regularized_focus.round()
+                        } else {
+                            regularized_focus
+                        };
+                        let lower_focus = focus_position.floor() as usize;
+                        let upper_focus = focus_position.ceil() as usize;
+                        let fraction = focus_position - lower_focus as f32;
+                        let sample = |focus: usize| {
+                            let frame_start = focus * exposures_per_focus;
+                            fuse_hdr_sample(
+                                group,
+                                calibrations,
+                                frame_warps,
+                                frame_start,
+                                frame_start + exposures_per_focus,
+                                x,
+                                y,
+                                radiance_anchor,
+                                config,
+                            )
+                        };
+                        let estimate = if lower_focus == upper_focus {
+                            sample(lower_focus)
+                        } else {
+                            match (sample(lower_focus), sample(upper_focus)) {
+                                (Some(lower), Some(upper)) => Some(HdrEstimate {
+                                    radiance: lower.radiance
+                                        + (upper.radiance - lower.radiance) * fraction,
+                                    uncertainty: ((lower.uncertainty * (1.0 - fraction)).powi(2)
+                                        + (upper.uncertainty * fraction).powi(2))
+                                    .sqrt(),
+                                    source_index: if fraction < 0.5 {
+                                        lower.source_index
+                                    } else {
+                                        upper.source_index
+                                    },
+                                    flags: lower.flags | upper.flags,
+                                    correction_flags: lower.correction_flags
+                                        | upper.correction_flags,
+                                }),
+                                (Some(value), None) | (None, Some(value)) => Some(value),
+                                (None, None) => None,
+                            }
+                        };
+                        if let Some(estimate) = estimate {
+                            *output = estimate.radiance;
+                            uncertainty_row[x] = estimate.uncertainty;
+                            source_row[x] = estimate.source_index;
+                            flags_row[x] = estimate.flags
+                                | if mixed_boundary {
+                                    FUSION_FLAG_SOURCE_FALLBACK
+                                } else {
+                                    0
+                                };
+                            correction_row[x] = estimate.correction_flags;
+                            changed += 1;
+                            boundary_fallbacks += usize::from(mixed_boundary);
+                        }
                     }
-                }
-                Ok((changed, boundary_fallbacks))
-            },
-        )
-        .try_reduce(
-            || (0usize, 0usize),
-            |left, right| Ok((left.0 + right.0, left.1 + right.1)),
-        )?;
+                    Ok((changed, boundary_fallbacks))
+                },
+            )
+            .try_reduce(
+                || (0usize, 0usize),
+                |left, right| Ok((left.0 + right.0, left.1 + right.1)),
+            )?;
     tracing::info!(
         "Depth-consistent refusion corrected {} / {} pixels ({:.2}%); {} physical boundary pixels anchored to one measured plane",
         refusion_pixels,
@@ -2657,6 +2799,118 @@ fn refuse_regularized_depth(
         boundary_source_fallback_pixels,
     );
     Ok((refusion_pixels, boundary_source_fallback_pixels))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_corrected_same_cfa(
+    frame: &[u16],
+    width: usize,
+    height: usize,
+    x: f32,
+    y: f32,
+    parity_x: usize,
+    parity_y: usize,
+    sensor_origin_x: usize,
+    sensor_origin_y: usize,
+    correction: Option<&SensorCorrectionProfile>,
+) -> Option<(f32, u8)> {
+    if correction.is_none() {
+        return sample_same_cfa(frame, width, height, x, y, parity_x, parity_y)
+            .map(|value| (value, 0));
+    }
+    if x < -2.0 || y < -2.0 || x > width as f32 + 1.0 || y > height as f32 + 1.0 {
+        return None;
+    }
+    let correction = correction?;
+    let (x0, x1, tx) = same_parity_axis(x, parity_x, width)?;
+    let (y0, y1, ty) = same_parity_axis(y, parity_y, height)?;
+    let mut repaired = false;
+    let mut sample = |sample_x: usize, sample_y: usize| {
+        corrected_raw_pixel(
+            frame,
+            width,
+            height,
+            sample_x,
+            sample_y,
+            sensor_origin_x,
+            sensor_origin_y,
+            correction,
+        )
+        .map(|(value, was_repaired)| {
+            repaired |= was_repaired;
+            value
+        })
+    };
+    let p00 = sample(x0, y0)?;
+    let p10 = sample(x1, y0)?;
+    let p01 = sample(x0, y1)?;
+    let p11 = sample(x1, y1)?;
+    let top = p00 + (p10 - p00) * tx;
+    let bottom = p01 + (p11 - p01) * tx;
+    Some((
+        top + (bottom - top) * ty,
+        if repaired {
+            SENSOR_CORRECTION_DEFECT_REPAIRED
+        } else {
+            0
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn corrected_raw_pixel(
+    frame: &[u16],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    sensor_origin_x: usize,
+    sensor_origin_y: usize,
+    correction: &SensorCorrectionProfile,
+) -> Option<(f32, bool)> {
+    let sensor_x = sensor_origin_x.checked_add(x)?;
+    let sensor_y = sensor_origin_y.checked_add(y)?;
+    let value = f32::from(*frame.get(y.checked_mul(width)?.checked_add(x)?)?);
+    if !correction.is_defective(sensor_x, sensor_y) {
+        return Some((value, false));
+    }
+    let mut neighbors = [0.0f32; 24];
+    let mut count = 0usize;
+    for dy in [-4isize, -2, 0, 2, 4] {
+        for dx in [-4isize, -2, 0, 2, 4] {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let Some(neighbor_x) = x.checked_add_signed(dx) else {
+                continue;
+            };
+            let Some(neighbor_y) = y.checked_add_signed(dy) else {
+                continue;
+            };
+            if neighbor_x >= width || neighbor_y >= height {
+                continue;
+            }
+            let full_x = sensor_origin_x.checked_add(neighbor_x)?;
+            let full_y = sensor_origin_y.checked_add(neighbor_y)?;
+            if correction.is_defective(full_x, full_y) {
+                continue;
+            }
+            neighbors[count] =
+                f32::from(*frame.get(neighbor_y.checked_mul(width)?.checked_add(neighbor_x)?)?);
+            count += 1;
+        }
+    }
+    if count < 4 {
+        return None;
+    }
+    neighbors[..count].sort_unstable_by(f32::total_cmp);
+    let middle = count / 2;
+    let replacement = if count & 1 == 0 {
+        0.5 * (neighbors[middle - 1] + neighbors[middle])
+    } else {
+        neighbors[middle]
+    };
+    Some((replacement, true))
 }
 
 fn sample_same_cfa(
@@ -3459,6 +3713,9 @@ fn bilinear_f64(image: &Array2<f64>, x: f64, y: f64) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::nef::parser::{SensorGeometry, SensorLevels, Z9Metadata};
+    use crate::sensor_correction::{
+        DefectPixel, SensorCorrectionProfile, SENSOR_CORRECTION_PROFILE_SCHEMA,
+    };
     use crate::sensor_noise::{
         IsoNoiseModel, SensorNoiseModel, SensorNoiseProfile, SENSOR_NOISE_PROFILE_SCHEMA,
     };
@@ -3467,8 +3724,8 @@ mod tests {
 
     fn metadata(exposure_time: f64) -> Z9Metadata {
         Z9Metadata {
-            width: 16,
-            height: 16,
+            width: 8_256,
+            height: 5_504,
             bits_per_sample: 14,
             compression: 1,
             cfa_pattern: RGGB,
@@ -3483,14 +3740,15 @@ mod tests {
             }),
             strip_offsets: vec![],
             strip_byte_counts: vec![],
-            rows_per_strip: 16,
+            rows_per_strip: 5_504,
             cam_mul: [2.0, 1.0, 1.5, 1.0],
             timestamp: None,
             exposure_time: Some(exposure_time),
             aperture: Some(1.0),
             iso: Some(100),
             focal_length: Some(105.0),
-            focus_distance: None,
+            focus_distance: Some(1.0),
+            lens_model: Some("NIKKOR Z MC 105mm f/2.8 VR S".to_string()),
         }
     }
 
@@ -3506,6 +3764,34 @@ mod tests {
             burst_factor: 1,
             bone_id: "test".to_string(),
             cam_mul: [2.0, 1.0, 1.5, 1.0],
+        }
+    }
+
+    fn calibrated_correction_profile(
+        gain: f32,
+        defects: Vec<DefectPixel>,
+    ) -> SensorCorrectionProfile {
+        SensorCorrectionProfile {
+            schema: SENSOR_CORRECTION_PROFILE_SCHEMA.to_string(),
+            camera_make: "Nikon".to_string(),
+            camera_model: "Z9".to_string(),
+            bits_per_sample: 14,
+            sensor_width: 8_256,
+            sensor_height: 5_504,
+            lens_model: "NIKKOR Z MC 105mm f/2.8 VR S".to_string(),
+            aperture: 1.0,
+            focal_length_mm: 105.0,
+            focus_distance_min_m: 0.8,
+            focus_distance_max_m: 1.2,
+            grid_width: 2,
+            grid_height: 2,
+            gain_by_cell_and_site: vec![gain; 16],
+            defects,
+            fit_flat_pairs: 2,
+            holdout_flat_pairs: 2,
+            raw_holdout_p95_relative_error: 0.2,
+            corrected_holdout_p95_relative_error: 0.01,
+            calibration_id: "sha256:synthetic-spatial-correction".to_string(),
         }
     }
 
@@ -4210,6 +4496,7 @@ mod tests {
         let mut uncertainty = vec![0.0; width * height];
         let mut source_map = vec![0; width * height];
         let mut fusion_flags = vec![0; width * height];
+        let mut sensor_correction_map = vec![0; width * height];
         let source_depth = vec![0.0; width * height];
         let mut regularized_depth = source_depth.clone();
         regularized_depth[8 * width + 9] = 1.0;
@@ -4232,6 +4519,7 @@ mod tests {
             &mut uncertainty,
             &mut source_map,
             &mut fusion_flags,
+            &mut sensor_correction_map,
         )
         .unwrap();
         assert!((bayer[8 * width + 8] - scenes[0]).abs() < 1e-6);
@@ -4301,6 +4589,8 @@ mod tests {
         let mut protected_source = vec![u16::MAX; width * height];
         let mut unprotected_flags = vec![0; width * height];
         let mut protected_flags = vec![0; width * height];
+        let mut unprotected_correction = vec![0; width * height];
+        let mut protected_correction = vec![0; width * height];
         let empty_trimap = vec![BOUNDARY_TRIMAP_INTERIOR; width * height];
         let (_, unprotected_fallbacks) = refuse_regularized_depth(
             &group,
@@ -4317,6 +4607,7 @@ mod tests {
             &mut unprotected_uncertainty,
             &mut unprotected_source,
             &mut unprotected_flags,
+            &mut unprotected_correction,
         )
         .unwrap();
         let (_, protected_fallbacks) = refuse_regularized_depth(
@@ -4334,6 +4625,7 @@ mod tests {
             &mut protected_uncertainty,
             &mut protected_source,
             &mut protected_flags,
+            &mut protected_correction,
         )
         .unwrap();
 
@@ -4683,6 +4975,120 @@ mod tests {
             .map(|(left, right)| (left - right).abs())
             .fold(0.0f32, f32::max);
         assert_eq!(maximum_difference, 0.0);
+    }
+
+    #[test]
+    fn calibrated_spatial_correction_flattens_signal_repairs_defects_and_is_traceable() {
+        let width = 16;
+        let height = 16;
+        let nominal_raw = 3_277u16;
+        let mut pixels = vec![nominal_raw; width * height];
+        pixels[8 * width + 8] = 15_000;
+        let mut frame_metadata = metadata(1.0);
+        frame_metadata.cam_mul = [1.0; 4];
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            1,
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            vec![frame_metadata],
+        )
+        .unwrap();
+        let profile = calibrated_correction_profile(1.5, vec![DefectPixel { x: 8, y: 8 }]);
+        let result = fuse_native_group(
+            &group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(16_383.0),
+                regularize_depth: false,
+                depth_consistent_refusion: false,
+                sensor_correction_profile: Some(profile),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expected = f32::from(nominal_raw) / 16_383.0 * 1.5;
+        assert!((result.bayer[[8, 8, 0]] - expected).abs() < 1e-5);
+        assert_eq!(
+            result.sensor_correction_map[[8, 8]]
+                & (SENSOR_CORRECTION_FLAT_FIELD | SENSOR_CORRECTION_DEFECT_REPAIRED),
+            SENSOR_CORRECTION_FLAT_FIELD | SENSOR_CORRECTION_DEFECT_REPAIRED
+        );
+        assert!(result.defect_repaired_pixels >= 1);
+        assert_eq!(
+            result.sensor_correction_id.as_deref(),
+            Some("sha256:synthetic-spatial-correction")
+        );
+        assert!(result.radiance_uncertainty[[8, 8]].is_finite());
+    }
+
+    #[test]
+    fn spatial_correction_and_bayer_crop_mismatch_fail_closed() {
+        let width = 16;
+        let height = 16;
+        let pixels = vec![2_000u16; width * height];
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            1,
+            width,
+            height,
+            Rect::new(1.0, 0.0, width as f64, height as f64),
+            vec![metadata(1.0)],
+        )
+        .unwrap();
+        assert!(fuse_native_group(
+            &group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                sensor_correction_profile: Some(calibrated_correction_profile(1.0, vec![])),
+                ..Default::default()
+            },
+        )
+        .is_err());
+
+        let even_group = NativeFrameGroup::from_parts(
+            &pixels,
+            1,
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            vec![metadata(1.0)],
+        )
+        .unwrap();
+        let mut wrong_optics = calibrated_correction_profile(1.0, vec![]);
+        wrong_optics.aperture = 8.0;
+        assert!(fuse_native_group(
+            &even_group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                sensor_correction_profile: Some(wrong_optics),
+                ..Default::default()
+            },
+        )
+        .is_err());
+
+        let mut outside_focus = metadata(1.0);
+        outside_focus.focus_distance = Some(4.0);
+        let outside_focus_group = NativeFrameGroup::from_parts(
+            &pixels,
+            1,
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            vec![outside_focus],
+        )
+        .unwrap();
+        assert!(fuse_native_group(
+            &outside_focus_group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                sensor_correction_profile: Some(calibrated_correction_profile(1.0, vec![])),
+                ..Default::default()
+            },
+        )
+        .is_err());
     }
 
     fn calibrated_noise_profile(iso: u32) -> SensorNoiseProfile {

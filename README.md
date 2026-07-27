@@ -56,7 +56,7 @@ trueshot export --input ./output/model.gltf --output ./output/model.glb --format
 # Calibrate cameras (checkerboard)
 trueshot calibrate --images ./calibration/*.jpg --cols 9 --rows 6 --square-size-mm 25
 
-# Fit an exact-ISO sensor model from retained paired dark/flat NEFs
+# Fit exact-ISO noise plus optics-bound flat-field/defect correction
 trueshot calibrate-noise \
   --dark ./sensor-calibration/dark \
   --flat-level ./sensor-calibration/flat-05 \
@@ -67,6 +67,9 @@ trueshot calibrate-noise \
   --flat-level ./sensor-calibration/flat-90 \
   --output ./sensor-calibration/camera-noise.json
 ```
+
+The command writes the noise profile, a sibling
+`camera-noise_spatial_correction.json`, and a digest-bound calibration report.
 
 ## 🏗️ Project Structure
 

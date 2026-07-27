@@ -1111,6 +1111,7 @@ mod tests {
             iso: Some(100),
             focal_length: Some(105.0),
             focus_distance: Some(distance),
+            lens_model: Some("NIKKOR Z MC 105mm f/2.8 VR S".to_string()),
         }
     }
 

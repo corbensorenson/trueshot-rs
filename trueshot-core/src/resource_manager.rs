@@ -176,10 +176,10 @@ impl NativeSequenceMemoryEstimate {
             .and_then(|value| value.checked_mul(2))
             .context("Native input arena estimate overflow")?;
         // Bayer, normalized/metric depth, confidence, radiance uncertainty,
-        // source map, provenance flags, glare map, physical boundary trimap,
-        // and foreground mask.
+        // source map, provenance flags, spatial-correction map, glare map,
+        // physical boundary trimap, and foreground mask.
         let fusion_output_bytes = pixels
-            .checked_mul(26)
+            .checked_mul(27)
             .context("Native fusion output estimate overflow")?;
         let focus_halo = focus_coarse_stride
             .max(1)
@@ -748,7 +748,7 @@ mod tests {
             NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512).unwrap();
         let peak_mib = estimate.peak_memory_bytes as f64 / (1024.0 * 1024.0);
         assert!(
-            (243.2..244.2).contains(&peak_mib),
+            (245.1..246.1).contains(&peak_mib),
             "peak was {peak_mib:.1} MiB"
         );
         assert_eq!(estimate.input_arena_bytes, 21 * 1310 * 1304 * 2);

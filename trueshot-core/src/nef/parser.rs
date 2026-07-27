@@ -32,6 +32,7 @@ struct ExifData {
     iso: Option<u32>,
     focal_length: Option<f32>,
     focus_distance: Option<f32>,
+    lens_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +60,7 @@ pub struct Z9Metadata {
     pub iso: Option<u32>,
     pub focal_length: Option<f32>,
     pub focus_distance: Option<f32>,
+    pub lens_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -700,6 +702,7 @@ impl Z9NefParser {
             iso: exif_data.iso,
             focal_length: exif_data.focal_length,
             focus_distance: exif_data.focus_distance,
+            lens_model: exif_data.lens_model,
         })
     }
 
@@ -821,6 +824,20 @@ impl Z9NefParser {
             }
         }
 
+        if let Some(field) = exif.get_field(exif::Tag::LensModel, exif::In::PRIMARY) {
+            if let exif::Value::Ascii(ref values) = field.value {
+                if let Some(value) = values.first() {
+                    let model = String::from_utf8_lossy(value)
+                        .trim_matches(char::from(0))
+                        .trim()
+                        .to_string();
+                    if !model.is_empty() {
+                        exif_data.lens_model = Some(model);
+                    }
+                }
+            }
+        }
+
         // Extract focus distance (SubjectDistance)
         if let Some(field) = exif.get_field(exif::Tag::SubjectDistance, exif::In::PRIMARY) {
             if let exif::Value::Rational(ref v) = field.value {
@@ -831,10 +848,11 @@ impl Z9NefParser {
         }
 
         tracing::debug!(
-            "Extracted EXIF: exp={:?}, f/{:?}, ISO {:?}",
+            "Extracted EXIF: exp={:?}, f/{:?}, ISO {:?}, lens={:?}",
             exif_data.exposure_time,
             exif_data.aperture,
-            exif_data.iso
+            exif_data.iso,
+            exif_data.lens_model
         );
 
         Ok(exif_data)

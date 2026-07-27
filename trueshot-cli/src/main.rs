@@ -45,6 +45,7 @@ use trueshot_core::native_fusion::{
     FUSION_FLAG_BRACKET_ALIGNED, FUSION_FLAG_CENSORED, FUSION_FLAG_CENSOR_CONFLICT,
     FUSION_FLAG_DISOCCLUDED, FUSION_FLAG_OUTLIER_REJECTED, FUSION_FLAG_SOURCE_FALLBACK,
     FUSION_FLAG_UNCALIBRATED_NOISE, FUSION_FLAG_VISIBILITY_CORRECTED,
+    SENSOR_CORRECTION_DEFECT_REPAIRED, SENSOR_CORRECTION_FLAT_FIELD,
 };
 use trueshot_core::postprocess::postprocess_f32;
 use trueshot_core::processing_journal::{
@@ -63,6 +64,10 @@ use trueshot_core::sensor_calibration::{
     CalibrationSplit, IsoCalibrationReport, SensorCalibrationAccumulator, SensorCalibrationConfig,
     SENSOR_CALIBRATION_ISO_REPORT_SCHEMA,
 };
+use trueshot_core::sensor_correction::{
+    CorrectionCalibrationSplit, SensorCorrectionAccumulator, SensorCorrectionCalibrationConfig,
+    SensorCorrectionProfile,
+};
 use trueshot_core::sensor_noise::{SensorNoiseProfile, SENSOR_NOISE_PROFILE_SCHEMA};
 use trueshot_core::smart_loader::{NativeGroupArena, SmartLoader};
 use trueshot_core::timing::HierarchicalTimer;
@@ -70,7 +75,7 @@ use trueshot_core::types::ProcessingOptions;
 use trueshot_core::validation::validate_photogrammetry_input;
 use uuid::Uuid;
 
-const SENSOR_CALIBRATION_ARTIFACT_SCHEMA: &str = "trueshot.sensor-calibration.artifact.v1";
+const SENSOR_CALIBRATION_ARTIFACT_SCHEMA: &str = "trueshot.sensor-calibration.artifact.v2";
 
 mod mesh_io;
 
@@ -229,6 +234,10 @@ enum Commands {
         #[arg(long)]
         sensor_noise_profile: Option<PathBuf>,
 
+        /// Measured spatial gain/defect profile for native burst fusion
+        #[arg(long)]
+        sensor_correction_profile: Option<PathBuf>,
+
         /// Skip the second CFA-safe pass when depth regularization changes a focus plane
         #[arg(long)]
         no_depth_refusion: bool,
@@ -306,7 +315,7 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// Fit an exact-ISO sensor noise profile from paired dark/flat NEFs
+    /// Fit exact-ISO noise and optics-bound spatial correction from paired NEFs
     CalibrateNoise {
         /// Directory containing repeated lens-capped dark frames
         #[arg(long)]
@@ -316,7 +325,7 @@ enum Commands {
         #[arg(long = "flat-level", required = true)]
         flat_levels: Vec<PathBuf>,
 
-        /// Output sensor-noise profile JSON
+        /// Output sensor-noise JSON; spatial correction and report are written beside it
         #[arg(short, long)]
         output: PathBuf,
 
@@ -588,6 +597,7 @@ fn main() -> Result<()> {
             glare_spread_um,
             no_glare_focus,
             sensor_noise_profile,
+            sensor_correction_profile,
             no_depth_refusion,
             trial,
             trial_days,
@@ -606,6 +616,7 @@ fn main() -> Result<()> {
             glare_spread_um,
             no_glare_focus,
             sensor_noise_profile,
+            sensor_correction_profile,
             no_depth_refusion,
             trial,
             trial_days,
@@ -705,6 +716,7 @@ fn cmd_process(
     glare_spread_um: f32,
     no_glare_focus: bool,
     sensor_noise_profile: Option<PathBuf>,
+    sensor_correction_profile: Option<PathBuf>,
     no_depth_refusion: bool,
     trial: bool,
     trial_days: Option<i64>,
@@ -718,8 +730,10 @@ fn cmd_process(
     if !glare_spread_um.is_finite() || !(1.0..=2_000.0).contains(&glare_spread_um) {
         anyhow::bail!("Glare spread must be between 1 and 2000 micrometers");
     }
-    if sensor_noise_profile.is_some() && mode != Mode::Burst {
-        anyhow::bail!("Sensor noise profiles currently apply only to --mode burst");
+    if (sensor_noise_profile.is_some() || sensor_correction_profile.is_some())
+        && mode != Mode::Burst
+    {
+        anyhow::bail!("Sensor calibration profiles currently apply only to --mode burst");
     }
     let mut license_manager = init_license_manager()?;
     let required = process_required_features(mode);
@@ -767,6 +781,7 @@ fn cmd_process(
             glare_spread_um,
             !no_glare_focus,
             sensor_noise_profile.as_deref(),
+            sensor_correction_profile.as_deref(),
             !no_depth_refusion,
             Some(&inventory_ctx),
             Some(&mut run_state),
@@ -1260,7 +1275,30 @@ struct NoiseCalibrationSourceRecord {
     iso: u32,
     shutter_seconds: Option<f64>,
     aperture: Option<f32>,
+    focal_length_mm: Option<f32>,
+    focus_distance_m: Option<f32>,
+    lens_model: Option<String>,
     timestamp: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SpatialCorrectionArtifactSummary {
+    profile_path: String,
+    profile_published: bool,
+    profile_sha256: Option<String>,
+    aperture: f32,
+    focal_length_mm: f32,
+    focus_distance_min_m: f32,
+    focus_distance_max_m: f32,
+    lens_model: String,
+    config: SensorCorrectionCalibrationConfig,
+    grid_width: u16,
+    grid_height: u16,
+    fit_flat_pairs: u32,
+    holdout_flat_pairs: u32,
+    raw_holdout_p95_relative_error: f32,
+    corrected_holdout_p95_relative_error: f32,
+    defect_pixels: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1276,6 +1314,7 @@ struct NoiseCalibrationArtifactReport {
     profile_path: String,
     profile_published: bool,
     profile_sha256: Option<String>,
+    spatial_correction: Option<SpatialCorrectionArtifactSummary>,
     config: SensorCalibrationConfig,
     iso_reports: Vec<IsoCalibrationReport>,
     sources: Vec<NoiseCalibrationSourceRecord>,
@@ -1292,10 +1331,12 @@ fn cmd_calibrate_noise(
     coverage_tolerance: f32,
 ) -> Result<()> {
     let report_path = calibration_report_path(&output);
-    if output.exists() || report_path.exists() {
+    let correction_path = spatial_correction_profile_path(&output);
+    if output.exists() || correction_path.exists() || report_path.exists() {
         anyhow::bail!(
-            "Refusing to overwrite calibration artifacts; choose a new output path (profile: {}, report: {})",
+            "Refusing to overwrite calibration artifacts; choose a new output path (noise: {}, correction: {}, report: {})",
             output.display(),
+            correction_path.display(),
             report_path.display()
         );
     }
@@ -1316,7 +1357,8 @@ fn cmd_calibrate_noise(
     println!("{} Paired RAW Sensor Calibration", CAMERA);
     println!("  Dark frames: {}", dark.display());
     println!("  Flat levels: {}", flat_levels.len());
-    println!("  Output: {}", output.display());
+    println!("  Noise output: {}", output.display());
+    println!("  Spatial correction: {}", correction_path.display());
 
     let mut files = inspect_noise_calibration_directory(&dark, "dark", None)?;
     for (level, directory) in flat_levels.iter().enumerate() {
@@ -1340,6 +1382,79 @@ fn cmd_calibrate_noise(
         .metadata
         .sensor_levels
         .context("Noise calibration requires verified black/white sensor levels")?;
+    let flat_reference = files
+        .iter()
+        .find(|file| file.role == "flat")
+        .context("Spatial correction requires flat-field evidence")?;
+    let correction_aperture = flat_reference
+        .metadata
+        .aperture
+        .context("Flat-field calibration requires aperture metadata")?;
+    let correction_focal_length = flat_reference
+        .metadata
+        .focal_length
+        .context("Flat-field calibration requires focal-length metadata")?;
+    let correction_lens_model = flat_reference
+        .metadata
+        .lens_model
+        .clone()
+        .context("Flat-field calibration requires lens-model metadata")?;
+    let mut correction_focus_min = f32::INFINITY;
+    let mut correction_focus_max = 0.0f32;
+    for file in files.iter().filter(|file| file.role == "flat") {
+        let aperture = file
+            .metadata
+            .aperture
+            .context("Flat-field calibration source is missing aperture")?;
+        let focal_length = file
+            .metadata
+            .focal_length
+            .context("Flat-field calibration source is missing focal length")?;
+        let lens_model = file
+            .metadata
+            .lens_model
+            .as_deref()
+            .context("Flat-field calibration source is missing lens model")?;
+        let focus_distance = file
+            .metadata
+            .focus_distance
+            .context("Flat-field calibration source is missing focus distance")?;
+        if !focus_distance.is_finite() || focus_distance <= 0.0 {
+            anyhow::bail!(
+                "Flat-field source {} has invalid focus distance",
+                file.path.display()
+            );
+        }
+        correction_focus_min = correction_focus_min.min(focus_distance);
+        correction_focus_max = correction_focus_max.max(focus_distance);
+        if (aperture - correction_aperture).abs() > correction_aperture.max(aperture) * 0.01
+            || (focal_length - correction_focal_length).abs()
+                > correction_focal_length.max(focal_length) * 0.005
+            || normalize_calibration_identity(lens_model)
+                != normalize_calibration_identity(&correction_lens_model)
+        {
+            anyhow::bail!(
+                "Flat-field source {} mixes optical settings; spatial calibration requires one aperture/focal-length configuration",
+                file.path.display()
+            );
+        }
+    }
+    let correction_config = SensorCorrectionCalibrationConfig::default();
+    let mut correction_accumulator = SensorCorrectionAccumulator::new(
+        camera_make.clone(),
+        camera_model.clone(),
+        bits_per_sample,
+        width as usize,
+        height as usize,
+        sensor_levels.black,
+        sensor_levels.white,
+        correction_lens_model,
+        correction_aperture,
+        correction_focal_length,
+        correction_focus_min,
+        correction_focus_max,
+        correction_config.clone(),
+    )?;
     let expected_dark_frames = config
         .minimum_dark_pairs_per_split
         .checked_mul(4)
@@ -1432,6 +1547,7 @@ fn cmd_calibrate_noise(
             &files,
             None,
             &progress,
+            None,
         )?;
         for level in 0..flat_levels.len() {
             let level = u32::try_from(level).context("Too many flat levels")?;
@@ -1444,6 +1560,7 @@ fn cmd_calibrate_noise(
                 &files,
                 Some(level),
                 &progress,
+                Some(&mut correction_accumulator),
             )?;
         }
         let outcome = accumulator.evaluate()?;
@@ -1459,6 +1576,14 @@ fn cmd_calibrate_noise(
         iso_reports.push(outcome.report);
     }
     progress.finish_with_message("Calibration evidence evaluated");
+    let correction_outcome = correction_accumulator.evaluate()?;
+    let mut correction_profile = correction_outcome.profile;
+    if correction_profile.is_none() {
+        failures.push(format!(
+            "spatial correction failed: {}",
+            correction_outcome.failures.join("; ")
+        ));
+    }
 
     let profile_path = output.clone();
     let sources = files
@@ -1475,11 +1600,37 @@ fn cmd_calibrate_noise(
                 iso: file.metadata.iso.unwrap_or_default(),
                 shutter_seconds: file.metadata.exposure_time,
                 aperture: file.metadata.aperture,
+                focal_length_mm: file.metadata.focal_length,
+                focus_distance_m: file.metadata.focus_distance,
+                lens_model: file.metadata.lens_model.clone(),
                 timestamp: file.metadata.timestamp.map(|value| value.to_rfc3339()),
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let passed = failures.is_empty() && iso_models.len() == iso_reports.len();
+    let passed = failures.is_empty()
+        && iso_models.len() == iso_reports.len()
+        && correction_profile.is_some();
+    let spatial_correction =
+        correction_profile
+            .as_ref()
+            .map(|profile| SpatialCorrectionArtifactSummary {
+                profile_path: correction_path.display().to_string(),
+                profile_published: false,
+                profile_sha256: None,
+                aperture: profile.aperture,
+                focal_length_mm: profile.focal_length_mm,
+                focus_distance_min_m: profile.focus_distance_min_m,
+                focus_distance_max_m: profile.focus_distance_max_m,
+                lens_model: profile.lens_model.clone(),
+                config: correction_config.clone(),
+                grid_width: profile.grid_width,
+                grid_height: profile.grid_height,
+                fit_flat_pairs: profile.fit_flat_pairs,
+                holdout_flat_pairs: profile.holdout_flat_pairs,
+                raw_holdout_p95_relative_error: profile.raw_holdout_p95_relative_error,
+                corrected_holdout_p95_relative_error: profile.corrected_holdout_p95_relative_error,
+                defect_pixels: profile.defects.len(),
+            });
     let mut report = NoiseCalibrationArtifactReport {
         schema: SENSOR_CALIBRATION_ARTIFACT_SCHEMA.to_string(),
         iso_report_schema: SENSOR_CALIBRATION_ISO_REPORT_SCHEMA.to_string(),
@@ -1494,6 +1645,7 @@ fn cmd_calibrate_noise(
         profile_path: profile_path.display().to_string(),
         profile_published: false,
         profile_sha256: None,
+        spatial_correction,
         config,
         iso_reports,
         sources,
@@ -1517,19 +1669,42 @@ fn cmd_calibrate_noise(
         iso_models,
     };
     profile.save_json(&profile_path)?;
+    let spatial_profile = correction_profile
+        .take()
+        .context("Passed calibration lost its spatial correction profile")?;
+    if let Err(error) = spatial_profile.save_json(&correction_path) {
+        let _ = std::fs::remove_file(&profile_path);
+        return Err(error).context("Publish spatial sensor correction profile");
+    }
     // Reload to prove the exact published artifact satisfies runtime gates.
     let published = SensorNoiseProfile::load_json(&profile_path)
         .context("Published sensor-noise profile failed runtime validation")?;
+    let published_correction = match SensorCorrectionProfile::load_json(&correction_path) {
+        Ok(profile) => profile,
+        Err(error) => {
+            let _ = std::fs::remove_file(&profile_path);
+            let _ = std::fs::remove_file(&correction_path);
+            return Err(error).context("Published spatial correction failed runtime validation");
+        }
+    };
     report.profile_published = true;
     report.profile_sha256 = published
         .calibration_id
         .strip_prefix("sha256:")
         .map(str::to_string);
+    if let Some(summary) = &mut report.spatial_correction {
+        summary.profile_published = true;
+        summary.profile_sha256 = published_correction
+            .calibration_id
+            .strip_prefix("sha256:")
+            .map(str::to_string);
+    }
     write_atomic_json(&report_path, &report)?;
     println!(
-        "{} Calibrated profile published: {}",
+        "{} Calibrated profiles published: {}, {}",
         CHECK,
-        style(profile_path.display()).green()
+        style(profile_path.display()).green(),
+        style(correction_path.display()).green()
     );
     Ok(())
 }
@@ -1626,6 +1801,7 @@ fn add_noise_calibration_pairs(
     files: &[NoiseCalibrationFile],
     level: Option<u32>,
     progress: &ProgressBar,
+    mut correction_accumulator: Option<&mut SensorCorrectionAccumulator>,
 ) -> Result<()> {
     for (pair_index, pair) in indices.chunks_exact(2).enumerate() {
         let first = decode_full_calibration_nef(&files[pair[0]])?;
@@ -1639,6 +1815,16 @@ fn add_noise_calibration_pairs(
         };
         if let Some(level) = level {
             accumulator.add_flat_pair(level, &first.raw.data, &second.raw.data, split)?;
+            if let Some(correction) = correction_accumulator.as_deref_mut() {
+                correction.add_flat_pair(
+                    &first.raw.data,
+                    &second.raw.data,
+                    match split {
+                        CalibrationSplit::Fit => CorrectionCalibrationSplit::Fit,
+                        CalibrationSplit::Holdout => CorrectionCalibrationSplit::Holdout,
+                    },
+                )?;
+            }
         } else {
             accumulator.add_dark_pair(&first.raw.data, &second.raw.data, split)?;
         }
@@ -1665,6 +1851,22 @@ fn calibration_report_path(profile_path: &Path) -> PathBuf {
         .and_then(|value| value.to_str())
         .unwrap_or("sensor-noise");
     profile_path.with_file_name(format!("{stem}_calibration_report.json"))
+}
+
+fn spatial_correction_profile_path(noise_profile_path: &Path) -> PathBuf {
+    let stem = noise_profile_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("sensor-noise");
+    noise_profile_path.with_file_name(format!("{stem}_spatial_correction.json"))
+}
+
+fn normalize_calibration_identity(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -1720,6 +1922,7 @@ fn run_burst_pipeline(
     glare_spread_um: f32,
     glare_aware_focus: bool,
     sensor_noise_profile_path: Option<&Path>,
+    sensor_correction_profile_path: Option<&Path>,
     depth_consistent_refusion: bool,
     _inventory_ctx: Option<&InventoryContext>,
     mut run_state: Option<&mut RunStateManager>,
@@ -1767,12 +1970,28 @@ fn run_burst_pipeline(
             profile.calibration_id
         );
     }
+    let sensor_correction_profile = sensor_correction_profile_path
+        .map(SensorCorrectionProfile::load_json)
+        .transpose()
+        .context("Load sensor spatial correction profile")?;
+    if let Some(profile) = &sensor_correction_profile {
+        println!(
+            "  Sensor correction: {}x{} grid, {} defects, {:.3}-{:.3} m focus ({})",
+            profile.grid_width,
+            profile.grid_height,
+            profile.defects.len(),
+            profile.focus_distance_min_m,
+            profile.focus_distance_max_m,
+            profile.calibration_id
+        );
+    }
     let fusion_config = NativeFusionConfig {
         deghost_strength,
         glare_spread_um,
         glare_aware_focus,
         depth_consistent_refusion,
         sensor_noise_profile,
+        sensor_correction_profile,
         ..native_fusion_config(quality)
     };
     let mut native_arena = NativeGroupArena::default();
@@ -1927,6 +2146,7 @@ fn run_burst_pipeline(
                 radiance_uncertainty: _,
                 source_map,
                 fusion_flags,
+                sensor_correction_map,
                 glare_map,
                 boundary_trimap,
                 foreground_mask,
@@ -1934,6 +2154,8 @@ fn run_burst_pipeline(
                 frame_alignments,
                 radiance_anchor,
                 noise_model_calibrated,
+                sensor_correction_id,
+                defect_repaired_pixels,
                 depth_refusion_pixels,
                 visibility_adjusted_pixels,
                 visibility_constrained,
@@ -1975,6 +2197,8 @@ fn run_burst_pipeline(
             let fusion_flags_path =
                 output_path.with_file_name(format!("{output_stem}_fusion_flags.png"));
             let glare_map_path = output_path.with_file_name(format!("{output_stem}_glare_map.png"));
+            let sensor_correction_map_path =
+                output_path.with_file_name(format!("{output_stem}_sensor_correction.png"));
             let boundary_trimap_path =
                 output_path.with_file_name(format!("{output_stem}_boundary_trimap.png"));
             let fusion_overlay_path =
@@ -2011,6 +2235,11 @@ fn run_burst_pipeline(
                 "source_sentinel": u16::MAX,
                 "source_map": source_map_path.file_name(),
                 "fusion_flags": fusion_flags_path.file_name(),
+                "sensor_correction_map": sensor_correction_map_path.file_name(),
+                "sensor_correction_legend": {
+                    "flat_field_applied": SENSOR_CORRECTION_FLAT_FIELD,
+                    "defect_repaired": SENSOR_CORRECTION_DEFECT_REPAIRED
+                },
                 "glare_map": glare_map_path.file_name(),
                 "boundary_trimap": boundary_trimap_path.file_name(),
                 "boundary_trimap_legend": {
@@ -2030,6 +2259,8 @@ fn run_burst_pipeline(
                     "disoccluded": {"bit": FUSION_FLAG_DISOCCLUDED, "pixels": flag_count(FUSION_FLAG_DISOCCLUDED)}
                 },
                 "noise_model_calibrated": noise_model_calibrated,
+                "sensor_correction_id": sensor_correction_id,
+                "defect_repaired_pixels": defect_repaired_pixels,
                 "depth_refusion_pixels": depth_refusion_pixels,
                 "visibility_adjusted_pixels": visibility_adjusted_pixels,
                 "visibility_constrained": visibility_constrained,
@@ -2112,6 +2343,16 @@ fn run_burst_pipeline(
                         &output_root,
                         flags_digest.size_bytes,
                         flags_digest.sha256,
+                    )?);
+                    let correction_digest = save_u8_map_png_with_digest(
+                        &sensor_correction_map,
+                        &sensor_correction_map_path,
+                    )?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &sensor_correction_map_path,
+                        &output_root,
+                        correction_digest.size_bytes,
+                        correction_digest.sha256,
                     )?);
                     let glare_digest = save_u8_map_png_with_digest(&glare_map, &glare_map_path)?;
                     artifacts.push(artifact_digest_from_parts(
@@ -4522,16 +4763,23 @@ mod burst_pipeline_tests {
             "burst",
             "--sensor-noise-profile",
             "z9-noise.json",
+            "--sensor-correction-profile",
+            "z9-correction.json",
         ])
         .unwrap();
         let Commands::Process {
             sensor_noise_profile,
+            sensor_correction_profile,
             ..
         } = cli.command
         else {
             panic!("expected process command");
         };
         assert_eq!(sensor_noise_profile, Some(PathBuf::from("z9-noise.json")));
+        assert_eq!(
+            sensor_correction_profile,
+            Some(PathBuf::from("z9-correction.json"))
+        );
     }
 
     #[test]
@@ -4602,6 +4850,10 @@ mod burst_pipeline_tests {
         assert_eq!(
             calibration_report_path(Path::new("/tmp/z9.production-noise.json")),
             PathBuf::from("/tmp/z9.production-noise_calibration_report.json")
+        );
+        assert_eq!(
+            spatial_correction_profile_path(Path::new("/tmp/z9.production-noise.json")),
+            PathBuf::from("/tmp/z9.production-noise_spatial_correction.json")
         );
     }
 
