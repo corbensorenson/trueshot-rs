@@ -30,7 +30,7 @@ jobs:
             install_deps: echo "No extra deps needed on Windows"
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -115,7 +115,7 @@ jobs:
     env:
       TRUESHOT_REDIS_TEST_URL: redis://127.0.0.1:6379/
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -135,7 +135,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     
     - name: Install cargo-audit
       run: cargo install cargo-audit
@@ -149,7 +149,7 @@ jobs:
     permissions:
       contents: read
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -199,7 +199,7 @@ jobs:
     name: Container Scan
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Build Docker image
       run: docker build -t trueshot-scan .
@@ -227,7 +227,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -244,7 +244,7 @@ jobs:
     name: Docker Smoke Test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Build Docker image
       run: docker build -t trueshot-smoke .
@@ -275,7 +275,7 @@ jobs:
     name: Benchmark Check
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
