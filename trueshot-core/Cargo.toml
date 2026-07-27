@@ -81,8 +81,6 @@ lz4_flex = "0.11"
 zip = "0.6"
 # Use redb instead of rusqlite to avoid SQLite version conflicts
 # redb is already a dependency and provides similar functionality
-[target.'cfg(target_os = "linux")'.dependencies]
-tokio-uring = "0.4"
 
 
 [features]

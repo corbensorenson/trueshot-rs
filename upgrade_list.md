@@ -2094,6 +2094,7 @@ Scope: local-first product architecture + monetization operations reconciliation
   - Verified: P0 #149 is closed; strict `cargo clippy --workspace --all-targets -- -D warnings`, formatting, workspace tests, and doctests pass.
   - Verified: CI now enforces repository-wide formatting and strict all-target Clippy rather than library-only linting.
   - Verified: the Linux-only `tokio-uring` dependency is target-gated, so enabling its feature no longer compiles Linux syscalls on macOS.
+  - Verified: the macOS Tokio writer now has a focused complete-buffer test and `trueshot-core` re-exports the single storage implementation instead of maintaining a divergent copy; Linux acceleration remains isolated behind its explicit feature.
   - Remaining: unify and validate optional OpenCV/real-camera feature combinations on provisioned Linux, macOS, and Windows runners.
 
 151. 3DGS performance claims lack adapter-specific GPU benchmarks

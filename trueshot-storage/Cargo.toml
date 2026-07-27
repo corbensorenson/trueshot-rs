@@ -7,14 +7,18 @@ edition = "2021"
 image = "0.25"
 anyhow = "1.0"
 sysinfo = "0.29"
-tokio = { version = "1.28", features = ["fs", "io-util"] }
+tokio = { version = "1.28", features = ["fs", "io-util", "rt"] }
 nalgebra = "0.32" # for octree point types
 
 [features]
 default = []
-linux = ["tokio-uring"]
+linux = ["dep:tokio-uring"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-uring = { version = "0.4", optional = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+
 [lints]
 workspace = true

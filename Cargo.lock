@@ -11046,7 +11046,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tiff",
  "tokio",
- "tokio-uring",
  "tracing",
  "tracing-appender",
  "tracing-log",
@@ -11216,6 +11215,7 @@ dependencies = [
  "image 0.25.6",
  "nalgebra 0.32.6",
  "sysinfo 0.29.11",
+ "tempfile",
  "tokio",
  "tokio-uring",
 ]
