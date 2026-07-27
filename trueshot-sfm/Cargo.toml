@@ -3,7 +3,7 @@ name = "trueshot-sfm"
 version = "0.1.0"
 edition = "2021"
 description = "Native Rust Structure from Motion - standalone 3D reconstruction without external dependencies"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [dependencies]
 # Core

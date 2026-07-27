@@ -4,7 +4,8 @@
     "title": "TrueShot API",
     "description": "Intelligent 3D scanning and photogrammetry API",
     "license": {
-      "name": ""
+      "name": "PolyForm Noncommercial License 1.0.0",
+      "url": "https://polyformproject.org/licenses/noncommercial/1.0.0"
     },
     "version": "6.8.0"
   },

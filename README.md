@@ -133,13 +133,23 @@ unit-test suite is not treated as evidence for those hardware-dependent claims.
 
 ## Contributing
 
-- Use `cargo fmt --all --check` and strict all-target workspace Clippy
-- Add behavioral and security regression tests for every changed public operation
-- Keep documentation in sync with code changes
+Bug reports, private security reports, and product feedback are welcome.
+External code contributions are not currently accepted without a written
+contributor agreement. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-TrueShot is available under the permissive [MIT License](LICENSE).
+TrueShot is **source-available**, not open source. Current revisions are
+licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE), which permits inspection,
+research, experimentation, personal study, and other qualifying noncommercial
+uses. Commercial use, sale, paid service delivery, or incorporation into a
+commercial offering requires a separate written license from Corben Sorenson.
+
+Revisions published at or before commit `50ea3b87` were distributed under the
+MIT License, and those prior grants remain in effect. See
+[LICENSE_HISTORY.md](LICENSE_HISTORY.md) for the exact transition and
+third-party-material policy.
 
 ---
 

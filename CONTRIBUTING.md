@@ -1,63 +1,34 @@
 # Contributing to TrueShot
 
-Welcome to the TrueShot project! We're building the future of hybrid photogrammetry.
+TrueShot is publicly inspectable source, but it is not an open-source project.
+The current code is licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE).
 
-## Development Environment Setup
+## Reports and Discussions
 
-### Prerequisites
-- **Rust**: Latest stable (`rustup update`)
-- **Node.js**: v18+ (for Dashboard)
-- **System Deps**: `libudev`, `pkg-config`, `cmake` (Linux); Xcode CLI Tools (macOS).
-- **COLMAP**: Must be in your PATH for reconstruction features.
+Bug reports, security reports, reproducible test cases that do not contain
+third-party code, and product feedback are welcome. Report security issues
+privately using the process in [SECURITY.md](SECURITY.md).
 
-### Quick Start
+## Code Contributions
 
-1.  **Clone & Build**:
-    ```bash
-    git clone https://github.com/augment-tech/trueshot-rs
-    cd trueshot-rs
-    cargo build
-    ```
+External code contributions are not currently accepted. Do not submit source
+code, patches, or pull requests unless Corben Sorenson has first provided a
+written contributor agreement for that contribution.
 
-2.  **Run Development Server**:
-    This will start the API server and the frontend dev server.
-    ```bash
-    # Terminal 1
-    cd trueshot-server
-    cargo run
+This policy keeps copyright ownership and commercial licensing authority
+unambiguous. Opening an issue or making the repository visible does not grant
+commercial rights beyond those stated in [LICENSE](LICENSE).
 
-    # Terminal 2
-    cd trueshot-dashboard
-    npm install
-    npm run dev
-    ```
+## Local Development
 
-3.  **Mock Hardware**:
-    The system defaults to Mock Mode if no physical camera/turntable is detected.
-    - **Camera**: Generates synthetic noise patterns.
-    - **Turntable**: Simulates rotation with 2s delay.
+For noncommercial inspection, research, experiment, and testing:
 
-### Coding Standards
+```bash
+git clone https://github.com/corbensorenson/trueshot-rs.git
+cd trueshot-rs
+cargo build
+```
 
-- **Formatting**: Run `cargo fmt` before committing.
-- **Linting**: We enforce `cargo clippy -- -D warnings`.
-- **Tests**: Add unit tests for new logic in `trueshot-core`. Run `cargo test` to verify.
-- **Licensing**: Ensure the Apache 2.0 / MIT header is present in new files.
-
-### Project Structure
-
-- `trueshot-core`: Business logic (Vision, Math, Hardware Traits).
-- `trueshot-server`: Axum API & App State.
-- `trueshot-dashboard`: React/Vite Frontend.
-- `trueshot-camera`: `nokhwa` & `gphoto2` wrappers.
-- `trueshot-turntable`: BLE & Serial drivers.
-
-### Submitting PRs
-
-1.  Fork the repo.
-2.  Create a feature branch (`feat/my-feature`).
-3.  Add tests.
-4.  Ensure CI passes.
-5.  Open a Pull Request.
-
-Thank you for contributing!
+Before reporting a regression, run the relevant checks described in
+[README.md](README.md).

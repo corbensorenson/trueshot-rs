@@ -3,7 +3,7 @@ name = "trueshot-cli"
 version = "0.5.4"
 edition = "2021"
 description = "Command-line interface for TrueShot RAW processing pipeline"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 authors = ["TrueShot Team"]
 
 [[bin]]

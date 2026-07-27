@@ -27,6 +27,7 @@ mkdir -p "$DIST_DIR/static"
 cp target/release/trueshot-server "$DIST_DIR/bin/"
 cp -r trueshot-dashboard/dist/* "$DIST_DIR/static/"
 cp config.toml "$DIST_DIR/" 2>/dev/null || :
+cp LICENSE NOTICE LICENSE_HISTORY.md "$DIST_DIR/"
 
 # Create Runner Script
 cat << 'EOF' > "$DIST_DIR/run.sh"
