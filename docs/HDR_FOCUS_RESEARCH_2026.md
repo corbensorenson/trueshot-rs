@@ -190,6 +190,18 @@ TrueShot should add a deterministic glare model:
 
 Source: [Retinex-MEF](https://openaccess.thecvf.com/content/ICCV2025/html/Bai_Retinex-MEF_Retinex-based_Glare_Effects_Aware_Unsupervised_Multi-Exposure_Image_Fusion_ICCV_2025_paper.html).
 
+Implementation state (2026-07-27): native fusion now derives a bounded
+saturated-core distance field, combines it with summed-area low-frequency
+bloom and cross-bracket rejection evidence, and suppresses only contaminated
+focus scores and confidence. Verified sensor pitch converts physical
+green-channel spread into native pixels; missing/inconsistent geometry uses an
+explicit bounded fallback and reports that fact. The exact maximum-evidence
+map is exported atomically beside source/state maps. Measured radiance is never
+changed by this stage. Production burst processing exposes validated
+`--glare-spread-um` calibration and `--no-glare-focus` ablation controls. Real
+per-lens/aperture/wavelength calibration and dynamic glossy-object
+qualification remain required.
+
 ### 8. Benchmark with full-resolution and source-preservation gates
 
 The established MFIF benchmark contains 105 pairs, 30 algorithms, and 20

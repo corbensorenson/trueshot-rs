@@ -217,6 +217,14 @@ enum Commands {
         #[arg(long, default_value_t = 1.0)]
         deghost_strength: f32,
 
+        /// Calibrated green-channel glare spread at the sensor, in micrometers
+        #[arg(long, default_value_t = 80.0)]
+        glare_spread_um: f32,
+
+        /// Disable glare exclusion from focus scoring (radiance is never altered)
+        #[arg(long)]
+        no_glare_focus: bool,
+
         /// Measured exact-ISO sensor noise profile JSON for native burst fusion
         #[arg(long)]
         sensor_noise_profile: Option<PathBuf>,
@@ -577,6 +585,8 @@ fn main() -> Result<()> {
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            glare_spread_um,
+            no_glare_focus,
             sensor_noise_profile,
             no_depth_refusion,
             trial,
@@ -593,6 +603,8 @@ fn main() -> Result<()> {
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            glare_spread_um,
+            no_glare_focus,
             sensor_noise_profile,
             no_depth_refusion,
             trial,
@@ -690,6 +702,8 @@ fn cmd_process(
     full_resolution_preview: bool,
     preview_max_dimension: usize,
     deghost_strength: f32,
+    glare_spread_um: f32,
+    no_glare_focus: bool,
     sensor_noise_profile: Option<PathBuf>,
     no_depth_refusion: bool,
     trial: bool,
@@ -700,6 +714,9 @@ fn cmd_process(
     }
     if !deghost_strength.is_finite() || !(0.0..=2.0).contains(&deghost_strength) {
         anyhow::bail!("Deghost strength must be between 0 and 2");
+    }
+    if !glare_spread_um.is_finite() || !(1.0..=2_000.0).contains(&glare_spread_um) {
+        anyhow::bail!("Glare spread must be between 1 and 2000 micrometers");
     }
     if sensor_noise_profile.is_some() && mode != Mode::Burst {
         anyhow::bail!("Sensor noise profiles currently apply only to --mode burst");
@@ -747,6 +764,8 @@ fn cmd_process(
             full_resolution_preview,
             preview_max_dimension,
             deghost_strength,
+            glare_spread_um,
+            !no_glare_focus,
             sensor_noise_profile.as_deref(),
             !no_depth_refusion,
             Some(&inventory_ctx),
@@ -1698,6 +1717,8 @@ fn run_burst_pipeline(
     full_resolution_preview: bool,
     preview_max_dimension: usize,
     deghost_strength: f32,
+    glare_spread_um: f32,
+    glare_aware_focus: bool,
     sensor_noise_profile_path: Option<&Path>,
     depth_consistent_refusion: bool,
     _inventory_ctx: Option<&InventoryContext>,
@@ -1748,6 +1769,8 @@ fn run_burst_pipeline(
     }
     let fusion_config = NativeFusionConfig {
         deghost_strength,
+        glare_spread_um,
+        glare_aware_focus,
         depth_consistent_refusion,
         sensor_noise_profile,
         ..native_fusion_config(quality)
@@ -1862,6 +1885,7 @@ fn run_burst_pipeline(
                 num_cpus::get(),
                 fusion_config.tile_size,
                 fusion_config.focus_coarse_stride,
+                fusion_config.glare_fallback_radius_pixels,
                 fusion_config.local_alignment_cell_size,
                 fusion_config.analysis_max_dimension,
             )?;
@@ -1903,6 +1927,7 @@ fn run_burst_pipeline(
                 radiance_uncertainty: _,
                 source_map,
                 fusion_flags,
+                glare_map,
                 foreground_mask,
                 transforms,
                 frame_alignments,
@@ -1911,6 +1936,9 @@ fn run_burst_pipeline(
                 depth_refusion_pixels,
                 visibility_adjusted_pixels,
                 visibility_constrained,
+                glare_radius_pixels,
+                glare_physical_scale,
+                glare_affected_pixels,
             } = fused;
             let (fusion_overlay_rgb, fusion_overlay_alpha) = fusion_provenance_preview(
                 &source_map,
@@ -1940,6 +1968,7 @@ fn run_burst_pipeline(
                 output_path.with_file_name(format!("{output_stem}_source_map.png"));
             let fusion_flags_path =
                 output_path.with_file_name(format!("{output_stem}_fusion_flags.png"));
+            let glare_map_path = output_path.with_file_name(format!("{output_stem}_glare_map.png"));
             let fusion_overlay_path =
                 output_path.with_file_name(format!("{output_stem}_fusion_overlay.png"));
             let fusion_report_path =
@@ -1974,6 +2003,7 @@ fn run_burst_pipeline(
                 "source_sentinel": u16::MAX,
                 "source_map": source_map_path.file_name(),
                 "fusion_flags": fusion_flags_path.file_name(),
+                "glare_map": glare_map_path.file_name(),
                 "overlay": fusion_overlay_path.file_name(),
                 "flag_legend": {
                     "censored": {"bit": FUSION_FLAG_CENSORED, "pixels": flag_count(FUSION_FLAG_CENSORED)},
@@ -1989,6 +2019,10 @@ fn run_burst_pipeline(
                 "depth_refusion_pixels": depth_refusion_pixels,
                 "visibility_adjusted_pixels": visibility_adjusted_pixels,
                 "visibility_constrained": visibility_constrained,
+                "glare_radius_pixels": glare_radius_pixels,
+                "glare_physical_scale": glare_physical_scale,
+                "glare_affected_pixels": glare_affected_pixels,
+                "glare_policy": "focus_evidence_suppression_only_measured_radiance_unchanged",
                 "local_aligned_cells": local_aligned_cells,
                 "disoccluded_cells": disoccluded_cells,
                 "frame_alignments": frame_alignments,
@@ -2058,6 +2092,13 @@ fn run_burst_pipeline(
                         &output_root,
                         flags_digest.size_bytes,
                         flags_digest.sha256,
+                    )?);
+                    let glare_digest = save_u8_map_png_with_digest(&glare_map, &glare_map_path)?;
+                    artifacts.push(artifact_digest_from_parts(
+                        &glare_map_path,
+                        &output_root,
+                        glare_digest.size_bytes,
+                        glare_digest.sha256,
                     )?);
                     let overlay_digest = save_png_preview_with_digest(
                         &fusion_overlay_rgb,
@@ -4463,6 +4504,34 @@ mod burst_pipeline_tests {
             panic!("expected process command");
         };
         assert_eq!(sensor_noise_profile, Some(PathBuf::from("z9-noise.json")));
+    }
+
+    #[test]
+    fn process_cli_accepts_physical_glare_controls() {
+        let cli = Cli::try_parse_from([
+            "trueshot",
+            "process",
+            "--input",
+            "capture",
+            "--output",
+            "out",
+            "--mode",
+            "burst",
+            "--glare-spread-um",
+            "63.5",
+            "--no-glare-focus",
+        ])
+        .unwrap();
+        let Commands::Process {
+            glare_spread_um,
+            no_glare_focus,
+            ..
+        } = cli.command
+        else {
+            panic!("expected process command");
+        };
+        assert_eq!(glare_spread_um, 63.5);
+        assert!(no_glare_focus);
     }
 
     #[test]

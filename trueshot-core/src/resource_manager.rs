@@ -162,6 +162,7 @@ impl NativeSequenceMemoryEstimate {
         fusion_workers: usize,
         tile_size: usize,
         focus_coarse_stride: usize,
+        glare_radius_pixels: usize,
         local_alignment_cell_size: usize,
         analysis_max_dimension: usize,
     ) -> Result<Self> {
@@ -175,23 +176,28 @@ impl NativeSequenceMemoryEstimate {
             .and_then(|value| value.checked_mul(2))
             .context("Native input arena estimate overflow")?;
         // Bayer, normalized/metric depth, confidence, radiance uncertainty,
-        // source map, provenance flags, and foreground mask.
+        // source map, provenance flags, glare map, and foreground mask.
         let fusion_output_bytes = pixels
-            .checked_mul(24)
+            .checked_mul(25)
             .context("Native fusion output estimate overflow")?;
-        let focus_halo = focus_coarse_stride.max(1).saturating_mul(2).max(3);
+        let focus_halo = focus_coarse_stride
+            .max(1)
+            .saturating_mul(2)
+            .max(glare_radius_pixels)
+            .max(3);
         let tile_edge = tile_size.saturating_add(focus_halo.saturating_mul(2)) as u64;
-        // Extended plane state plus worst-case regional grid is 24 B/pixel.
+        // Extended plane state, glare likelihood/distance/integrals, and the
+        // worst-case regional grid are 44 B/pixel.
         // Tile state retains top-two regional/detail radiance evidence plus
-        // previous and adjacent focus responses: 54 B.
+        // previous/adjacent responses and glare provenance: 66 B.
         let scratch_per_worker = tile_edge
             .checked_mul(tile_edge)
-            .and_then(|value| value.checked_mul(24))
+            .and_then(|value| value.checked_mul(44))
             .and_then(|value| {
                 value.checked_add(
                     (tile_size as u64)
                         .checked_mul(tile_size as u64)?
-                        .checked_mul(54)?,
+                        .checked_mul(66)?,
                 )
             })
             .context("Native fusion scratch estimate overflow")?;
@@ -229,7 +235,7 @@ impl NativeSequenceMemoryEstimate {
         // Linear/display RGB, u8 preview, all retained fusion diagnostics, and
         // PNG's temporary endian conversion for the exact u16 source map.
         let postprocess_peak = pixels
-            .checked_mul(12 + 12 + 3 + 20 + 2)
+            .checked_mul(12 + 12 + 3 + 20 + 2 + 2)
             .and_then(|value| value.checked_add(12 * 1024 * 1024))
             .context("Native postprocess peak estimate overflow")?;
         let peak_memory_bytes = fusion_peak.max(postprocess_peak);
@@ -736,10 +742,10 @@ mod tests {
     #[test]
     fn native_estimate_matches_bounded_group_architecture() {
         let estimate =
-            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 24, 512).unwrap();
+            NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512).unwrap();
         let peak_mib = estimate.peak_memory_bytes as f64 / (1024.0 * 1024.0);
         assert!(
-            (185.0..225.0).contains(&peak_mib),
+            (220.0..245.0).contains(&peak_mib),
             "peak was {peak_mib:.1} MiB"
         );
         assert_eq!(estimate.input_arena_bytes, 21 * 1310 * 1304 * 2);

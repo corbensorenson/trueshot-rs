@@ -34,6 +34,17 @@ pub struct NativeFusionConfig {
     pub focus_coarse_stride: usize,
     /// Native Laplacian residual contribution at detail edges.
     pub focus_detail_edge_weight: f32,
+    /// Exclude saturated-core bloom from focus evidence without altering
+    /// measured archival radiance.
+    pub glare_aware_focus: bool,
+    /// Conservative green-channel glare spread at the sensor. Verified pixel
+    /// pitch converts this physical support into native pixels.
+    pub glare_spread_um: f32,
+    /// Explicit pixel support used when sensor pitch is unavailable and the
+    /// hard cap for bounded scratch memory.
+    pub glare_fallback_radius_pixels: usize,
+    /// Maximum fraction of focus evidence removed at certain glare pixels.
+    pub glare_focus_suppression: f32,
     /// Maximum edge of compact alignment images.
     pub analysis_max_dimension: usize,
     /// Pyramid levels used by the compact alignment implementation.
@@ -85,6 +96,10 @@ impl Default for NativeFusionConfig {
             halo: 3,
             focus_coarse_stride: 4,
             focus_detail_edge_weight: 1.0,
+            glare_aware_focus: true,
+            glare_spread_um: 80.0,
+            glare_fallback_radius_pixels: 20,
+            glare_focus_suppression: 1.0,
             analysis_max_dimension: 512,
             // The legacy multiscale implementation does not warp residuals
             // between levels. One high-resolution compact FFT is exact.
@@ -355,6 +370,11 @@ pub struct NativeFusionResult {
     pub source_map: Array2<u16>,
     /// Bitwise `FUSION_FLAG_*` evidence/provenance state.
     pub fusion_flags: Array2<u8>,
+    /// Maximum measured glare/bloom evidence across focus hypotheses.
+    ///
+    /// Zero is no detected influence and 255 is a censored glare core. This
+    /// diagnostic never represents generated or reconstructed image content.
+    pub glare_map: Array2<u8>,
     /// Conservative object mask inferred from the shared crop border.
     pub foreground_mask: Array2<u8>,
     /// One transform per focus plane, shared by all bracketed exposures.
@@ -373,6 +393,12 @@ pub struct NativeFusionResult {
     pub visibility_adjusted_pixels: usize,
     /// True when verified sensor geometry permitted the visibility projection.
     pub visibility_constrained: bool,
+    /// Glare support used by focus inference in native pixels.
+    pub glare_radius_pixels: usize,
+    /// True when verified sensor pitch converted physical glare support.
+    pub glare_physical_scale: bool,
+    /// Pixels with nonzero glare evidence.
+    pub glare_affected_pixels: usize,
 }
 
 impl NativeFusionResult {
@@ -388,6 +414,7 @@ impl NativeFusionResult {
             + self.radiance_uncertainty.len() * std::mem::size_of::<f32>()
             + self.source_map.len() * std::mem::size_of::<u16>()
             + self.fusion_flags.len()
+            + self.glare_map.len()
             + self.foreground_mask.len()
             + self.transforms.len() * std::mem::size_of::<PlaneTransform>()
             + self.frame_alignments.len() * std::mem::size_of::<FrameAlignmentSummary>()
@@ -630,6 +657,7 @@ pub fn fuse_native_group(
     let exposures_per_focus = group.len() / focus_steps;
     let calibrations = build_calibrations(group, config)?;
     let focus_model = physical_focus_model(group, focus_steps, exposures_per_focus);
+    let (glare_radius_pixels, glare_physical_scale) = resolve_glare_radius_pixels(group, config);
     let radiance_anchor = calibrations
         .iter()
         .map(|calibration| calibration.exposure)
@@ -660,6 +688,7 @@ pub fn fuse_native_group(
     let mut radiance_uncertainty = vec![f32::INFINITY; pixel_count];
     let mut source_map = vec![u16::MAX; pixel_count];
     let mut fusion_flags = vec![0u8; pixel_count];
+    let mut glare_map = vec![0u8; pixel_count];
     let band_rows = config.tile_size.max(16);
     let band_len = width
         .checked_mul(band_rows)
@@ -672,13 +701,20 @@ pub fn fuse_native_group(
         .zip(radiance_uncertainty.par_chunks_mut(band_len))
         .zip(source_map.par_chunks_mut(band_len))
         .zip(fusion_flags.par_chunks_mut(band_len))
+        .zip(glare_map.par_chunks_mut(band_len))
         .enumerate()
         .try_for_each(
             |(
                 band_index,
                 (
-                    ((((bayer_band, depth_band), confidence_band), uncertainty_band), source_band),
-                    flags_band,
+                    (
+                        (
+                            (((bayer_band, depth_band), confidence_band), uncertainty_band),
+                            source_band,
+                        ),
+                        flags_band,
+                    ),
+                    glare_band,
                 ),
             )|
              -> Result<()> {
@@ -693,6 +729,7 @@ pub fn fuse_native_group(
                     exposures_per_focus,
                     radiance_anchor,
                     config,
+                    glare_radius_pixels,
                     y0,
                     y1,
                     bayer_band,
@@ -701,6 +738,7 @@ pub fn fuse_native_group(
                     uncertainty_band,
                     source_band,
                     flags_band,
+                    glare_band,
                 )
             },
         )?;
@@ -761,6 +799,7 @@ pub fn fuse_native_group(
             });
     }
     let foreground_mask = infer_foreground_mask(&bayer, width, height);
+    let glare_affected_pixels = glare_map.iter().filter(|value| **value != 0).count();
     let metric_depth_m = focus_model.as_ref().map(|model| {
         Array2::from_shape_vec(
             (height, width),
@@ -794,6 +833,8 @@ pub fn fuse_native_group(
             .context("Unable to shape source map output")?,
         fusion_flags: Array2::from_shape_vec((height, width), fusion_flags)
             .context("Unable to shape fusion flags output")?,
+        glare_map: Array2::from_shape_vec((height, width), glare_map)
+            .context("Unable to shape glare diagnostic output")?,
         foreground_mask: Array2::from_shape_vec((height, width), foreground_mask)
             .context("Unable to shape fused foreground mask")?,
         transforms,
@@ -805,6 +846,9 @@ pub fn fuse_native_group(
         depth_refusion_pixels,
         visibility_adjusted_pixels,
         visibility_constrained,
+        glare_radius_pixels,
+        glare_physical_scale,
+        glare_affected_pixels,
     })
 }
 
@@ -851,6 +895,14 @@ fn validate_group(
         || !(0.0..=2.0).contains(&config.focus_detail_edge_weight)
     {
         anyhow::bail!("Native fusion scale-decoupled focus configuration is invalid");
+    }
+    if !config.glare_spread_um.is_finite()
+        || !(1.0..=2_000.0).contains(&config.glare_spread_um)
+        || !(2..=256).contains(&config.glare_fallback_radius_pixels)
+        || !config.glare_focus_suppression.is_finite()
+        || !(0.0..=1.0).contains(&config.glare_focus_suppression)
+    {
+        anyhow::bail!("Native fusion glare configuration is invalid");
     }
     if !(8..=128).contains(&config.local_alignment_cell_size)
         || config.local_alignment_search_radius > 12
@@ -1013,6 +1065,49 @@ fn physical_focus_model(
         aperture,
         pixel_pitch_mm,
     })
+}
+
+fn resolve_glare_radius_pixels(
+    group: &NativeFrameGroup<'_>,
+    config: &NativeFusionConfig,
+) -> (usize, bool) {
+    if !config.glare_aware_focus || config.glare_focus_suppression == 0.0 {
+        return (0, false);
+    }
+    let Some(reference_pitch_um) = group
+        .metadata
+        .first()
+        .and_then(|metadata| metadata.sensor_geometry)
+        .map(|geometry| geometry.pixel_pitch_um)
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+    else {
+        return (config.glare_fallback_radius_pixels, false);
+    };
+    let geometry_is_consistent = group.metadata.iter().all(|metadata| {
+        metadata.sensor_geometry.is_some_and(|geometry| {
+            geometry.pixel_pitch_um.is_finite()
+                && (geometry.pixel_pitch_um - reference_pitch_um).abs()
+                    <= reference_pitch_um * 0.001
+        })
+    });
+    if !geometry_is_consistent {
+        tracing::warn!(
+            "Glare focus exclusion uses explicit pixel fallback: inconsistent sensor geometry"
+        );
+        return (config.glare_fallback_radius_pixels, false);
+    }
+    let physical_radius = (config.glare_spread_um / reference_pitch_um)
+        .ceil()
+        .max(2.0);
+    if physical_radius > config.glare_fallback_radius_pixels as f32 {
+        tracing::warn!(
+            physical_radius,
+            radius_cap = config.glare_fallback_radius_pixels,
+            "Physical glare support exceeded bounded pixel cap"
+        );
+        return (config.glare_fallback_radius_pixels, false);
+    }
+    (physical_radius as usize, true)
 }
 
 fn diopter_between(value: f32, left: f32, right: f32) -> bool {
@@ -1796,6 +1891,7 @@ fn process_band(
     exposures_per_focus: usize,
     radiance_anchor: f32,
     config: &NativeFusionConfig,
+    glare_radius_pixels: usize,
     band_y0: usize,
     band_y1: usize,
     bayer_output: &mut [f32],
@@ -1804,11 +1900,13 @@ fn process_band(
     uncertainty_output: &mut [f32],
     source_output: &mut [u16],
     flags_output: &mut [u8],
+    glare_output: &mut [u8],
 ) -> Result<()> {
     let width = group.width;
     let halo = config
         .halo
         .max(config.focus_coarse_stride.saturating_mul(2))
+        .max(glare_radius_pixels)
         .max(2);
     let tile_size = config.tile_size.max(16);
     for x0 in (0..width).step_by(tile_size) {
@@ -1831,6 +1929,7 @@ fn process_band(
         let mut plane_flags = vec![0u8; ext_pixels];
         let mut green = vec![0.0f32; ext_pixels];
         let mut focus_metric = vec![0.0f32; ext_pixels];
+        let mut plane_glare = vec![0.0f32; ext_pixels];
         let mut best_score = vec![f32::NEG_INFINITY; tile_pixels];
         let mut second_score = vec![f32::NEG_INFINITY; tile_pixels];
         let mut best_detail_score = vec![f32::NEG_INFINITY; tile_pixels];
@@ -1845,6 +1944,9 @@ fn process_band(
         let mut second_flags = vec![0u8; tile_pixels];
         let mut best_plane = vec![0u16; tile_pixels];
         let mut second_plane = vec![0u16; tile_pixels];
+        let mut best_glare = vec![0.0f32; tile_pixels];
+        let mut second_glare = vec![0.0f32; tile_pixels];
+        let mut maximum_glare = vec![0.0f32; tile_pixels];
         let mut previous_score = vec![f32::NEG_INFINITY; tile_pixels];
         let mut left_score = vec![f32::NEG_INFINITY; tile_pixels];
         let mut right_score = vec![f32::NEG_INFINITY; tile_pixels];
@@ -1857,6 +1959,7 @@ fn process_band(
             plane_flags.fill(0);
             green.fill(0.0);
             focus_metric.fill(0.0);
+            plane_glare.fill(0.0);
             let frame_start = focus * exposures_per_focus;
             let frame_end = frame_start + exposures_per_focus;
             for local_y in 0..ext_height {
@@ -1900,6 +2003,23 @@ fn process_band(
                 ext_width,
                 ext_height,
             );
+            if glare_radius_pixels > 0 {
+                detect_glare_likelihood(
+                    &plane_bayer,
+                    &plane_valid,
+                    &plane_flags,
+                    &mut plane_glare,
+                    ext_width,
+                    ext_height,
+                    glare_radius_pixels,
+                );
+                focus_metric
+                    .iter_mut()
+                    .zip(&plane_glare)
+                    .for_each(|(metric, glare)| {
+                        *metric *= (1.0 - config.glare_focus_suppression * glare).clamp(0.0, 1.0);
+                    });
+            }
             let coarse_focus = CoarseFocusGrid::build(
                 &focus_metric,
                 &plane_valid,
@@ -1929,6 +2049,8 @@ fn process_band(
                     let metric = coarse_metric
                         + config.focus_detail_edge_weight * edge_gate * detail_residual;
                     let value = plane_bayer[ext_index];
+                    let glare = plane_glare[ext_index];
+                    maximum_glare[tile_index] = maximum_glare[tile_index].max(glare);
                     if best_score[tile_index].is_finite()
                         && usize::from(best_plane[tile_index]) + 1 == focus
                     {
@@ -1942,6 +2064,7 @@ fn process_band(
                         second_source[tile_index] = best_source[tile_index];
                         second_flags[tile_index] = best_flags[tile_index];
                         second_plane[tile_index] = best_plane[tile_index];
+                        second_glare[tile_index] = best_glare[tile_index];
                         best_score[tile_index] = metric;
                         best_detail_score[tile_index] = fine_metric;
                         best_value[tile_index] = value;
@@ -1949,6 +2072,7 @@ fn process_band(
                         best_source[tile_index] = plane_source[ext_index];
                         best_flags[tile_index] = plane_flags[ext_index];
                         best_plane[tile_index] = focus as u16;
+                        best_glare[tile_index] = glare;
                         left_score[tile_index] = if focus > 0 {
                             previous_score[tile_index]
                         } else {
@@ -1963,6 +2087,7 @@ fn process_band(
                         second_source[tile_index] = plane_source[ext_index];
                         second_flags[tile_index] = plane_flags[ext_index];
                         second_plane[tile_index] = focus as u16;
+                        second_glare[tile_index] = glare;
                     }
                     previous_score[tile_index] = metric;
                 }
@@ -2003,6 +2128,8 @@ fn process_band(
                 bayer_output[output_index] = best_value[tile_index] * best_weight
                     + second_value[tile_index] * (1.0 - best_weight);
                 let second_weight = 1.0 - best_weight;
+                let selected_glare =
+                    best_glare[tile_index] * best_weight + second_glare[tile_index] * second_weight;
                 uncertainty_output[output_index] = if second_is_valid {
                     ((best_weight * best_uncertainty[tile_index]).powi(2)
                         + (second_weight * second_uncertainty[tile_index]).powi(2))
@@ -2036,11 +2163,15 @@ fn process_band(
                     })
                     .unwrap_or(discrete_focus_position);
                 depth_output[output_index] = focus_position / depth_denominator;
-                confidence_output[output_index] = if let Some(model) = focus_model {
-                    separation * (0.5 + 0.5 * model.psf_sampling_balance(best_focus))
-                } else {
-                    separation
-                };
+                confidence_output[output_index] =
+                    if let Some(model) = focus_model {
+                        separation * (0.5 + 0.5 * model.psf_sampling_balance(best_focus))
+                    } else {
+                        separation
+                    } * (1.0 - config.glare_focus_suppression * selected_glare).clamp(0.0, 1.0);
+                glare_output[output_index] = (maximum_glare[tile_index] * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -2545,6 +2676,166 @@ fn compute_focus_metric(
             // not automatically outrank darker, genuinely focused structure.
             metric[index] = response / (0.0015 + 0.02 * center.max(0.0).sqrt());
         }
+    }
+}
+
+fn detect_glare_likelihood(
+    radiance: &[f32],
+    valid: &[bool],
+    flags: &[u8],
+    output: &mut [f32],
+    width: usize,
+    height: usize,
+    radius: usize,
+) {
+    if radius == 0 || width == 0 || height == 0 {
+        return;
+    }
+    let pixel_count = width * height;
+    debug_assert_eq!(radiance.len(), pixel_count);
+    debug_assert_eq!(valid.len(), pixel_count);
+    debug_assert_eq!(flags.len(), pixel_count);
+    debug_assert_eq!(output.len(), pixel_count);
+
+    let mut distance = vec![f32::INFINITY; pixel_count];
+    let mut has_core = false;
+    for index in 0..pixel_count {
+        if valid[index] && flags[index] & FUSION_FLAG_CENSORED != 0 {
+            distance[index] = 0.0;
+            has_core = true;
+        }
+    }
+    if !has_core {
+        return;
+    }
+
+    // Deterministic eight-neighbor chamfer distance. The support is used only
+    // to suppress focus evidence; archival radiance is never modified.
+    let diagonal = std::f32::consts::SQRT_2;
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let mut best = distance[index];
+            if x > 0 {
+                best = best.min(distance[index - 1] + 1.0);
+            }
+            if y > 0 {
+                best = best.min(distance[index - width] + 1.0);
+                if x > 0 {
+                    best = best.min(distance[index - width - 1] + diagonal);
+                }
+                if x + 1 < width {
+                    best = best.min(distance[index - width + 1] + diagonal);
+                }
+            }
+            distance[index] = best;
+        }
+    }
+    for y in (0..height).rev() {
+        for x in (0..width).rev() {
+            let index = y * width + x;
+            let mut best = distance[index];
+            if x + 1 < width {
+                best = best.min(distance[index + 1] + 1.0);
+            }
+            if y + 1 < height {
+                best = best.min(distance[index + width] + 1.0);
+                if x > 0 {
+                    best = best.min(distance[index + width - 1] + diagonal);
+                }
+                if x + 1 < width {
+                    best = best.min(distance[index + width + 1] + diagonal);
+                }
+            }
+            distance[index] = best;
+        }
+    }
+
+    let integral_width = width + 1;
+    let mut sum_integral = vec![0.0f64; integral_width * (height + 1)];
+    let mut count_integral = vec![0u32; integral_width * (height + 1)];
+    for y in 0..height {
+        let mut row_sum = 0.0f64;
+        let mut row_count = 0u32;
+        for x in 0..width {
+            let index = y * width + x;
+            if valid[index] && radiance[index].is_finite() {
+                row_sum += f64::from(radiance[index].max(0.0));
+                row_count += 1;
+            }
+            let integral_index = (y + 1) * integral_width + x + 1;
+            sum_integral[integral_index] = sum_integral[y * integral_width + x + 1] + row_sum;
+            count_integral[integral_index] = count_integral[y * integral_width + x + 1] + row_count;
+        }
+    }
+
+    let near_radius = (radius / 4).max(2);
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            if !valid[index] || distance[index] > radius as f32 {
+                continue;
+            }
+            if distance[index] == 0.0 {
+                output[index] = 1.0;
+                continue;
+            }
+            let near = integral_box_mean(
+                &sum_integral,
+                &count_integral,
+                integral_width,
+                width,
+                height,
+                x,
+                y,
+                near_radius,
+            );
+            let wide = integral_box_mean(
+                &sum_integral,
+                &count_integral,
+                integral_width,
+                width,
+                height,
+                x,
+                y,
+                radius,
+            );
+            let bloom_excess = ((near - wide) / (near.abs() + 0.02)).clamp(0.0, 1.0);
+            let inconsistent_bracket = f32::from(flags[index] & FUSION_FLAG_OUTLIER_REJECTED != 0);
+            let proximity = (1.0 - distance[index] / radius as f32).clamp(0.0, 1.0);
+            let evidence = 0.45 + 0.45 * bloom_excess + 0.10 * inconsistent_bracket;
+            output[index] = (proximity * evidence).clamp(0.0, 1.0);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn integral_box_mean(
+    sum: &[f64],
+    count: &[u32],
+    integral_width: usize,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    radius: usize,
+) -> f32 {
+    let x0 = x.saturating_sub(radius);
+    let y0 = y.saturating_sub(radius);
+    let x1 = (x + radius + 1).min(width);
+    let y1 = (y + radius + 1).min(height);
+    let top_left = y0 * integral_width + x0;
+    let top_right = y0 * integral_width + x1;
+    let bottom_left = y1 * integral_width + x0;
+    let bottom_right = y1 * integral_width + x1;
+    let total = sum[bottom_right] + sum[top_left] - sum[top_right] - sum[bottom_left];
+    let samples = i64::from(count[bottom_right]) + i64::from(count[top_left])
+        - i64::from(count[top_right])
+        - i64::from(count[bottom_left]);
+    if samples <= 0 {
+        0.0
+    } else {
+        (total / samples as f64) as f32
     }
 }
 
@@ -3336,6 +3627,148 @@ mod tests {
                 assert_eq!(cropped.sample(x, y), full.sample(x, y));
             }
         }
+    }
+
+    #[test]
+    fn glare_exclusion_reduces_false_focus_energy_without_changing_radiance() {
+        let width = 96;
+        let height = 80;
+        let center_x = width / 2;
+        let center_y = height / 2;
+        let radius = 20;
+        let mut radiance = vec![0.0f32; width * height];
+        let valid = vec![true; width * height];
+        let mut flags = vec![0u8; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as f32 - center_x as f32;
+                let dy = y as f32 - center_y as f32;
+                let distance2 = dx * dx + dy * dy;
+                let bloom = 0.72 * (-distance2 / 110.0).exp();
+                let index = y * width + x;
+                radiance[index] = 0.08 + bloom;
+                if distance2 <= 9.0 {
+                    radiance[index] = 1.0;
+                    flags[index] |= FUSION_FLAG_CENSORED;
+                }
+            }
+        }
+        let original_radiance = radiance.clone();
+        let mut focus_metric = vec![0.0f32; radiance.len()];
+        compute_focus_metric(&radiance, &valid, &mut focus_metric, width, height);
+        let mut glare = vec![0.0f32; radiance.len()];
+        detect_glare_likelihood(&radiance, &valid, &flags, &mut glare, width, height, radius);
+        let protected_metric = focus_metric
+            .iter()
+            .zip(&glare)
+            .map(|(metric, glare)| metric * (1.0 - glare))
+            .collect::<Vec<_>>();
+
+        let mut unprotected_energy = 0.0f64;
+        let mut protected_energy = 0.0f64;
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                let distance = ((x as f32 - center_x as f32).powi(2)
+                    + (y as f32 - center_y as f32).powi(2))
+                .sqrt();
+                if (4.0..=radius as f32).contains(&distance) {
+                    let index = y * width + x;
+                    unprotected_energy += f64::from(focus_metric[index]);
+                    protected_energy += f64::from(protected_metric[index]);
+                }
+            }
+        }
+        assert_eq!(radiance, original_radiance);
+        assert_eq!(glare[center_y * width + center_x], 1.0);
+        eprintln!(
+            "glare annulus focus energy: {:.3} -> {:.3} ({:.1}% retained)",
+            unprotected_energy,
+            protected_energy,
+            100.0 * protected_energy / unprotected_energy.max(f64::MIN_POSITIVE)
+        );
+        assert!(
+            protected_energy <= unprotected_energy * 0.72,
+            "glare focus energy was not materially reduced: {unprotected_energy} -> {protected_energy}"
+        );
+        assert_eq!(glare[width + 1], 0.0);
+    }
+
+    #[test]
+    fn glare_diagnostics_are_physical_and_tile_invariant() {
+        let width = 72;
+        let height = 64;
+        let white = 16_383.0f32;
+        let center_x = width / 2;
+        let center_y = height / 2;
+        let mut pixels = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let distance2 =
+                    (x as f32 - center_x as f32).powi(2) + (y as f32 - center_y as f32).powi(2);
+                let signal = if distance2 <= 9.0 {
+                    1.0
+                } else {
+                    0.08 + 0.70 * (-distance2 / 100.0).exp()
+                };
+                pixels.push((signal * white).round().clamp(0.0, white) as u16);
+            }
+        }
+        let mut frame_metadata = metadata(1.0);
+        frame_metadata.width = width as u32;
+        frame_metadata.height = height as u32;
+        frame_metadata.cam_mul = [1.0; 4];
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            1,
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            vec![frame_metadata],
+        )
+        .unwrap();
+        let base = NativeFusionConfig {
+            black_level: Some(0.0),
+            white_level: Some(white),
+            regularize_depth: false,
+            ..NativeFusionConfig::default()
+        };
+        let tiled = fuse_native_group(
+            &group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                tile_size: 16,
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        let bounded = fuse_native_group(
+            &group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                glare_spread_um: 2_000.0,
+                glare_fallback_radius_pixels: 256,
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        let untiled = fuse_native_group(
+            &group,
+            &meta(1, 1),
+            &NativeFusionConfig {
+                tile_size: 128,
+                ..base
+            },
+        )
+        .unwrap();
+
+        assert!(tiled.glare_physical_scale);
+        assert_eq!(tiled.glare_radius_pixels, 19);
+        assert!(tiled.glare_affected_pixels > 0);
+        assert_eq!(tiled.glare_map[[center_y, center_x]], 255);
+        assert_eq!(tiled.glare_map, untiled.glare_map);
+        assert_eq!(tiled.bayer, untiled.bayer);
+        assert_eq!(bounded.glare_radius_pixels, 256);
+        assert!(!bounded.glare_physical_scale);
     }
 
     #[test]
