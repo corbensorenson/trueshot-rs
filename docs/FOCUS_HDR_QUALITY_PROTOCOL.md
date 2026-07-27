@@ -94,6 +94,11 @@ Implemented:
 - Censored Poisson-Gaussian bracket estimation with exact-ISO/CFA noise-profile
   validation, posterior radiance uncertainty, source attribution, and explicit
   clipping/rejection/fallback state.
+- Bounded paired dark/flat sensor calibration with complete-pair fit/holdout
+  splits, per-CFA temporal/fixed-pattern/conversion-gain estimation, independent
+  variance and residual-coverage gates, immutable source SHA-256 evidence, and
+  fail-closed profile publication. Synthetic photon-transfer recovery and an
+  end-to-end nominal-95% posterior gate are passing.
 - Exposure-normalized per-bracket global translation, selective compact
   gradient-cell refinement, forward/backward disocclusion rejection, and
   measured-reference fallback.
@@ -120,15 +125,16 @@ Not yet qualified:
   release gate.
 - Interactive source/deghost retouching in the dashboard.
 - Hair/thin-structure halo gates and multi-method automatic focus strategy.
-- Per-ISO/CFA photon-transfer calibration capture/fit and empirical posterior
-  uncertainty calibration. Validated profile persistence and production loading
-  are implemented.
+- Retained real per-ISO Z9 dark/flat calibration and real-sensor posterior
+  uncertainty coverage. The capture/fit CLI, independent holdout gates,
+  validated profile persistence, and production loading are implemented.
 - Held-out calibration of the implemented nonuniform diopter/thin-lens
   sub-plane depth and conservative aperture-visibility projection, plus
   lens-breathing calibration, measured halo-energy/MTF gates, and mixed-pixel
   trimaps. Native fusion exports unquantized metric depth and per-pixel
   visibility-correction provenance when complete verified geometry is valid.
-- Deterministic uncertainty-driven exposure and focus acquisition scheduling.
+- Camera-loop integration and real efficiency qualification for the implemented
+  deterministic uncertainty-driven exposure/focus planner.
 - Release-mode Apple Silicon timing, memory, thermal, and energy baselines.
 
 The implementation-grade literature mapping and rejection policy for

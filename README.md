@@ -55,6 +55,17 @@ trueshot export --input ./output/model.gltf --output ./output/model.glb --format
 
 # Calibrate cameras (checkerboard)
 trueshot calibrate --images ./calibration/*.jpg --cols 9 --rows 6 --square-size-mm 25
+
+# Fit an exact-ISO sensor model from retained paired dark/flat NEFs
+trueshot calibrate-noise \
+  --dark ./sensor-calibration/dark \
+  --flat-level ./sensor-calibration/flat-05 \
+  --flat-level ./sensor-calibration/flat-15 \
+  --flat-level ./sensor-calibration/flat-30 \
+  --flat-level ./sensor-calibration/flat-50 \
+  --flat-level ./sensor-calibration/flat-70 \
+  --flat-level ./sensor-calibration/flat-90 \
+  --output ./sensor-calibration/camera-noise.json
 ```
 
 ## 🏗️ Project Structure

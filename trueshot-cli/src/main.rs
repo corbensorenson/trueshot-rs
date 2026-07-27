@@ -14,9 +14,10 @@ use nalgebra as na;
 use reqwest::blocking::Client as HttpClient;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use toml::Value as TomlValue;
@@ -58,12 +59,18 @@ use trueshot_core::resource_manager::{
     AdaptiveDecodeController, CancellationToken, MemoryCreditPool, NativeSequenceMemoryEstimate,
     PipelinePressureSample, SystemResources,
 };
-use trueshot_core::sensor_noise::SensorNoiseProfile;
+use trueshot_core::sensor_calibration::{
+    CalibrationSplit, IsoCalibrationReport, SensorCalibrationAccumulator, SensorCalibrationConfig,
+    SENSOR_CALIBRATION_ISO_REPORT_SCHEMA,
+};
+use trueshot_core::sensor_noise::{SensorNoiseProfile, SENSOR_NOISE_PROFILE_SCHEMA};
 use trueshot_core::smart_loader::{NativeGroupArena, SmartLoader};
 use trueshot_core::timing::HierarchicalTimer;
 use trueshot_core::types::ProcessingOptions;
 use trueshot_core::validation::validate_photogrammetry_input;
 use uuid::Uuid;
+
+const SENSOR_CALIBRATION_ARTIFACT_SCHEMA: &str = "trueshot.sensor-calibration.artifact.v1";
 
 mod mesh_io;
 
@@ -289,6 +296,33 @@ enum Commands {
         /// Output calibration file
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+
+    /// Fit an exact-ISO sensor noise profile from paired dark/flat NEFs
+    CalibrateNoise {
+        /// Directory containing repeated lens-capped dark frames
+        #[arg(long)]
+        dark: PathBuf,
+
+        /// Repeated flat-field level directory; provide at least five
+        #[arg(long = "flat-level", required = true)]
+        flat_levels: Vec<PathBuf>,
+
+        /// Output sensor-noise profile JSON
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Maximum deterministic samples retained per frame pair and CFA site
+        #[arg(long, default_value_t = 32_768)]
+        max_samples_per_pair_per_site: usize,
+
+        /// Maximum held-out variance relative error
+        #[arg(long, default_value_t = 0.10)]
+        maximum_variance_error: f32,
+
+        /// Absolute tolerance around nominal 90%/95% residual coverage
+        #[arg(long, default_value_t = 0.03)]
+        coverage_tolerance: f32,
     },
 
     /// Manage model inventory
@@ -518,8 +552,13 @@ fn main() -> Result<()> {
             .with_max_level(tracing::Level::DEBUG)
             .init();
     } else {
+        let level = if matches!(&cli.command, Commands::CalibrateNoise { .. }) {
+            tracing::Level::WARN
+        } else {
+            tracing::Level::INFO
+        };
         tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
+            .with_max_level(level)
             .with_target(false)
             .init();
     }
@@ -585,6 +624,21 @@ fn main() -> Result<()> {
             square_size_mm,
             output,
         } => cmd_calibrate(images, cols, rows, square_size_mm, output),
+        Commands::CalibrateNoise {
+            dark,
+            flat_levels,
+            output,
+            max_samples_per_pair_per_site,
+            maximum_variance_error,
+            coverage_tolerance,
+        } => cmd_calibrate_noise(
+            dark,
+            flat_levels,
+            output,
+            max_samples_per_pair_per_site,
+            maximum_variance_error,
+            coverage_tolerance,
+        ),
         Commands::Inventory { action } => cmd_inventory(action),
         Commands::Status {
             hardware,
@@ -1167,6 +1221,470 @@ fn cmd_calibrate(
     );
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct NoiseCalibrationFile {
+    path: PathBuf,
+    metadata: trueshot_core::nef::parser::Z9Metadata,
+    sha256: Option<String>,
+    role: String,
+    level: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct NoiseCalibrationSourceRecord {
+    path: String,
+    sha256: String,
+    role: String,
+    level: Option<u32>,
+    iso: u32,
+    shutter_seconds: Option<f64>,
+    aperture: Option<f32>,
+    timestamp: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct NoiseCalibrationArtifactReport {
+    schema: String,
+    iso_report_schema: String,
+    camera_make: String,
+    camera_model: String,
+    bits_per_sample: u16,
+    width: u32,
+    height: u32,
+    pairing_policy: String,
+    profile_path: String,
+    profile_published: bool,
+    profile_sha256: Option<String>,
+    config: SensorCalibrationConfig,
+    iso_reports: Vec<IsoCalibrationReport>,
+    sources: Vec<NoiseCalibrationSourceRecord>,
+    passed: bool,
+    failures: Vec<String>,
+}
+
+fn cmd_calibrate_noise(
+    dark: PathBuf,
+    flat_levels: Vec<PathBuf>,
+    output: PathBuf,
+    max_samples_per_pair_per_site: usize,
+    maximum_variance_error: f32,
+    coverage_tolerance: f32,
+) -> Result<()> {
+    let report_path = calibration_report_path(&output);
+    if output.exists() || report_path.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite calibration artifacts; choose a new output path (profile: {}, report: {})",
+            output.display(),
+            report_path.display()
+        );
+    }
+    let config = SensorCalibrationConfig {
+        max_samples_per_pair_per_site,
+        maximum_variance_relative_error: maximum_variance_error,
+        coverage_absolute_tolerance: coverage_tolerance,
+        ..SensorCalibrationConfig::default()
+    };
+    config.validate()?;
+    if flat_levels.len() < config.minimum_flat_levels {
+        anyhow::bail!(
+            "Noise calibration requires at least {} flat-level directories",
+            config.minimum_flat_levels
+        );
+    }
+
+    println!("{} Paired RAW Sensor Calibration", CAMERA);
+    println!("  Dark frames: {}", dark.display());
+    println!("  Flat levels: {}", flat_levels.len());
+    println!("  Output: {}", output.display());
+
+    let mut files = inspect_noise_calibration_directory(&dark, "dark", None)?;
+    for (level, directory) in flat_levels.iter().enumerate() {
+        files.extend(inspect_noise_calibration_directory(
+            directory,
+            "flat",
+            Some(u32::try_from(level).context("Too many flat levels")?),
+        )?);
+    }
+    let reference = files
+        .first()
+        .context("No NEF calibration files were discovered")?;
+    validate_noise_calibration_identity(&files, &reference.metadata)?;
+
+    let camera_make = reference.metadata.camera_make.clone();
+    let camera_model = reference.metadata.camera_model.clone();
+    let bits_per_sample = reference.metadata.bits_per_sample;
+    let width = reference.metadata.width;
+    let height = reference.metadata.height;
+    let sensor_levels = reference
+        .metadata
+        .sensor_levels
+        .context("Noise calibration requires verified black/white sensor levels")?;
+    let expected_dark_frames = config
+        .minimum_dark_pairs_per_split
+        .checked_mul(4)
+        .context("Dark calibration pair requirement overflow")?;
+    let expected_flat_frames = config
+        .minimum_flat_pairs_per_split
+        .checked_mul(4)
+        .context("Flat calibration pair requirement overflow")?;
+    let mut dark_by_iso: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    let mut flat_by_level_iso: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    let mut all_isos = std::collections::BTreeSet::new();
+    for (index, file) in files.iter().enumerate() {
+        let iso = file
+            .metadata
+            .iso
+            .context("Noise calibration source is missing exact ISO metadata")?;
+        all_isos.insert(iso);
+        if file.role == "dark" {
+            dark_by_iso.entry(iso).or_default().push(index);
+        } else {
+            flat_by_level_iso
+                .entry((file.level.context("Flat source has no level")?, iso))
+                .or_default()
+                .push(index);
+        }
+    }
+    for bucket in dark_by_iso.values_mut() {
+        sort_calibration_indices(bucket, &files);
+    }
+    for bucket in flat_by_level_iso.values_mut() {
+        sort_calibration_indices(bucket, &files);
+    }
+
+    let mut preflight_failures = Vec::new();
+    for iso in &all_isos {
+        let dark_count = dark_by_iso.get(iso).map_or(0, Vec::len);
+        if dark_count < expected_dark_frames || dark_count % 2 != 0 {
+            preflight_failures.push(format!(
+                "ISO {iso} dark frames {dark_count}; require an even count of at least {expected_dark_frames}"
+            ));
+        }
+        for level in 0..flat_levels.len() {
+            let level = u32::try_from(level).context("Too many flat levels")?;
+            let count = flat_by_level_iso.get(&(level, *iso)).map_or(0, Vec::len);
+            if count < expected_flat_frames || count % 2 != 0 {
+                preflight_failures.push(format!(
+                    "ISO {iso} flat level {level} frames {count}; require an even count of at least {expected_flat_frames}"
+                ));
+            }
+        }
+    }
+    if !preflight_failures.is_empty() {
+        anyhow::bail!(
+            "Noise calibration preflight failed:\n- {}",
+            preflight_failures.join("\n- ")
+        );
+    }
+    for file in &mut files {
+        file.sha256 = Some(sha256_file(&file.path)?);
+    }
+    reject_duplicate_calibration_sources(&files)?;
+    let decode_count = files.len();
+    let progress = ProgressBar::new(u64::try_from(decode_count).unwrap_or(u64::MAX));
+    progress.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
+
+    let mut iso_models = Vec::new();
+    let mut iso_reports = Vec::new();
+    let mut failures = Vec::new();
+    for iso in all_isos {
+        progress.set_message(format!("ISO {iso}: dark pairs"));
+        let mut accumulator = SensorCalibrationAccumulator::new(
+            iso,
+            width as usize,
+            height as usize,
+            sensor_levels.black,
+            sensor_levels.white,
+            config.clone(),
+        )?;
+        add_noise_calibration_pairs(
+            &mut accumulator,
+            dark_by_iso
+                .get(&iso)
+                .context("Preflight lost dark ISO bucket")?,
+            &files,
+            None,
+            &progress,
+        )?;
+        for level in 0..flat_levels.len() {
+            let level = u32::try_from(level).context("Too many flat levels")?;
+            progress.set_message(format!("ISO {iso}: flat level {level}"));
+            add_noise_calibration_pairs(
+                &mut accumulator,
+                flat_by_level_iso
+                    .get(&(level, iso))
+                    .context("Preflight lost flat ISO bucket")?,
+                &files,
+                Some(level),
+                &progress,
+            )?;
+        }
+        let outcome = accumulator.evaluate()?;
+        if let Some(model) = outcome.model {
+            iso_models.push(model);
+        } else {
+            failures.push(format!(
+                "ISO {} failed: {}",
+                iso,
+                outcome.report.failures.join("; ")
+            ));
+        }
+        iso_reports.push(outcome.report);
+    }
+    progress.finish_with_message("Calibration evidence evaluated");
+
+    let profile_path = output.clone();
+    let sources = files
+        .iter()
+        .map(|file| {
+            Ok(NoiseCalibrationSourceRecord {
+                path: file.path.display().to_string(),
+                sha256: file
+                    .sha256
+                    .clone()
+                    .context("Calibration source was not hashed")?,
+                role: file.role.clone(),
+                level: file.level,
+                iso: file.metadata.iso.unwrap_or_default(),
+                shutter_seconds: file.metadata.exposure_time,
+                aperture: file.metadata.aperture,
+                timestamp: file.metadata.timestamp.map(|value| value.to_rfc3339()),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let passed = failures.is_empty() && iso_models.len() == iso_reports.len();
+    let mut report = NoiseCalibrationArtifactReport {
+        schema: SENSOR_CALIBRATION_ARTIFACT_SCHEMA.to_string(),
+        iso_report_schema: SENSOR_CALIBRATION_ISO_REPORT_SCHEMA.to_string(),
+        camera_make,
+        camera_model,
+        bits_per_sample,
+        width,
+        height,
+        pairing_policy:
+            "sorted captures paired consecutively; even pair indices fit, odd pair indices holdout"
+                .to_string(),
+        profile_path: profile_path.display().to_string(),
+        profile_published: false,
+        profile_sha256: None,
+        config,
+        iso_reports,
+        sources,
+        passed,
+        failures,
+    };
+    write_atomic_json(&report_path, &report)?;
+    println!("  Calibration report: {}", report_path.display());
+    if !passed {
+        anyhow::bail!(
+            "Sensor calibration gates failed; profile was not published. Inspect {}",
+            report_path.display()
+        );
+    }
+    let profile = SensorNoiseProfile {
+        schema: SENSOR_NOISE_PROFILE_SCHEMA.to_string(),
+        camera_make: report.camera_make.clone(),
+        camera_model: report.camera_model.clone(),
+        bits_per_sample: report.bits_per_sample,
+        calibration_id: "unpublished:paired-photon-transfer".to_string(),
+        iso_models,
+    };
+    profile.save_json(&profile_path)?;
+    // Reload to prove the exact published artifact satisfies runtime gates.
+    let published = SensorNoiseProfile::load_json(&profile_path)
+        .context("Published sensor-noise profile failed runtime validation")?;
+    report.profile_published = true;
+    report.profile_sha256 = published
+        .calibration_id
+        .strip_prefix("sha256:")
+        .map(str::to_string);
+    write_atomic_json(&report_path, &report)?;
+    println!(
+        "{} Calibrated profile published: {}",
+        CHECK,
+        style(profile_path.display()).green()
+    );
+    Ok(())
+}
+
+fn inspect_noise_calibration_directory(
+    directory: &Path,
+    role: &str,
+    level: Option<u32>,
+) -> Result<Vec<NoiseCalibrationFile>> {
+    let paths = trueshot_core::exif_parser::scan_nef_files(directory)
+        .with_context(|| format!("Scan calibration directory {}", directory.display()))?;
+    if paths.is_empty() {
+        anyhow::bail!(
+            "No NEFs found in calibration directory {}",
+            directory.display()
+        );
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let mut parser = trueshot_core::nef::parser::Z9NefParser::new(&path);
+            parser
+                .parse()
+                .with_context(|| format!("Parse calibration NEF {}", path.display()))?;
+            let metadata = parser.get_metadata()?.clone();
+            Ok(NoiseCalibrationFile {
+                path,
+                metadata,
+                sha256: None,
+                role: role.to_string(),
+                level,
+            })
+        })
+        .collect()
+}
+
+fn validate_noise_calibration_identity(
+    files: &[NoiseCalibrationFile],
+    reference: &trueshot_core::nef::parser::Z9Metadata,
+) -> Result<()> {
+    for file in files {
+        let metadata = &file.metadata;
+        if metadata.width != reference.width
+            || metadata.height != reference.height
+            || metadata.bits_per_sample != reference.bits_per_sample
+            || metadata.camera_make != reference.camera_make
+            || metadata.camera_model != reference.camera_model
+            || metadata.sensor_levels != reference.sensor_levels
+            || metadata.cfa_pattern != [0, 1, 1, 2]
+        {
+            anyhow::bail!(
+                "Calibration source {} does not match the reference camera encoding",
+                file.path.display()
+            );
+        }
+        if metadata.iso.is_none() {
+            anyhow::bail!("Calibration source {} has no ISO", file.path.display());
+        }
+    }
+    Ok(())
+}
+
+fn sort_calibration_indices(indices: &mut [usize], files: &[NoiseCalibrationFile]) {
+    indices.sort_by(|left, right| {
+        files[*left]
+            .metadata
+            .timestamp
+            .cmp(&files[*right].metadata.timestamp)
+            .then_with(|| files[*left].path.cmp(&files[*right].path))
+    });
+}
+
+fn reject_duplicate_calibration_sources(files: &[NoiseCalibrationFile]) -> Result<()> {
+    let mut seen = BTreeMap::<&str, &Path>::new();
+    for file in files {
+        let digest = file
+            .sha256
+            .as_deref()
+            .context("Calibration source was not hashed")?;
+        if let Some(first) = seen.insert(digest, &file.path) {
+            anyhow::bail!(
+                "Calibration source content is duplicated: {} and {}",
+                first.display(),
+                file.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn add_noise_calibration_pairs(
+    accumulator: &mut SensorCalibrationAccumulator,
+    indices: &[usize],
+    files: &[NoiseCalibrationFile],
+    level: Option<u32>,
+    progress: &ProgressBar,
+) -> Result<()> {
+    for (pair_index, pair) in indices.chunks_exact(2).enumerate() {
+        let first = decode_full_calibration_nef(&files[pair[0]])?;
+        progress.inc(1);
+        let second = decode_full_calibration_nef(&files[pair[1]])?;
+        progress.inc(1);
+        let split = if pair_index & 1 == 0 {
+            CalibrationSplit::Fit
+        } else {
+            CalibrationSplit::Holdout
+        };
+        if let Some(level) = level {
+            accumulator.add_flat_pair(level, &first.raw.data, &second.raw.data, split)?;
+        } else {
+            accumulator.add_dark_pair(&first.raw.data, &second.raw.data, split)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_full_calibration_nef(
+    file: &NoiseCalibrationFile,
+) -> Result<trueshot_core::raw_io::NativeNefRoi> {
+    let rect = trueshot_core::types::Rect::new(
+        0.0,
+        0.0,
+        file.metadata.width as f64,
+        file.metadata.height as f64,
+    );
+    trueshot_core::raw_io::load_nef_roi_native(&file.path, rect)
+        .with_context(|| format!("Decode calibration NEF {}", file.path.display()))
+}
+
+fn calibration_report_path(profile_path: &Path) -> PathBuf {
+    let stem = profile_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("sensor-noise");
+    profile_path.with_file_name(format!("{stem}_calibration_report.json"))
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(1024 * 1024, file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let partial = path.with_extension(format!("partial-{}-{}", std::process::id(), Uuid::new_v4()));
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&partial)?;
+    let result = (|| -> Result<()> {
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&partial, path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(partial);
+    }
+    result
 }
 
 fn run_burst_pipeline(
@@ -3945,6 +4463,49 @@ mod burst_pipeline_tests {
             panic!("expected process command");
         };
         assert_eq!(sensor_noise_profile, Some(PathBuf::from("z9-noise.json")));
+    }
+
+    #[test]
+    fn noise_calibration_cli_accepts_repeated_flat_levels() {
+        let cli = Cli::try_parse_from([
+            "trueshot",
+            "calibrate-noise",
+            "--dark",
+            "dark",
+            "--flat-level",
+            "flat-01",
+            "--flat-level",
+            "flat-02",
+            "--flat-level",
+            "flat-03",
+            "--flat-level",
+            "flat-04",
+            "--flat-level",
+            "flat-05",
+            "--output",
+            "z9-noise.json",
+        ])
+        .unwrap();
+        let Commands::CalibrateNoise {
+            dark,
+            flat_levels,
+            output,
+            ..
+        } = cli.command
+        else {
+            panic!("expected calibrate-noise command");
+        };
+        assert_eq!(dark, PathBuf::from("dark"));
+        assert_eq!(flat_levels.len(), 5);
+        assert_eq!(output, PathBuf::from("z9-noise.json"));
+    }
+
+    #[test]
+    fn noise_calibration_report_stays_beside_profile() {
+        assert_eq!(
+            calibration_report_path(Path::new("/tmp/z9.production-noise.json")),
+            PathBuf::from("/tmp/z9.production-noise_calibration_report.json")
+        );
     }
 
     #[test]

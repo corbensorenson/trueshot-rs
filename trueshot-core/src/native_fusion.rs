@@ -3874,6 +3874,123 @@ mod tests {
     }
 
     #[test]
+    fn calibrated_posterior_intervals_have_empirical_coverage() {
+        struct Noise {
+            state: u64,
+            spare: Option<f32>,
+        }
+        impl Noise {
+            fn normal(&mut self) -> f32 {
+                if let Some(value) = self.spare.take() {
+                    return value;
+                }
+                let uniform = |state: &mut u64| {
+                    *state ^= *state << 13;
+                    *state ^= *state >> 7;
+                    *state ^= *state << 17;
+                    ((*state >> 40) as f32 + 0.5) / ((1u32 << 24) as f32)
+                };
+                let radius = (-2.0 * uniform(&mut self.state).max(1e-7).ln()).sqrt();
+                let angle = std::f32::consts::TAU * uniform(&mut self.state);
+                self.spare = Some(radius * angle.sin());
+                radius * angle.cos()
+            }
+        }
+
+        let width = 64;
+        let height = 64;
+        let frame_count = 4;
+        let white = 16_383.0f32;
+        let model = calibrated_noise_profile(100);
+        let sensor_model = model.model_for_iso(100).unwrap();
+        let mut noise = Noise {
+            state: 0x9e37_79b9_7f4a_7c15,
+            spare: None,
+        };
+        let mut expected = vec![0.0f32; width * height];
+        let mut pixels = Vec::with_capacity(frame_count * width * height);
+        for frame in 0..frame_count {
+            for y in 0..height {
+                for x in 0..width {
+                    let site = ((y & 1) << 1) | (x & 1);
+                    let signal = 0.08 + 0.70 * ((x * 31 + y * 47 + x * y * 3) % 997) as f32 / 996.0;
+                    if frame == 0 {
+                        let green = 1.0;
+                        let white_balance = match site {
+                            0 => 2.0 / green,
+                            1 | 2 => 1.0,
+                            _ => 1.5 / green,
+                        };
+                        expected[y * width + x] = signal * white_balance;
+                    }
+                    let signal_dn = signal * white;
+                    let sigma_dn = (sensor_model.read_noise_dn[site].powi(2)
+                        + sensor_model.black_drift_dn[site].powi(2)
+                        + signal_dn / sensor_model.electrons_per_dn[site])
+                        .sqrt();
+                    pixels.push(
+                        (signal_dn + sigma_dn * noise.normal())
+                            .round()
+                            .clamp(0.0, white) as u16,
+                    );
+                }
+            }
+        }
+        let mut frame_metadata = Vec::with_capacity(frame_count);
+        for _ in 0..frame_count {
+            let mut metadata = metadata(1.0);
+            metadata.width = width as u32;
+            metadata.height = height as u32;
+            frame_metadata.push(metadata);
+        }
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            frame_count,
+            width,
+            height,
+            Rect::new(0.0, 0.0, width as f64, height as f64),
+            frame_metadata,
+        )
+        .unwrap();
+        let result = fuse_native_group(
+            &group,
+            &meta(1, frame_count),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                sensor_noise_profile: Some(model),
+                selective_local_alignment: false,
+                regularize_depth: false,
+                ..NativeFusionConfig::default()
+            },
+        )
+        .unwrap();
+        let mut covered = 0usize;
+        let mut count = 0usize;
+        for y in 2..height - 2 {
+            for x in 2..width - 2 {
+                let uncertainty = result.radiance_uncertainty[[y, x]];
+                let estimate = result.bayer[[y, x, 0]];
+                if uncertainty.is_finite() && uncertainty > 0.0 {
+                    covered += usize::from(
+                        (estimate - expected[y * width + x]).abs() <= 1.959_964 * uncertainty,
+                    );
+                    count += 1;
+                }
+            }
+        }
+        let coverage = covered as f32 / count as f32;
+        println!(
+            "calibrated posterior coverage: {:.3}% ({covered}/{count})",
+            coverage * 100.0
+        );
+        assert!(
+            (0.925..=0.975).contains(&coverage),
+            "nominal 95% posterior coverage was {coverage:.4}"
+        );
+    }
+
+    #[test]
     fn calibrated_profiles_require_an_exact_iso_entry() {
         let pixels = vec![2048u16; 16 * 16];
         let mut frame_metadata = metadata(1.0);
