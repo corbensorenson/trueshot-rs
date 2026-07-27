@@ -1,0 +1,48 @@
+{
+  "schema": "trueshot.apple-focus-qualification-record.v1",
+  "captured_at": "2026-07-27",
+  "command": "./scripts/run_apple_focus_qualification.sh",
+  "platform": {
+    "architecture": "arm64",
+    "operating_system": "macOS 15.0",
+    "model_identifier": "MacBookPro17,1",
+    "chip": "Apple M1",
+    "cpu_cores": {
+      "performance": 4,
+      "efficiency": 4
+    },
+    "memory_gib": 16,
+    "rustc": "1.90.0 (1159e78c4 2025-09-14)"
+  },
+  "source": {
+    "kernel": "trueshot-core/src/focus_evidence.rs",
+    "kernel_sha256": "5ac0072de4e289f2d3358d7f77e28a485aa0c2be25911ed76048f64296b04d10",
+    "harness": "scripts/apple_focus_kernel_qualification.rs",
+    "harness_sha256": "c1b2d0a3e535fd93a05aafe21e13fa11f7f56cf954b298e6dd5c39244aa67e74",
+    "runner": "scripts/run_apple_focus_qualification.sh",
+    "runner_sha256": "eda4a7767403bd9f759a5a94132af410b4dff406af112a2c5ed5fb348b9410a4"
+  },
+  "workload": {
+    "width": 2048,
+    "height": 1536,
+    "warmup_iterations": 1,
+    "measured_iterations": 9,
+    "order": "alternating"
+  },
+  "result": {
+    "scalar_p50_ms": 140.697125,
+    "scalar_p95_ms": 173.55425,
+    "apple_p50_ms": 29.127917,
+    "apple_p95_ms": 31.656167,
+    "speedup_p50": 4.830319,
+    "speedup_p95": 5.482478,
+    "maximum_absolute_error": 0.000000477
+  },
+  "gates": {
+    "minimum_p50_speedup": 1.5,
+    "minimum_p95_speedup": 1.3,
+    "maximum_absolute_error": 0.00002,
+    "passed": true
+  },
+  "scope": "Native focus stencil plus robust 3x3 trimmed evidence only; not an end-to-end NEF fusion timing claim."
+}

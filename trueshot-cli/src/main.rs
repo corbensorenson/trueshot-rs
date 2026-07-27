@@ -1944,6 +1944,7 @@ fn run_burst_pipeline(
                 glare_radius_pixels,
                 glare_physical_scale,
                 glare_affected_pixels,
+                focus_kernel,
             } = fused;
             let (fusion_overlay_rgb, fusion_overlay_alpha) = fusion_provenance_preview(
                 &source_map,
@@ -2041,6 +2042,7 @@ fn run_burst_pipeline(
                 "glare_physical_scale": glare_physical_scale,
                 "glare_affected_pixels": glare_affected_pixels,
                 "glare_policy": "focus_evidence_suppression_only_measured_radiance_unchanged",
+                "focus_kernel": focus_kernel,
                 "local_aligned_cells": local_aligned_cells,
                 "disoccluded_cells": disoccluded_cells,
                 "frame_alignments": frame_alignments,

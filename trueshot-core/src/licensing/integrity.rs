@@ -362,7 +362,7 @@ impl UsageCounter {
     }
 
     /// Reset counter (for testing)
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub fn reset(&self) {
         SCAN_COUNT.store(0, Ordering::SeqCst);
     }

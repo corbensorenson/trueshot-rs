@@ -16,6 +16,7 @@ pub mod error;
 pub mod events;
 pub mod exif_parser;
 pub mod export;
+mod focus_evidence;
 pub mod focus_grouping;
 pub mod fusion_engine;
 #[cfg(feature = "gpu")]

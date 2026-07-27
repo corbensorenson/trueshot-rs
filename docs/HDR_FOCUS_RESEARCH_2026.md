@@ -139,6 +139,19 @@ TrueShot should build its own deterministic, Metal-friendly variant:
 
 Sources: [UHD-MFF](https://arxiv.org/abs/2606.31242) and [Multi-focus image fusion using boosted random walks with two-scale focus maps](https://doi.org/10.1016/j.neucom.2019.01.048).
 
+Implementation state (2026-07-27): the native path retains its coarse
+region/native-edge architecture and now dispatches the focus stencil to a
+dependency-free ARM64 NEON kernel on Apple Silicon. The robust 3x3 trimmed mean
+is computed by an equivalent sum/min/max pass rather than sorting nine values
+for every pixel. A portable scalar path remains selectable, full-pipeline tests
+gate Bayer/depth parity, and the production report records the selected kernel.
+On one Apple M1, an isolated 2048x1536 alternating benchmark measured 4.83x
+p50 and 5.48x p95 speedup with 4.77e-7 maximum absolute error. The
+source-hashed record is retained in
+`docs/benchmarks/apple_focus_qualification_2026-07-27.json`, and ARM64 macOS CI
+enforces conservative 1.5x/1.3x speedup and 2e-5 parity floors. This is a
+focus-kernel result, not an end-to-end NEF, energy, thermal, or Metal AHD claim.
+
 ### 5. Exposure-aware local alignment and frequency-separated deghosting
 
 The NTIRE 2025 RAW challenge uses nine noisy, misaligned RAW frames with

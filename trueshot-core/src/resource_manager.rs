@@ -187,13 +187,14 @@ impl NativeSequenceMemoryEstimate {
             .max(glare_radius_pixels)
             .max(3);
         let tile_edge = tile_size.saturating_add(focus_halo.saturating_mul(2)) as u64;
-        // Extended plane state, glare likelihood/distance/integrals, and the
-        // worst-case regional grid are 44 B/pixel.
+        // Extended plane state, native/trimmed focus evidence, glare
+        // likelihood/distance/integrals, and the worst-case regional grid are
+        // 48 B/pixel.
         // Tile state retains top-two regional/detail radiance evidence plus
         // previous/adjacent responses and glare provenance: 66 B.
         let scratch_per_worker = tile_edge
             .checked_mul(tile_edge)
-            .and_then(|value| value.checked_mul(44))
+            .and_then(|value| value.checked_mul(48))
             .and_then(|value| {
                 value.checked_add(
                     (tile_size as u64)
@@ -747,7 +748,7 @@ mod tests {
             NativeSequenceMemoryEstimate::estimate(21, 1310, 1304, 8, 256, 4, 20, 24, 512).unwrap();
         let peak_mib = estimate.peak_memory_bytes as f64 / (1024.0 * 1024.0);
         assert!(
-            (240.0..241.5).contains(&peak_mib),
+            (243.2..244.2).contains(&peak_mib),
             "peak was {peak_mib:.1} MiB"
         );
         assert_eq!(estimate.input_arena_bytes, 21 * 1310 * 1304 * 2);

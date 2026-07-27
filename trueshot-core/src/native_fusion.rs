@@ -5,6 +5,13 @@
 //! radiance, focus measures, depth, and confidence remain `f32`.
 
 use crate::align_raw::{align_phasecorr_gray, align_phasecorr_gray_with_scale};
+#[cfg(all(test, target_arch = "aarch64", target_os = "macos"))]
+use crate::focus_evidence::compute_focus_metric_apple_neon;
+use crate::focus_evidence::{
+    active_focus_kernel, compute_focus_metric, compute_trimmed_focus_mean,
+};
+#[cfg(test)]
+use crate::focus_evidence::{compute_focus_metric_scalar, sorted_trimmed_focus_mean_at};
 use crate::sensor_noise::{SensorNoiseModel, SensorNoiseProfile};
 use crate::smart_loader::NativeFrameGroup;
 use crate::types::Meta;
@@ -38,6 +45,8 @@ pub struct NativeFusionConfig {
     pub focus_coarse_stride: usize,
     /// Native Laplacian residual contribution at detail edges.
     pub focus_detail_edge_weight: f32,
+    /// Use the deterministic ARM64 NEON focus stencil on Apple Silicon.
+    pub apple_simd_focus: bool,
     /// Exclude saturated-core bloom from focus evidence without altering
     /// measured archival radiance.
     pub glare_aware_focus: bool,
@@ -105,6 +114,7 @@ impl Default for NativeFusionConfig {
             halo: 3,
             focus_coarse_stride: 4,
             focus_detail_edge_weight: 1.0,
+            apple_simd_focus: true,
             glare_aware_focus: true,
             glare_spread_um: 80.0,
             glare_fallback_radius_pixels: 20,
@@ -421,6 +431,8 @@ pub struct NativeFusionResult {
     pub glare_physical_scale: bool,
     /// Pixels with nonzero glare evidence.
     pub glare_affected_pixels: usize,
+    /// Focus evidence kernel selected for this run.
+    pub focus_kernel: &'static str,
 }
 
 impl NativeFusionResult {
@@ -911,6 +923,7 @@ pub fn fuse_native_group(
         glare_radius_pixels,
         glare_physical_scale,
         glare_affected_pixels,
+        focus_kernel: active_focus_kernel(config.apple_simd_focus),
     })
 }
 
@@ -1994,6 +2007,7 @@ fn process_band(
         let mut plane_flags = vec![0u8; ext_pixels];
         let mut green = vec![0.0f32; ext_pixels];
         let mut focus_metric = vec![0.0f32; ext_pixels];
+        let mut smoothed_focus = vec![0.0f32; ext_pixels];
         let mut plane_glare = vec![0.0f32; ext_pixels];
         let mut best_score = vec![f32::NEG_INFINITY; tile_pixels];
         let mut second_score = vec![f32::NEG_INFINITY; tile_pixels];
@@ -2024,6 +2038,7 @@ fn process_band(
             plane_flags.fill(0);
             green.fill(0.0);
             focus_metric.fill(0.0);
+            smoothed_focus.fill(0.0);
             plane_glare.fill(0.0);
             let frame_start = focus * exposures_per_focus;
             let frame_end = frame_start + exposures_per_focus;
@@ -2067,6 +2082,7 @@ fn process_band(
                 &mut focus_metric,
                 ext_width,
                 ext_height,
+                config.apple_simd_focus,
             );
             if glare_radius_pixels > 0 {
                 detect_glare_likelihood(
@@ -2085,6 +2101,7 @@ fn process_band(
                         *metric *= (1.0 - config.glare_focus_suppression * glare).clamp(0.0, 1.0);
                     });
             }
+            compute_trimmed_focus_mean(&focus_metric, &mut smoothed_focus, ext_width, ext_height);
             let coarse_focus = CoarseFocusGrid::build(
                 &focus_metric,
                 &plane_valid,
@@ -2105,8 +2122,7 @@ fn process_band(
                         previous_score[tile_index] = f32::NEG_INFINITY;
                         continue;
                     }
-                    let fine_metric =
-                        smoothed_metric(&focus_metric, ext_width, ext_height, ext_x, ext_y);
+                    let fine_metric = smoothed_focus[ext_index];
                     let coarse_metric = coarse_focus.sample(x0 + tile_x, band_y0 + tile_y);
                     let detail_residual = (fine_metric - coarse_metric).max(0.0);
                     let edge_gate =
@@ -2735,35 +2751,6 @@ fn interpolate_green_mosaic(
     }
 }
 
-fn compute_focus_metric(
-    green: &[f32],
-    valid: &[bool],
-    metric: &mut [f32],
-    width: usize,
-    height: usize,
-) {
-    if width < 3 || height < 3 {
-        return;
-    }
-    for y in 1..height - 1 {
-        for x in 1..width - 1 {
-            let index = y * width + x;
-            if !valid[index] {
-                continue;
-            }
-            let center = green[index];
-            let horizontal = (green[index - 1] - 2.0 * center + green[index + 1]).abs();
-            let vertical = (green[index - width] - 2.0 * center + green[index + width]).abs();
-            let gradient_x = (green[index + 1] - green[index - 1]).abs() * 0.5;
-            let gradient_y = (green[index + width] - green[index - width]).abs() * 0.5;
-            let response = horizontal + vertical + 0.35 * (gradient_x + gradient_y);
-            // Normalize signal-dependent shot noise so bright smooth regions do
-            // not automatically outrank darker, genuinely focused structure.
-            metric[index] = response / (0.0015 + 0.02 * center.max(0.0).sqrt());
-        }
-    }
-}
-
 fn detect_glare_likelihood(
     radiance: &[f32],
     valid: &[bool],
@@ -2998,26 +2985,6 @@ impl CoarseFocusGrid {
             .min(self.height - 1);
         self.values[y * self.width + x]
     }
-}
-
-fn smoothed_metric(metric: &[f32], width: usize, height: usize, x: usize, y: usize) -> f32 {
-    let x0 = x.saturating_sub(1);
-    let y0 = y.saturating_sub(1);
-    let x1 = (x + 1).min(width - 1);
-    let y1 = (y + 1).min(height - 1);
-    let mut values = [0.0f32; 9];
-    let mut count = 0usize;
-    for yy in y0..=y1 {
-        for xx in x0..=x1 {
-            values[count] = metric[yy * width + xx];
-            count += 1;
-        }
-    }
-    // A trimmed local mean is robust to single-pixel noise and hot pixels.
-    values[..count].sort_unstable_by(f32::total_cmp);
-    let trim = usize::from(count >= 7);
-    let kept = &values[trim..count - trim];
-    kept.iter().sum::<f32>() / kept.len().max(1) as f32
 }
 
 struct BoundaryTrimapSummary {
@@ -3560,6 +3527,69 @@ mod tests {
     }
 
     #[test]
+    fn trimmed_focus_mean_matches_the_sorted_reference() {
+        let width = 37;
+        let height = 29;
+        let metric = (0..width * height)
+            .map(|index| {
+                let x = (index % width) as f32;
+                let y = (index / width) as f32;
+                (0.7 * (x * 0.19).sin() + 0.3 * (y * 0.31).cos() + 1.0).max(0.0)
+            })
+            .collect::<Vec<_>>();
+        let mut optimized = vec![0.0f32; metric.len()];
+        compute_trimmed_focus_mean(&metric, &mut optimized, width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let reference = sorted_trimmed_focus_mean_at(&metric, width, height, x, y);
+                let observed = optimized[y * width + x];
+                assert!(
+                    (observed - reference).abs() <= 2e-6 * (1.0 + reference.abs()),
+                    "trimmed mean mismatch at ({x}, {y}): {observed} vs {reference}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "focus evidence buffers are smaller")]
+    fn focus_kernel_rejects_undersized_buffers_before_simd_dispatch() {
+        let mut metric = vec![0.0f32; 15];
+        compute_focus_metric(&[0.0; 15], &[true; 15], &mut metric, 4, 4, true);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn apple_neon_focus_matches_scalar_with_invalid_lanes() {
+        let width = 257;
+        let height = 129;
+        let green = (0..width * height)
+            .map(|index| {
+                let x = (index % width) as f32;
+                let y = (index / width) as f32;
+                (0.35 + 0.2 * (x * 0.17).sin() + 0.1 * (y * 0.23).cos()).max(0.0)
+            })
+            .collect::<Vec<_>>();
+        let valid = (0..green.len())
+            .map(|index| index % 97 != 0 && index % 193 != 0)
+            .collect::<Vec<_>>();
+        let mut scalar = vec![0.0f32; green.len()];
+        let mut neon = vec![0.0f32; green.len()];
+        compute_focus_metric_scalar(&green, &valid, &mut scalar, width, height);
+        // SAFETY: NEON is mandatory on AArch64 and all buffers have matching
+        // validated dimensions.
+        unsafe {
+            compute_focus_metric_apple_neon(&green, &valid, &mut neon, width, height);
+        }
+        for (index, (reference, observed)) in scalar.iter().zip(&neon).enumerate() {
+            assert!(
+                (observed - reference).abs() <= 5e-6 * (1.0 + reference.abs()),
+                "NEON focus mismatch at {index}: {observed} vs {reference}"
+            );
+        }
+    }
+
+    #[test]
     fn rejected_global_bracket_fails_closed() {
         let warp = FrameWarp {
             plane: PlaneTransform::identity(),
@@ -3945,7 +3975,7 @@ mod tests {
         }
         let original_radiance = radiance.clone();
         let mut focus_metric = vec![0.0f32; radiance.len()];
-        compute_focus_metric(&radiance, &valid, &mut focus_metric, width, height);
+        compute_focus_metric(&radiance, &valid, &mut focus_metric, width, height, true);
         let mut glare = vec![0.0f32; radiance.len()];
         detect_glare_likelihood(&radiance, &valid, &flags, &mut glare, width, height, radius);
         let protected_metric = focus_metric
@@ -4405,6 +4435,38 @@ mod tests {
             },
         )
         .unwrap();
+        let scalar_result = fuse_native_group(
+            &group,
+            &meta(2, 1),
+            &NativeFusionConfig {
+                black_level: Some(0.0),
+                white_level: Some(white),
+                tile_size: 32,
+                minimum_alignment_score: 2.0,
+                apple_simd_focus: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let maximum_bayer_error = result
+            .bayer
+            .iter()
+            .zip(&scalar_result.bayer)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+        let maximum_depth_error = result
+            .depth
+            .iter()
+            .zip(&scalar_result.depth)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+        assert!(maximum_bayer_error <= 2e-5);
+        assert!(maximum_depth_error <= 2e-5);
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        assert_eq!(result.focus_kernel, "apple-neon-f32-v1");
+        #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+        assert_eq!(result.focus_kernel, "portable-scalar-f32-v1");
+        assert_eq!(scalar_result.focus_kernel, "portable-scalar-f32-v1");
 
         let mut squared_error = 0.0f64;
         let mut sample_count = 0usize;

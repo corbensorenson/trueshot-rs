@@ -87,6 +87,10 @@ jobs:
     - name: Run Tests
       run: cargo test --verbose --workspace
 
+    - name: Qualify Apple Silicon focus kernel
+      if: matrix.os == 'macos-latest' && runner.arch == 'ARM64'
+      run: ./scripts/run_apple_focus_qualification.sh
+
     - name: Generate OpenAPI spec
       run: cargo run -p trueshot-server -- --openapi-out docs/openapi.json
 
