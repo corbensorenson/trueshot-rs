@@ -5,6 +5,7 @@
 pub mod adaptive_planner;
 pub mod focus_stack;
 pub mod hdr;
+pub mod raw_observation;
 
 pub use adaptive_planner::{
     build_camera_candidates, plan_next_capture, AdaptiveCaptureIteration,
@@ -15,3 +16,8 @@ pub use adaptive_planner::{
 };
 pub use focus_stack::{FocusStackConfig, FocusStacker, StackAlgorithm, StackDirection};
 pub use hdr::{calculate_bracket_evs, HdrAlgorithm, HdrConfig, HdrMerger};
+pub use raw_observation::{
+    observe_nef_roi, observe_raw_roi, verify_observation_candidate, FocusResponseObservation,
+    RadianceObservation, RawAssimilationReport, RawCaptureObservation, RawObservationConfig,
+    RawPosteriorAccumulator,
+};

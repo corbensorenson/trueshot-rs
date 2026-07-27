@@ -21,6 +21,9 @@ pub struct CaptureCandidate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RadianceProbe {
+    /// Stable spatial/CFA identity used for measured posterior assimilation.
+    #[serde(default)]
+    pub probe_id: u32,
     /// Current normalized scene-radiance posterior mean.
     pub mean: f32,
     /// Current posterior variance in normalized radiance units.
@@ -33,6 +36,9 @@ pub struct RadianceProbe {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FocusProbe {
+    /// Stable spatial identity used for measured posterior assimilation.
+    #[serde(default)]
+    pub probe_id: u32,
     pub mean_diopters: f32,
     pub variance_diopters2: f32,
     pub weight: f32,
@@ -872,12 +878,14 @@ mod tests {
     fn posterior() -> CapturePosterior {
         CapturePosterior {
             radiance: vec![RadianceProbe {
+                probe_id: 0,
                 mean: 0.2,
                 variance: 0.2,
                 weight: 1.0,
                 cfa_site: 1,
             }],
             focus: vec![FocusProbe {
+                probe_id: 0,
                 mean_diopters: 2.0,
                 variance_diopters2: 0.2,
                 weight: 1.0,

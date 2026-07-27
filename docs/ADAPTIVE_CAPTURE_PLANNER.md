@@ -8,16 +8,38 @@ posterior information gain per millisecond.
 ## Evidence Contract
 
 - Radiance probes contain anchored linear-radiance means, variances, CFA site,
-  and represented pixel weight.
+  represented pixel weight, and a stable spatial/CFA identity.
 - `radiance_anchor_exposure` is the sensor exposure used by those means.
   Candidate sensor signal is computed from the exact exposure ratio.
 - Focus probes contain posterior mean and variance in diopters, not camera
-  step indices.
+  step indices, and retain a stable spatial identity.
 - Every candidate is evaluated with an exact measured ISO entry from the
   sensor-noise profile. Unsupported ISO values are rejected, never
   interpolated silently.
 - Focus utility is reduced when predicted sensor SNR is poor and becomes zero
   when all represented radiance probes clip.
+
+Completed NEFs can now supply this evidence through the bounded selective RAW
+path in `trueshot-core/src/capture/raw_observation.rs`:
+
+- only the requested RAW ROI is decoded;
+- a deterministic tile/CFA lattice caps work and memory independently of full
+  sensor resolution;
+- camera identity, bit depth, exact ISO calibration, black/white levels,
+  exposure, ROI, focal length, and aperture fail closed;
+- radiance samples are normalized to one anchor exposure with calibrated
+  Poisson-Gaussian variance;
+- fully clipped probes update the posterior as one-sided censored
+  observations through a moment-matched truncated Gaussian, while mixed
+  clipping is never misrepresented as a bound on a textured tile mean;
+- same-CFA two-pixel focus energy is noise-whitened and exposure-normalized;
+- repeated frames reduce posterior variance by precision accumulation; and
+- three or more physically distinct, nonuniform diopter planes produce a
+  continuous log-response peak and propagated uncertainty.
+
+The accumulator rejects camera, calibration artifact, ROI, focal-length, or
+aperture drift. Near-identical focus metadata is merged within a tight
+diopter tolerance so metadata jitter cannot fabricate extra focus planes.
 
 ## Constraints
 
@@ -83,12 +105,11 @@ archival output.
 
 ## Remaining Production Integration
 
-- Build compact radiance/focus posterior probes from preview and completed RAW
-  captures.
 - Map selected diopters to calibrated lens-drive commands and verify achieved
   focus from captured RAW metadata; unsupported lenses must fail closed.
 - Feed measured motion, readout/settle latency, thermals, and lens travel time
   back into the posterior after each capture.
-- Wire the planner/trace contract into the production server camera adapter.
+- Wire measured NEF observations, planner decisions, and the trace contract
+  into an interruption-safe production server capture session.
 - Validate at least 20% capture-time reduction at equal quality, or higher
   quality at equal time, on the preregistered real stack corpus.

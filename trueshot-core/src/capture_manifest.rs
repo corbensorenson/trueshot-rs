@@ -664,12 +664,14 @@ mod tests {
         };
         let mut posterior = CapturePosterior {
             radiance: vec![RadianceProbe {
+                probe_id: 0,
                 mean: 0.2,
                 variance: 0.2,
                 weight: 1.0,
                 cfa_site: 1,
             }],
             focus: vec![FocusProbe {
+                probe_id: 0,
                 mean_diopters: 2.0,
                 variance_diopters2: 0.2,
                 weight: 1.0,
