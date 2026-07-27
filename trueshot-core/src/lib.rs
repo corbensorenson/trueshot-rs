@@ -28,6 +28,7 @@ pub mod hierarchical_pipeline;
 pub mod intrinsics;
 pub mod inventory;
 pub mod joint_demosaic;
+pub mod lens_psf;
 pub mod logging;
 pub mod metrics;
 pub mod native_fusion;

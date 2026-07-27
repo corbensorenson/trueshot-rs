@@ -1,0 +1,67 @@
+{
+  "schema": "trueshot.lens-psf-qualification.v1",
+  "date": "2026-07-27",
+  "status": "pass_with_retained_real_lens_profiles_pending",
+  "source": {
+    "parent_commit": "32b18e3180649c2adf33211bbd526f08365e8148",
+    "lens_psf_sha256": "85331ba440b4752913b83e982705ffb37bd1bf9e5fdebc8302beeae329ca863a",
+    "native_fusion_sha256": "501c41bded3ed08fa4ca5788cb11d0a390e6625287affa53d962a3b9692deac7",
+    "cli_sha256": "ebfa5531bfa9f0093e2f6becf0d816157a02f0b1d3949cbc70b762c19c5c5a70",
+    "benchmark_sha256": "faef375c3dd85ca1a93266e069f54e967142d185da45aa0c82f3d10a60d4ab9b"
+  },
+  "synthetic_fit_holdout": {
+    "focus_knots": 3,
+    "radius_knots": 3,
+    "fit_measurements": 18,
+    "holdout_measurements": 18,
+    "modeled_corner_psf_increase": 0.22,
+    "ideal_holdout_p95_relative_error": 0.36061859,
+    "calibrated_holdout_p95_relative_error": 0.00598216,
+    "p95_error_reduction": 0.98341137,
+    "maximum_p95_gate": 0.05,
+    "minimum_reduction_gate": 0.50,
+    "fusion_tile_pixel_mismatches": 0,
+    "depth_tile_mismatches": 0,
+    "trimap_tile_mismatches": 0
+  },
+  "evidence_integrity": {
+    "source_sha256_required": true,
+    "duplicate_source_sha256_rejected": true,
+    "unreferenced_measurement_source_rejected": true,
+    "unreferenced_manifest_source_rejected": true,
+    "fit_holdout_sources_disjoint": true,
+    "measurement_radius_bound_to_declared_knot": true,
+    "missing_fit_cell_rejected": true,
+    "missing_holdout_cell_rejected": true,
+    "independent_holdout_required": true,
+    "publication_thresholds_runtime_revalidated": true,
+    "calibrated_sensor_coordinates_monotonic": true,
+    "runtime_identity_mismatch_rejected": true,
+    "atomic_no_overwrite_publication": true,
+    "concurrent_publication_single_winner": true,
+    "published_profile_runtime_reload": true
+  },
+  "private_nef_ideal_fallback_integration": {
+    "redistributable": false,
+    "frames": 21,
+    "width": 1310,
+    "height": 1304,
+    "configured_memory_budget_mib": 512,
+    "lens_psf_calibrated": false,
+    "lens_psf_calibration_id": null,
+    "physical_focus_policy": "ideal_thin_lens_explicit_fallback",
+    "depth_refusion_pixels": 679074,
+    "frequency_separated_pixels": 52157,
+    "byte_identical_tiff_png_artifacts_against_pre_profile_build": 10,
+    "fused_tiff_sha256": "626ddbe959ccf1a4e05baefc443875449c301a0ac72c8e96a9118af450cc63e1",
+    "boundary_trimap_sha256": "8dec03d65210b9743f7304f46b145e18026ac98052819abd11fa1a6205be628e",
+    "frequency_flags_sha256": "56d4af0fa8a5a409efe341dd68ee0a3ae3e95045bf0d6391163d3e79f8112829"
+  },
+  "caveats": [
+    "Synthetic recovery proves the bounded fitter and runtime plumbing, not a real-lens quality claim.",
+    "The private NEF stack has no retained lens PSF profile and therefore exercises only explicit fallback compatibility.",
+    "Real qualification requires retained target captures for every marketed lens, focal length, aperture, focus envelope, field radius, and relevant wavelength and temperature.",
+    "Automated target-to-measurement extraction remains to be implemented and independently validated.",
+    "No competitor-superiority claim is made by this record."
+  ]
+}

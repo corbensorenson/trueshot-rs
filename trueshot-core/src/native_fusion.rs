@@ -12,6 +12,7 @@ use crate::focus_evidence::{
 };
 #[cfg(test)]
 use crate::focus_evidence::{compute_focus_metric_scalar, sorted_trimmed_focus_mean_at};
+use crate::lens_psf::LensPsfProfile;
 use crate::sensor_correction::SensorCorrectionProfile;
 use crate::sensor_noise::{SensorNoiseModel, SensorNoiseProfile};
 use crate::smart_loader::NativeFrameGroup;
@@ -103,6 +104,9 @@ pub struct NativeFusionConfig {
     pub sensor_noise_profile: Option<SensorNoiseProfile>,
     /// Exact camera/geometry/optics spatial gain and defect calibration.
     pub sensor_correction_profile: Option<SensorCorrectionProfile>,
+    /// Exact camera/lens/aperture/focus breathing, pupil, and field-PSF
+    /// calibration. Missing calibration is explicitly reported as ideal-only.
+    pub lens_psf_profile: Option<LensPsfProfile>,
     /// Apply confidence- and edge-aware depth regularization.
     pub regularize_depth: bool,
     /// Re-sample corrected focus hypotheses so regularization affects pixels,
@@ -154,6 +158,7 @@ impl Default for NativeFusionConfig {
             read_noise_dn: 3.0,
             sensor_noise_profile: None,
             sensor_correction_profile: None,
+            lens_psf_profile: None,
             regularize_depth: true,
             depth_consistent_refusion: true,
             aperture_visibility_correction: true,
@@ -442,6 +447,11 @@ pub struct NativeFusionResult {
     pub noise_model_calibrated: bool,
     /// Digest identity of the applied spatial correction artifact.
     pub sensor_correction_id: Option<String>,
+    /// Digest identity of the applied lens breathing/pupil/field-PSF artifact.
+    pub lens_psf_calibration_id: Option<String>,
+    /// True only when physical depth, visibility, and boundary support used a
+    /// retained lens-specific PSF calibration.
+    pub lens_psf_calibrated: bool,
     /// Pixels whose selected source required persistent-defect replacement.
     pub defect_repaired_pixels: usize,
     /// Pixels re-sampled after physical/regularized focus correction, including
@@ -497,6 +507,7 @@ impl NativeFusionResult {
             + self.foreground_mask.len()
             + self.transforms.len() * std::mem::size_of::<PlaneTransform>()
             + self.frame_alignments.len() * std::mem::size_of::<FrameAlignmentSummary>()
+            + self.lens_psf_calibration_id.as_ref().map_or(0, String::len)
     }
 }
 
@@ -733,9 +744,13 @@ struct HdrFrameObservation {
 struct PhysicalFocusModel {
     distances_m: Vec<f32>,
     diopters: Vec<f32>,
+    sensor_distances_mm: Vec<f32>,
     focal_length_mm: f32,
     aperture: f32,
     pixel_pitch_mm: Option<f32>,
+    sensor_origin_x: f32,
+    sensor_origin_y: f32,
+    lens_psf_profile: Option<LensPsfProfile>,
 }
 
 impl PhysicalFocusModel {
@@ -770,35 +785,85 @@ impl PhysicalFocusModel {
         lower as f32 + ((diopter - self.diopters[lower]) / denominator).clamp(0.0, 1.0)
     }
 
-    fn psf_sampling_balance(&self, best: usize) -> f32 {
+    fn psf_sampling_balance(&self, best: usize, local_x: f32, local_y: f32) -> f32 {
         if best == 0 || best + 1 >= self.distances_m.len() {
             return 1.0;
         }
-        let left = defocus_circle_mm(
-            self.focal_length_mm,
-            self.aperture,
+        let left = self.defocus_circle_mm(
             self.distances_m[best],
             self.distances_m[best - 1],
+            local_x,
+            local_y,
         );
-        let right = defocus_circle_mm(
-            self.focal_length_mm,
-            self.aperture,
+        let right = self.defocus_circle_mm(
             self.distances_m[best],
             self.distances_m[best + 1],
+            local_x,
+            local_y,
         );
         left.min(right) / left.max(right).max(1e-8)
     }
 
     fn sensor_distance_at_index(&self, index: f32) -> f32 {
-        object_to_sensor_distance_mm(self.focal_length_mm, self.distance_at_index(index))
+        if self.lens_psf_profile.is_some() {
+            interpolate_indexed(&self.sensor_distances_mm, index)
+        } else {
+            object_to_sensor_distance_mm(self.focal_length_mm, self.distance_at_index(index))
+        }
     }
 
     fn index_at_sensor_distance(&self, sensor_distance_mm: f32) -> f32 {
-        let object_distance_mm =
-            self.focal_length_mm * sensor_distance_mm / (sensor_distance_mm - self.focal_length_mm);
-        let diopter = 1000.0 / object_distance_mm;
-        index_in_monotonic_coordinates(&self.diopters, diopter)
+        if self.lens_psf_profile.is_some() {
+            index_in_monotonic_coordinates(&self.sensor_distances_mm, sensor_distance_mm)
+        } else {
+            let object_distance_mm = self.focal_length_mm * sensor_distance_mm
+                / (sensor_distance_mm - self.focal_length_mm);
+            index_in_monotonic_coordinates(&self.diopters, 1000.0 / object_distance_mm)
+        }
     }
+
+    fn defocus_circle_mm(
+        &self,
+        focused_distance_m: f32,
+        subject_distance_m: f32,
+        local_x: f32,
+        local_y: f32,
+    ) -> f32 {
+        if let Some(profile) = &self.lens_psf_profile {
+            let radius = profile.field_radius(
+                self.sensor_origin_x + local_x,
+                self.sensor_origin_y + local_y,
+            );
+            profile.defocus_circle_mm(focused_distance_m, subject_distance_m, radius)
+        } else {
+            defocus_circle_mm(
+                self.focal_length_mm,
+                self.aperture,
+                focused_distance_m,
+                subject_distance_m,
+            )
+        }
+    }
+
+    fn conservative_aperture_radius_mm(&self) -> f32 {
+        if let Some(profile) = &self.lens_psf_profile {
+            self.distances_m
+                .iter()
+                .map(|distance| profile.conservative_aperture_radius_mm(*distance))
+                .fold(0.0, f32::max)
+        } else {
+            self.focal_length_mm / (2.0 * self.aperture)
+        }
+    }
+}
+
+fn interpolate_indexed(values: &[f32], index: f32) -> f32 {
+    let lower = index
+        .floor()
+        .clamp(0.0, values.len().saturating_sub(1) as f32) as usize;
+    let upper = (lower + 1).min(values.len() - 1);
+    let fraction = (index - lower as f32).clamp(0.0, 1.0);
+    values[lower] + (values[upper] - values[lower]) * fraction
 }
 
 fn index_in_monotonic_coordinates(coordinates: &[f32], value: f32) -> f32 {
@@ -847,7 +912,12 @@ pub fn fuse_native_group(
     let focus_steps = usize::from(meta.focus_steps).max(1);
     let exposures_per_focus = group.len() / focus_steps;
     let calibrations = build_calibrations(group, config)?;
-    let focus_model = physical_focus_model(group, focus_steps, exposures_per_focus);
+    let focus_model = physical_focus_model(
+        group,
+        focus_steps,
+        exposures_per_focus,
+        config.lens_psf_profile.as_ref(),
+    );
     let (glare_radius_pixels, glare_physical_scale) = resolve_glare_radius_pixels(group, config);
     let radiance_anchor = calibrations
         .iter()
@@ -1119,6 +1189,13 @@ pub fn fuse_native_group(
             .sensor_correction_profile
             .as_ref()
             .map(|profile| profile.calibration_id.clone()),
+        lens_psf_calibration_id: focus_model
+            .as_ref()
+            .and_then(|model| model.lens_psf_profile.as_ref())
+            .map(|profile| profile.calibration_id.clone()),
+        lens_psf_calibrated: focus_model
+            .as_ref()
+            .is_some_and(|model| model.lens_psf_profile.is_some()),
         defect_repaired_pixels,
         depth_refusion_pixels,
         visibility_adjusted_pixels,
@@ -1165,6 +1242,9 @@ fn validate_group(
         profile.validate()?;
     }
     if let Some(profile) = &config.sensor_correction_profile {
+        profile.validate()?;
+    }
+    if let Some(profile) = &config.lens_psf_profile {
         profile.validate()?;
     }
     if !group.rect.x.is_finite()
@@ -1322,6 +1402,37 @@ fn validate_group(
                 );
             }
         }
+        if let Some(profile) = &config.lens_psf_profile {
+            let aperture = metadata
+                .aperture
+                .context("Lens PSF calibration requires aperture metadata")?;
+            let focal_length = metadata
+                .focal_length
+                .context("Lens PSF calibration requires focal-length metadata")?;
+            let lens_model = metadata
+                .lens_model
+                .as_deref()
+                .context("Lens PSF calibration requires lens-model metadata")?;
+            let focus_distance = metadata
+                .focus_distance
+                .context("Lens PSF calibration requires focus-distance metadata")?;
+            if !profile.matches(
+                &metadata.camera_make,
+                &metadata.camera_model,
+                metadata.width,
+                metadata.height,
+                lens_model,
+                focal_length,
+                aperture,
+                focus_distance,
+            ) {
+                anyhow::bail!(
+                    "Lens PSF profile {} does not match frame {} camera, sensor, lens, aperture, focal length, or focus envelope",
+                    profile.calibration_id,
+                    index
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1330,6 +1441,7 @@ fn physical_focus_model(
     group: &NativeFrameGroup<'_>,
     focus_steps: usize,
     exposures_per_focus: usize,
+    lens_psf_profile: Option<&LensPsfProfile>,
 ) -> Option<PhysicalFocusModel> {
     if focus_steps < 2 {
         return None;
@@ -1409,12 +1521,38 @@ fn physical_focus_model(
                 None
             }
         });
+    let sensor_distances_mm = distances_m
+        .iter()
+        .map(|distance| {
+            lens_psf_profile.map_or_else(
+                || object_to_sensor_distance_mm(focal_length_mm, *distance),
+                |profile| profile.sensor_distance_mm(*distance),
+            )
+        })
+        .collect::<Vec<_>>();
+    let sensor_distances_monotonic = sensor_distances_mm
+        .windows(2)
+        .all(|pair| pair[1] - pair[0] > 1e-7)
+        || sensor_distances_mm
+            .windows(2)
+            .all(|pair| pair[0] - pair[1] > 1e-7);
+    if !sensor_distances_monotonic {
+        tracing::warn!(
+            "Physical focus model disabled: calibrated sensor distances are non-monotonic"
+        );
+        return None;
+    }
+    let (sensor_origin_x, sensor_origin_y, _, _) = group.rect.to_bounds();
     Some(PhysicalFocusModel {
         distances_m,
         diopters,
+        sensor_distances_mm,
         focal_length_mm,
         aperture,
         pixel_pitch_mm,
+        sensor_origin_x: sensor_origin_x as f32,
+        sensor_origin_y: sensor_origin_y as f32,
+        lens_psf_profile: lens_psf_profile.cloned(),
     })
 }
 
@@ -2560,7 +2698,14 @@ fn process_band(
                 depth_output[output_index] = focus_position / depth_denominator;
                 confidence_output[output_index] =
                     if let Some(model) = focus_model {
-                        separation * (0.5 + 0.5 * model.psf_sampling_balance(best_focus))
+                        separation
+                            * (0.5
+                                + 0.5
+                                    * model.psf_sampling_balance(
+                                        best_focus,
+                                        (x0 + tile_x) as f32,
+                                        (band_y0 + tile_y) as f32,
+                                    ))
                     } else {
                         separation
                     } * (1.0 - config.glare_focus_suppression * selected_glare).clamp(0.0, 1.0);
@@ -4097,18 +4242,12 @@ fn build_physical_boundary_trimap(
         let right_focus = surface[right].clamp(0.0, 1.0) * focus_denominator;
         let left_distance = model.distance_at_index(left_focus);
         let right_distance = model.distance_at_index(right_focus);
-        defocus_circle_mm(
-            model.focal_length_mm,
-            model.aperture,
-            left_distance,
-            right_distance,
-        )
-        .max(defocus_circle_mm(
-            model.focal_length_mm,
-            model.aperture,
-            right_distance,
-            left_distance,
-        )) / pixel_pitch_mm
+        let local_x = ((left % width) + (right % width)) as f32 * 0.5;
+        let local_y = ((left / width) + (right / width)) as f32 * 0.5;
+        model
+            .defocus_circle_mm(left_distance, right_distance, local_x, local_y)
+            .max(model.defocus_circle_mm(right_distance, left_distance, local_x, local_y))
+            / pixel_pitch_mm
     };
     let mut seed_pair = |left: usize, right: usize| {
         let measured_radius = physical_radius(left, right, source_depth);
@@ -4226,7 +4365,7 @@ fn project_aperture_visibility(
     if width == 0 || height == 0 || depth.len() != width * height || model.distances_m.len() < 2 {
         return (0, vec![false; depth.len()]);
     }
-    let aperture_radius_mm = model.focal_length_mm / (2.0 * model.aperture);
+    let aperture_radius_mm = model.conservative_aperture_radius_mm();
     // The paper recommends doubling the theoretical halo extent for real
     // compound lenses whose pupils deviate from the paraxial thin-lens model.
     let conservative_aperture_radius_mm = 2.0 * aperture_radius_mm;
@@ -4513,6 +4652,7 @@ fn bilinear_f64(image: &Array2<f64>, x: f64, y: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lens_psf::{LensPsfFocusKnot, LensPsfProfile, LENS_PSF_PROFILE_SCHEMA};
     use crate::nef::parser::{SensorGeometry, SensorLevels, Z9Metadata};
     use crate::sensor_correction::{
         DefectPixel, SensorCorrectionProfile, SENSOR_CORRECTION_PROFILE_SCHEMA,
@@ -4593,6 +4733,40 @@ mod tests {
             raw_holdout_p95_relative_error: 0.2,
             corrected_holdout_p95_relative_error: 0.01,
             calibration_id: "sha256:synthetic-spatial-correction".to_string(),
+        }
+    }
+
+    fn calibrated_lens_psf_profile() -> LensPsfProfile {
+        LensPsfProfile {
+            schema: LENS_PSF_PROFILE_SCHEMA.to_string(),
+            camera_make: "Nikon".to_string(),
+            camera_model: "Z9".to_string(),
+            sensor_width: 8_256,
+            sensor_height: 5_504,
+            lens_model: "NIKKOR Z MC 105mm f/2.8 VR S".to_string(),
+            nominal_focal_length_mm: 105.0,
+            aperture: 1.0,
+            measurement_set_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            radius_knots: vec![0.0, 0.5, 1.0],
+            focus_knots: [0.5f32, 1.0, 2.0]
+                .into_iter()
+                .enumerate()
+                .map(|(index, focus_distance_m)| LensPsfFocusKnot {
+                    focus_distance_m,
+                    effective_focal_length_mm: 112.0 - index as f32 * 2.5,
+                    entrance_pupil_scale: 1.20 - index as f32 * 0.05,
+                    radial_psf_scale: vec![1.0, 1.08, 1.24],
+                })
+                .collect(),
+            fit_measurements: 18,
+            holdout_measurements: 18,
+            ideal_holdout_p95_relative_error: 0.25,
+            calibrated_holdout_p95_relative_error: 0.01,
+            maximum_holdout_p95_relative_error: 0.05,
+            minimum_holdout_p95_error_reduction: 0.50,
+            calibration_id: "sha256:synthetic-lens-psf".to_string(),
         }
     }
 
@@ -4724,9 +4898,16 @@ mod tests {
         PhysicalFocusModel {
             distances_m: distances_m.to_vec(),
             diopters: distances_m.iter().map(|distance| 1.0 / distance).collect(),
+            sensor_distances_mm: distances_m
+                .iter()
+                .map(|distance| object_to_sensor_distance_mm(focal_length_mm, *distance))
+                .collect(),
             focal_length_mm,
             aperture: 8.0,
             pixel_pitch_mm: Some(35.9 / 8_256.0),
+            sensor_origin_x: 0.0,
+            sensor_origin_y: 0.0,
+            lens_psf_profile: None,
         }
     }
 
@@ -4763,7 +4944,7 @@ mod tests {
             metadata.clone(),
         )
         .unwrap();
-        let model = physical_focus_model(&group, 3, 1).unwrap();
+        let model = physical_focus_model(&group, 3, 1, None).unwrap();
         assert_eq!(model.diopters, vec![4.0, 2.0, 1.0]);
         assert!(model.pixel_pitch_mm.is_some());
 
@@ -4777,7 +4958,97 @@ mod tests {
             metadata,
         )
         .unwrap();
-        assert!(physical_focus_model(&nonmonotonic, 3, 1).is_none());
+        assert!(physical_focus_model(&nonmonotonic, 3, 1, None).is_none());
+    }
+
+    #[test]
+    fn calibrated_lens_psf_changes_physical_geometry_and_is_attributed() {
+        let width = 16;
+        let height = 16;
+        let pixels = (0..3 * width * height)
+            .map(|index| 2_000 + (index % (width * height)) as u16)
+            .collect::<Vec<_>>();
+        let mut frame_metadata = vec![metadata(1.0), metadata(1.0), metadata(1.0)];
+        for (frame, distance) in frame_metadata.iter_mut().zip([0.5, 1.0, 2.0]) {
+            frame.focus_distance = Some(distance);
+        }
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            3,
+            width,
+            height,
+            Rect::new(8_000.0, 5_200.0, width as f64, height as f64),
+            frame_metadata,
+        )
+        .unwrap();
+        let profile = calibrated_lens_psf_profile();
+        let ideal = physical_focus_model(&group, 3, 1, None).unwrap();
+        let calibrated = physical_focus_model(&group, 3, 1, Some(&profile)).unwrap();
+        let ideal_blur = ideal.defocus_circle_mm(1.0, 1.2, 8.0, 8.0);
+        let calibrated_blur = calibrated.defocus_circle_mm(1.0, 1.2, 8.0, 8.0);
+        assert!(calibrated_blur > ideal_blur * 1.25);
+        let center_blur = profile.defocus_circle_mm(1.0, 1.2, 0.0);
+        let corner_blur = profile.defocus_circle_mm(1.0, 1.2, 1.0);
+        assert!(corner_blur > center_blur * 1.20);
+        assert!(
+            (calibrated.sensor_distance_at_index(1.0) - ideal.sensor_distance_at_index(1.0)).abs()
+                > 0.1
+        );
+
+        let base = NativeFusionConfig {
+            lens_psf_profile: Some(profile),
+            regularize_depth: false,
+            tile_size: 16,
+            ..Default::default()
+        };
+        let result = fuse_native_group(&group, &meta(3, 1), &base).unwrap();
+        let untiled = fuse_native_group(
+            &group,
+            &meta(3, 1),
+            &NativeFusionConfig {
+                tile_size: 128,
+                ..base
+            },
+        )
+        .unwrap();
+        assert!(result.lens_psf_calibrated);
+        assert_eq!(
+            result.lens_psf_calibration_id.as_deref(),
+            Some("sha256:synthetic-lens-psf")
+        );
+        assert_eq!(result.bayer, untiled.bayer);
+        assert_eq!(result.depth, untiled.depth);
+        assert_eq!(result.boundary_trimap, untiled.boundary_trimap);
+    }
+
+    #[test]
+    fn lens_psf_identity_mismatch_fails_before_fusion() {
+        let pixels = vec![2048u16; 3 * 16 * 16];
+        let mut frame_metadata = vec![metadata(1.0), metadata(1.0), metadata(1.0)];
+        for (frame, distance) in frame_metadata.iter_mut().zip([0.5, 1.0, 2.0]) {
+            frame.focus_distance = Some(distance);
+        }
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            3,
+            16,
+            16,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            frame_metadata,
+        )
+        .unwrap();
+        let mut profile = calibrated_lens_psf_profile();
+        profile.camera_model = "Different Camera".to_string();
+        let error = fuse_native_group(
+            &group,
+            &meta(3, 1),
+            &NativeFusionConfig {
+                lens_psf_profile: Some(profile),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match frame"));
     }
 
     #[test]

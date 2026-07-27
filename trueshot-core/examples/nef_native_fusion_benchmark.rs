@@ -5,6 +5,7 @@ use trueshot_core::demosaic_ahd::ahd_demosaic_f32_owned;
 use trueshot_core::export::{
     generate_output_path, save_depth_tiff, save_png, save_tiff16_from_f32,
 };
+use trueshot_core::lens_psf::LensPsfProfile;
 use trueshot_core::native_fusion::{
     fuse_native_group, NativeFusionConfig, FUSION_FLAG_CENSORED, FUSION_FLAG_CENSOR_CONFLICT,
     FUSION_FLAG_OUTLIER_REJECTED, FUSION_FLAG_SOURCE_FALLBACK, FUSION_FLAG_UNCALIBRATED_NOISE,
@@ -19,7 +20,8 @@ fn main() -> Result<()> {
     let input = arguments.next().map(PathBuf::from).context(
         "usage: nef_native_fusion_benchmark <nef_dir> [output_dir] \
              [--workers N] [--no-depth-refusion] [--no-frequency-deghost] \
-             [--frequency-ablation] [--deghost-strength 0..2]",
+             [--frequency-ablation] [--deghost-strength 0..2] \
+             [--lens-psf-profile profile.json]",
     )?;
     let mut output = None;
     let mut workers = None;
@@ -27,6 +29,7 @@ fn main() -> Result<()> {
     let mut frequency_deghost = true;
     let mut frequency_ablation = false;
     let mut deghost_strength = 1.0;
+    let mut lens_psf_profile = None;
     while let Some(argument) = arguments.next() {
         if argument == "--workers" {
             workers = Some(
@@ -56,6 +59,12 @@ fn main() -> Result<()> {
             if !(0.0..=2.0).contains(&deghost_strength) {
                 anyhow::bail!("--deghost-strength must be between 0 and 2");
             }
+        } else if argument == "--lens-psf-profile" {
+            lens_psf_profile = Some(PathBuf::from(
+                arguments
+                    .next()
+                    .context("--lens-psf-profile requires a JSON path")?,
+            ));
         } else if argument.to_string_lossy().starts_with('-') {
             anyhow::bail!("Unknown option {}", argument.to_string_lossy());
         } else if output.is_none() {
@@ -76,6 +85,7 @@ fn main() -> Result<()> {
         frequency_deghost,
         frequency_ablation,
         deghost_strength,
+        lens_psf_profile.as_deref(),
     )
 }
 
@@ -87,6 +97,7 @@ fn run(
     frequency_deghost: bool,
     frequency_ablation: bool,
     deghost_strength: f32,
+    lens_psf_profile_path: Option<&Path>,
 ) -> Result<()> {
     if let Some(output) = output {
         std::fs::create_dir_all(output)?;
@@ -98,6 +109,13 @@ fn run(
         ..Default::default()
     };
     let loader = SmartLoader::new(options);
+    let lens_psf_profile = lens_psf_profile_path
+        .map(LensPsfProfile::load_json)
+        .transpose()
+        .context("Load lens PSF profile")?;
+    if let Some(profile) = &lens_psf_profile {
+        println!("lens PSF calibration: {}", profile.calibration_id);
+    }
     let scan_started = Instant::now();
     let sequences = loader.scan_and_group(input)?;
     println!(
@@ -118,6 +136,7 @@ fn run(
             depth_consistent_refusion: depth_refusion,
             frequency_separated_deghosting: frequency_deghost,
             deghost_strength,
+            lens_psf_profile: lens_psf_profile.clone(),
             ..NativeFusionConfig::default()
         };
         let fusion_started = Instant::now();

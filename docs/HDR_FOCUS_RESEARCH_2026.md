@@ -115,6 +115,21 @@ TrueShot should:
 
 Sources: [Scene-Adaptive Image Acquisition for Focus Stacking](https://image.ee.tsinghua.edu.cn/pdf/2018_ICIP_lwt.pdf) and [Depth From Focus With Your Mobile Phone](https://openaccess.thecvf.com/content_cvpr_2015/papers/Suwajanakorn_Depth_From_Focus_2015_CVPR_paper.pdf).
 
+Implementation state (2026-07-27): `trueshot.lens-psf.v1` now retains
+focus-breathing effective focal length, entrance-pupil scale, and residual
+field PSF on bounded focus/normalized-radius grids. Calibration consumes a
+source-hashed, preregistered fit/holdout measurement artifact and refuses
+publication unless every grid cell has evidence and independent holdout p95
+error and improvement gates pass. Runtime identity binds camera, full sensor
+geometry, lens, focal length, aperture, and focus envelope; interpolation is
+in diopters and sensor radius. Calibrated image distance drives metric depth,
+field PSF drives sub-plane confidence and crossing support, and the maximum
+retained effective pupil drives the linear aperture projection. The exact
+profile digest is exported. No profile remains a visible
+`ideal_thin_lens_explicit_fallback`, not an implied calibration. See
+`docs/LENS_PSF_CALIBRATION.md`; retained synthetic and fallback evidence is in
+`docs/benchmarks/lens_psf_qualification_2026-07-27.json`.
+
 ### 3. Occlusion-correct, halo-free compositing
 
 Focus halos are not just bad mask smoothing. At an occlusion boundary, a

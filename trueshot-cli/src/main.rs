@@ -40,6 +40,9 @@ use trueshot_core::intrinsics::{
     estimate_intrinsics_with_report, IntrinsicsReport, IntrinsicsSource,
 };
 use trueshot_core::inventory::{Device, Inventory, Machine, Model, Sequence, SequenceStatus};
+use trueshot_core::lens_psf::{
+    calibrate_lens_psf, LensPsfCalibrationConfig, LensPsfMeasurementSet, LensPsfProfile,
+};
 use trueshot_core::licensing::{Feature, LicenseError, LicenseManager};
 use trueshot_core::native_fusion::{
     fuse_native_group, fusion_provenance_preview_with_frequency, NativeFusionConfig,
@@ -245,6 +248,10 @@ enum Commands {
         #[arg(long)]
         sensor_correction_profile: Option<PathBuf>,
 
+        /// Measured lens breathing/pupil/field-PSF profile for native burst fusion
+        #[arg(long)]
+        lens_psf_profile: Option<PathBuf>,
+
         /// Skip the second CFA-safe pass when depth regularization changes a focus plane
         #[arg(long)]
         no_depth_refusion: bool,
@@ -347,6 +354,25 @@ enum Commands {
         /// Absolute tolerance around nominal 90%/95% residual coverage
         #[arg(long, default_value_t = 0.03)]
         coverage_tolerance: f32,
+    },
+
+    /// Fit a digest-bound lens breathing, pupil, and field-PSF profile
+    CalibrateLensPsf {
+        /// Retained fit/holdout defocus measurement-set JSON
+        #[arg(short, long)]
+        measurements: PathBuf,
+
+        /// Output lens PSF profile JSON
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Maximum corrected holdout p95 relative defocus error
+        #[arg(long, default_value_t = 0.05)]
+        maximum_p95_error: f32,
+
+        /// Minimum p95 error reduction versus the ideal thin-lens model
+        #[arg(long, default_value_t = 0.50)]
+        minimum_error_reduction: f32,
     },
 
     /// Manage model inventory
@@ -576,7 +602,10 @@ fn main() -> Result<()> {
             .with_max_level(tracing::Level::DEBUG)
             .init();
     } else {
-        let level = if matches!(&cli.command, Commands::CalibrateNoise { .. }) {
+        let level = if matches!(
+            &cli.command,
+            Commands::CalibrateNoise { .. } | Commands::CalibrateLensPsf { .. }
+        ) {
             tracing::Level::WARN
         } else {
             tracing::Level::INFO
@@ -606,6 +635,7 @@ fn main() -> Result<()> {
             no_glare_focus,
             sensor_noise_profile,
             sensor_correction_profile,
+            lens_psf_profile,
             no_depth_refusion,
             trial,
             trial_days,
@@ -626,6 +656,7 @@ fn main() -> Result<()> {
             no_glare_focus,
             sensor_noise_profile,
             sensor_correction_profile,
+            lens_psf_profile,
             no_depth_refusion,
             trial,
             trial_days,
@@ -670,6 +701,17 @@ fn main() -> Result<()> {
             max_samples_per_pair_per_site,
             maximum_variance_error,
             coverage_tolerance,
+        ),
+        Commands::CalibrateLensPsf {
+            measurements,
+            output,
+            maximum_p95_error,
+            minimum_error_reduction,
+        } => cmd_calibrate_lens_psf(
+            measurements,
+            output,
+            maximum_p95_error,
+            minimum_error_reduction,
         ),
         Commands::Inventory { action } => cmd_inventory(action),
         Commands::Status {
@@ -727,6 +769,7 @@ fn cmd_process(
     no_glare_focus: bool,
     sensor_noise_profile: Option<PathBuf>,
     sensor_correction_profile: Option<PathBuf>,
+    lens_psf_profile: Option<PathBuf>,
     no_depth_refusion: bool,
     trial: bool,
     trial_days: Option<i64>,
@@ -740,7 +783,9 @@ fn cmd_process(
     if !glare_spread_um.is_finite() || !(1.0..=2_000.0).contains(&glare_spread_um) {
         anyhow::bail!("Glare spread must be between 1 and 2000 micrometers");
     }
-    if (sensor_noise_profile.is_some() || sensor_correction_profile.is_some())
+    if (sensor_noise_profile.is_some()
+        || sensor_correction_profile.is_some()
+        || lens_psf_profile.is_some())
         && mode != Mode::Burst
     {
         anyhow::bail!("Sensor calibration profiles currently apply only to --mode burst");
@@ -793,6 +838,7 @@ fn cmd_process(
             !no_glare_focus,
             sensor_noise_profile.as_deref(),
             sensor_correction_profile.as_deref(),
+            lens_psf_profile.as_deref(),
             !no_depth_refusion,
             Some(&inventory_ctx),
             Some(&mut run_state),
@@ -1720,6 +1766,79 @@ fn cmd_calibrate_noise(
     Ok(())
 }
 
+fn cmd_calibrate_lens_psf(
+    measurements: PathBuf,
+    output: PathBuf,
+    maximum_p95_error: f32,
+    minimum_error_reduction: f32,
+) -> Result<()> {
+    if output.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite lens PSF profile {}",
+            output.display()
+        );
+    }
+    let report_path = output.with_extension("report.json");
+    if report_path.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite lens PSF report {}",
+            report_path.display()
+        );
+    }
+    let set = LensPsfMeasurementSet::load_json(&measurements)
+        .with_context(|| format!("Load lens PSF measurements {}", measurements.display()))?;
+    let config = LensPsfCalibrationConfig {
+        maximum_calibrated_p95_relative_error: maximum_p95_error,
+        minimum_p95_error_reduction: minimum_error_reduction,
+        ..Default::default()
+    };
+    let (profile, report) = calibrate_lens_psf(&set, &config)?;
+    let measurement_sha256 = sha256_file(&measurements)?;
+    if !report.passed {
+        write_atomic_json(
+            &report_path,
+            &serde_json::json!({
+                "schema": "trueshot.lens-psf-calibration-report.v1",
+                "measurement_path": measurements.display().to_string(),
+                "measurement_sha256": measurement_sha256,
+                "profile_path": output.display().to_string(),
+                "profile_published": false,
+                "config": config,
+                "evaluation": report
+            }),
+        )?;
+        anyhow::bail!(
+            "Lens PSF holdout gates failed; profile was not published. Inspect {}",
+            report_path.display()
+        );
+    }
+    let profile = profile.context("Passing lens PSF calibration produced no profile")?;
+    profile.save_json(&output)?;
+    let published = LensPsfProfile::load_json(&output)
+        .context("Published lens PSF profile failed runtime validation")?;
+    write_atomic_json(
+        &report_path,
+        &serde_json::json!({
+            "schema": "trueshot.lens-psf-calibration-report.v1",
+            "measurement_path": measurements.display().to_string(),
+            "measurement_sha256": measurement_sha256,
+            "profile_path": output.display().to_string(),
+            "profile_published": true,
+            "profile_sha256": published.calibration_id.strip_prefix("sha256:"),
+            "config": config,
+            "evaluation": report
+        }),
+    )?;
+    println!(
+        "{} Lens PSF profile published: {} ({})",
+        CHECK,
+        style(output.display()).green(),
+        published.calibration_id
+    );
+    println!("  Calibration report: {}", report_path.display());
+    Ok(())
+}
+
 fn inspect_noise_calibration_directory(
     directory: &Path,
     role: &str,
@@ -1935,6 +2054,7 @@ fn run_burst_pipeline(
     glare_aware_focus: bool,
     sensor_noise_profile_path: Option<&Path>,
     sensor_correction_profile_path: Option<&Path>,
+    lens_psf_profile_path: Option<&Path>,
     depth_consistent_refusion: bool,
     _inventory_ctx: Option<&InventoryContext>,
     mut run_state: Option<&mut RunStateManager>,
@@ -1997,6 +2117,20 @@ fn run_burst_pipeline(
             profile.calibration_id
         );
     }
+    let lens_psf_profile = lens_psf_profile_path
+        .map(LensPsfProfile::load_json)
+        .transpose()
+        .context("Load lens PSF calibration profile")?;
+    if let Some(profile) = &lens_psf_profile {
+        println!(
+            "  Lens PSF: {} focus x {} radius knots, ideal/corrected p95 {:.4}/{:.4} ({})",
+            profile.focus_knots.len(),
+            profile.radius_knots.len(),
+            profile.ideal_holdout_p95_relative_error,
+            profile.calibrated_holdout_p95_relative_error,
+            profile.calibration_id
+        );
+    }
     let fusion_config = NativeFusionConfig {
         deghost_strength,
         frequency_separated_deghosting,
@@ -2005,6 +2139,7 @@ fn run_burst_pipeline(
         depth_consistent_refusion,
         sensor_noise_profile,
         sensor_correction_profile,
+        lens_psf_profile,
         ..native_fusion_config(quality)
     };
     let gpu_ahd = if no_gpu {
@@ -2193,6 +2328,8 @@ fn run_burst_pipeline(
                 radiance_anchor,
                 noise_model_calibrated,
                 sensor_correction_id,
+                lens_psf_calibration_id,
+                lens_psf_calibrated,
                 defect_repaired_pixels,
                 depth_refusion_pixels,
                 visibility_adjusted_pixels,
@@ -2372,6 +2509,13 @@ fn run_burst_pipeline(
                 },
                 "noise_model_calibrated": noise_model_calibrated,
                 "sensor_correction_id": sensor_correction_id,
+                "lens_psf_calibration_id": lens_psf_calibration_id,
+                "lens_psf_calibrated": lens_psf_calibrated,
+                "physical_focus_policy": if lens_psf_calibrated {
+                    "calibrated_breathing_pupil_field_psf"
+                } else {
+                    "ideal_thin_lens_explicit_fallback"
+                },
                 "defect_repaired_pixels": defect_repaired_pixels,
                 "depth_refusion_pixels": depth_refusion_pixels,
                 "visibility_adjusted_pixels": visibility_adjusted_pixels,
@@ -4957,11 +5101,14 @@ mod burst_pipeline_tests {
             "z9-noise.json",
             "--sensor-correction-profile",
             "z9-correction.json",
+            "--lens-psf-profile",
+            "z105-f4-psf.json",
         ])
         .unwrap();
         let Commands::Process {
             sensor_noise_profile,
             sensor_correction_profile,
+            lens_psf_profile,
             ..
         } = cli.command
         else {
@@ -4972,6 +5119,123 @@ mod burst_pipeline_tests {
             sensor_correction_profile,
             Some(PathBuf::from("z9-correction.json"))
         );
+        assert_eq!(lens_psf_profile, Some(PathBuf::from("z105-f4-psf.json")));
+    }
+
+    #[test]
+    fn lens_psf_calibration_cli_accepts_holdout_gates() {
+        let cli = Cli::try_parse_from([
+            "trueshot",
+            "calibrate-lens-psf",
+            "--measurements",
+            "measurements.json",
+            "--output",
+            "lens-psf.json",
+            "--maximum-p95-error",
+            "0.04",
+            "--minimum-error-reduction",
+            "0.65",
+        ])
+        .unwrap();
+        let Commands::CalibrateLensPsf {
+            measurements,
+            output,
+            maximum_p95_error,
+            minimum_error_reduction,
+        } = cli.command
+        else {
+            panic!("expected calibrate-lens-psf command");
+        };
+        assert_eq!(measurements, PathBuf::from("measurements.json"));
+        assert_eq!(output, PathBuf::from("lens-psf.json"));
+        assert_eq!(maximum_p95_error, 0.04);
+        assert_eq!(minimum_error_reduction, 0.65);
+    }
+
+    #[test]
+    fn lens_psf_calibration_publishes_only_after_holdout_and_refuses_overwrite() {
+        use trueshot_core::lens_psf::{
+            CalibrationSplit, LensPsfMeasurement, LensPsfSourceRecord, LENS_PSF_MEASUREMENTS_SCHEMA,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let measurements_path = directory.path().join("measurements.json");
+        let output_path = directory.path().join("lens-psf.json");
+        let nominal_focal = 50.0f32;
+        let aperture = 4.0f32;
+        let mut measurements = Vec::new();
+        for (focus_index, focus) in [0.5f32, 1.0, 2.0].into_iter().enumerate() {
+            let effective = nominal_focal * (1.08 - focus_index as f32 * 0.03);
+            let pupil_scale = 1.18 - focus_index as f32 * 0.04;
+            for radius in [0.0f32, 1.0] {
+                for sample in 0..4 {
+                    let subject = focus * if sample % 2 == 0 { 1.22 } else { 0.82 };
+                    let focused_mm = focus * 1000.0;
+                    let subject_mm = subject * 1000.0;
+                    let focused_image = effective * focused_mm / (focused_mm - effective);
+                    let subject_image = effective * subject_mm / (subject_mm - effective);
+                    let radial_scale = 1.0 + radius * radius * 0.22;
+                    let observed_mm = nominal_focal / aperture
+                        * pupil_scale
+                        * (focused_image - subject_image).abs()
+                        / subject_image
+                        * radial_scale;
+                    measurements.push(LensPsfMeasurement {
+                        source_sha256: String::new(),
+                        split: if sample < 2 {
+                            CalibrationSplit::Fit
+                        } else {
+                            CalibrationSplit::Holdout
+                        },
+                        focus_distance_m: focus,
+                        subject_distance_m: subject,
+                        field_radius: radius,
+                        effective_focal_length_mm: effective,
+                        observed_defocus_diameter_px: observed_mm / 0.00435,
+                        pixel_pitch_um: 4.35,
+                    });
+                }
+            }
+        }
+        let sources = measurements
+            .iter_mut()
+            .enumerate()
+            .map(|(index, measurement)| {
+                let sha256 = format!("{:064x}", index + 1);
+                measurement.source_sha256.clone_from(&sha256);
+                LensPsfSourceRecord {
+                    path: format!("retained/calibration-{index:04}.nef"),
+                    sha256,
+                }
+            })
+            .collect();
+        let set = LensPsfMeasurementSet {
+            schema: LENS_PSF_MEASUREMENTS_SCHEMA.to_string(),
+            camera_make: "NIKON CORPORATION".to_string(),
+            camera_model: "NIKON Z 9".to_string(),
+            sensor_width: 8256,
+            sensor_height: 5504,
+            lens_model: "NIKKOR Z 50mm f/1.8 S".to_string(),
+            nominal_focal_length_mm: nominal_focal,
+            aperture,
+            target_id: "iso-12233-depth-target-v1".to_string(),
+            measurement_method: "slanted_edge_esf_defocus_diameter_v1".to_string(),
+            radius_knots: vec![0.0, 1.0],
+            sources,
+            measurements,
+        };
+        std::fs::write(&measurements_path, serde_json::to_vec_pretty(&set).unwrap()).unwrap();
+
+        cmd_calibrate_lens_psf(measurements_path.clone(), output_path.clone(), 0.05, 0.50).unwrap();
+        let profile = LensPsfProfile::load_json(&output_path).unwrap();
+        assert!(profile.calibration_id.starts_with("sha256:"));
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output_path.with_extension("report.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["profile_published"], true);
+        assert_eq!(report["evaluation"]["passed"], true);
+        assert!(cmd_calibrate_lens_psf(measurements_path, output_path, 0.05, 0.50).is_err());
     }
 
     #[test]

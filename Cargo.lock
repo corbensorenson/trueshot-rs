@@ -10973,6 +10973,7 @@ dependencies = [
  "sha2",
  "sysinfo 0.30.13",
  "tao",
+ "tempfile",
  "tokio",
  "toml 0.5.11",
  "tracing",
