@@ -91,6 +91,9 @@ Implemented:
 - Group-amortized ROI decode into one native `u16` arena.
 - Exposure-normalized, CFA-safe HDR/focus fusion.
 - Median/MAD-centered bracket outlier rejection.
+- Censored Poisson-Gaussian bracket estimation with exact-ISO/CFA noise-profile
+  validation, posterior radiance uncertainty, source attribution, and explicit
+  clipping/rejection/fallback state.
 - Confidence- and edge-aware depth regularization with dominant-plane refusion.
 - Synthetic focus, radiance invariance, deghost, tile-boundary, and fail-closed
   gates.
@@ -107,8 +110,8 @@ Not yet qualified:
 - Per-bracket local motion alignment and user-visible deghost overlay.
 - Hair/thin-structure halo gates, retouch workflow, and multi-method automatic
   focus strategy.
-- Per-ISO/CFA photon-transfer calibration, censored-saturation likelihood, and
-  posterior uncertainty calibration.
+- Per-ISO/CFA photon-transfer calibration capture/profile persistence and
+  empirical posterior uncertainty calibration.
 - Diopter/PSF-based sub-plane depth and aperture-constrained occlusion
   correction.
 - Deterministic uncertainty-driven exposure and focus acquisition scheduling.

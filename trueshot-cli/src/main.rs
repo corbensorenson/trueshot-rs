@@ -1344,9 +1344,13 @@ fn run_burst_pipeline(
                 bayer,
                 depth,
                 confidence: _,
+                radiance_uncertainty: _,
+                source_map: _,
+                fusion_flags: _,
                 foreground_mask,
                 transforms,
                 radiance_anchor,
+                noise_model_calibrated: _,
                 depth_refusion_pixels: _,
             } = fused;
             let rgb_cam: [[f32; 4]; 3] = [

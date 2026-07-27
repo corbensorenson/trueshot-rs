@@ -2259,4 +2259,10 @@ Scope: local-first product architecture + monetization operations reconciliation
   - Dynamic brackets identify moving/disoccluded regions, expose every fallback source, and beat the current median/MAD path on radiance error and ghost residual.
   - The adaptive planner reaches the same quality target with at least 20% less capture time or improves quality at equal time on the preregistered corpus.
   - Full-resolution Z9 fusion remains memory bounded and meets declared Apple Silicon p50/p95, RSS, energy, thermal, and determinism gates.
-- Status: Open (P0 image-quality moat, researched 2026-07-26)
+- Status: In Progress (P0 image-quality moat, researched 2026-07-26)
+  - Added explicit per-camera/bit-depth/exact-ISO sensor noise profiles with per-CFA read noise, conversion gain, black drift, saturation margin, retained calibration identity, and fail-closed profile validation.
+  - Replaced ordinary clipped-sample averaging with a bounded censored Poisson-Gaussian estimator: valid samples use sensor-to-radiance inverse variance, clipped samples remain one-sided lower bounds, and all-clipped pixels return an attributed conservative lower bound rather than invented highlight detail.
+  - Native fusion now retains absolute posterior radiance uncertainty, dominant source frame, calibrated/uncalibrated state, clipping, robust rejection, fallback, and censor-conflict flags through focus selection and depth-consistent refusion.
+  - Added gates proving clipped brackets do not bias a valid exposure downward, all-clipped fallback is explicit, exact ISO calibration fails closed, and four independent samples approach half the one-frame uncertainty.
+  - Verified the existing 44.127 dB/100% synthetic focus baseline, exposure invariance, deghosting, CFA, tiling, focused tests, compilation, and strict Clippy remain green.
+  - Remaining: calibration capture/profile persistence, empirical uncertainty coverage, physical focus/PSF inference, occlusion correction, selective local alignment/overlays, glare separation, and the information-gain capture planner.
