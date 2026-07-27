@@ -155,6 +155,14 @@ Implemented:
   `docs/benchmarks/apple_nef_fusion_qualification_2026-07-27.json`; the private
   uncalibrated fixture makes this an integration/performance result, not a
   quality-superiority result.
+- The full-sensor companion gate executes all 21 8280x5520 frames with exact
+  geometry and decoded-extent checks. Across three clean-revision production
+  runs, all 11 primary artifacts and semantic reports were exact; wall
+  p50/p95 was 88.556/91.206 seconds, maximum RSS/physical footprint/energy was
+  3.637 GB/3.403 GB/609.782 J, and maximum source page-in amplification was
+  0.946x with nominal thermals. The 1.920 GB decoded arena was released before
+  RGB postprocessing on every run. Evidence is retained in
+  `docs/benchmarks/apple_nef_full_sensor_qualification_2026-07-27.json`.
 
 Not yet qualified:
 
@@ -177,8 +185,8 @@ Not yet qualified:
 - Live posterior extraction, calibrated lens-drive/readback, production server
   camera-adapter integration, and real efficiency qualification for the
   deterministic uncertainty-driven exposure/focus planner.
-- Redistributable NEF timing fixtures, full-sensor 8280x5520 qualification, and
-  equivalent release gates on every supported Apple Silicon generation.
+- Redistributable NEF timing fixtures and equivalent ROI/full-sensor release
+  gates on every supported Apple Silicon generation beyond the retained M1.
 
 The implementation-grade literature mapping and rejection policy for
 generative recovery are recorded in `docs/HDR_FOCUS_RESEARCH_2026.md`.

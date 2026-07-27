@@ -405,6 +405,21 @@ primary artifacts and semantic provenance were exact across runs. This is
 performance and integration evidence, not calibrated sensor/lens ground truth,
 full-sensor qualification, or a competitor-quality result.
 
+The complementary source-bound full-sensor record is
+`docs/benchmarks/apple_nef_full_sensor_qualification_2026-07-27.json`. Three
+independent production runs decoded all 21 complete 8280x5520 frames
+(959.818 megapixels), released the 1.920 GB native arena before RGB
+postprocessing, and produced 11 byte-identical primary artifacts with identical
+semantic provenance. Wall p50/p95 was 88.556/91.206 seconds; decode, fusion, and
+Metal demosaic/postprocess p95 were 2.422/41.703/1.012 seconds. Maximum RSS,
+physical footprint, primary energy, and source page-in amplification were
+3.637 GB, 3.403 GB, 609.782 J, and 0.946x, with nominal thermals. The gate was
+run from clean revision `d2790400` with exact native geometry, a 4.48 GiB
+admission budget, 4 GiB observed-memory ceilings, an 800 J energy ceiling, and
+no Metal fallback. This closes the Apple M1/Z9 full-sensor integration and
+bounded-performance gap only; the private uncalibrated stack cannot establish
+sensor/lens accuracy or superiority over a competitor.
+
 ## Methods Not Suitable for the Default Archival Path
 
 UltraFusion treats missing highlights as guided inpainting and demonstrates

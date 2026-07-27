@@ -1,0 +1,178 @@
+{
+  "baseline_comparison": null,
+  "configuration": {
+    "depth_export": true,
+    "expected_height": 5520,
+    "expected_width": 8280,
+    "full_frame": true,
+    "jobs": null,
+    "memory_budget_bytes": 4697620480,
+    "qualification_dev_license": true,
+    "quality": "ultra",
+    "runs": 3,
+    "warmups": 0
+  },
+  "determinism": {
+    "artifact_bytes": {
+      "artifact-00.png": 2025710,
+      "artifact-01.tiff": 365646358,
+      "artifact-02.png": 56177,
+      "artifact-03.tiff": 91412042,
+      "artifact-04.png": 15676874,
+      "artifact-05.png": 924759,
+      "artifact-06.png": 1845282,
+      "artifact-07.png": 169249,
+      "artifact-08.png": 56177,
+      "artifact-09.png": 56177,
+      "artifact-10.png": 15676874
+    },
+    "artifact_sha256": {
+      "artifact-00.png": "644ec834df33db602b183b90725547fd507e3b2d919bc261016de9699e6f2905",
+      "artifact-01.tiff": "703b9c5c6d639d675e3337413dc34e6bd8c80b68e838d8313eeabde12f771ff8",
+      "artifact-02.png": "922a3ac0bdfebfe2ca0bf64c11c7e84021fdcd3b4cc94beb409b0cdc14fc541c",
+      "artifact-03.tiff": "f7f8f4868ff522fdd9efad67baebb2b64d5cc50f07c9123edcb8b8213cb9ed5e",
+      "artifact-04.png": "01505801594169c0e4bb8e7b15979269d75cec79d9311c6f7abe9020b325c433",
+      "artifact-05.png": "343bca87f5be6786d669b87f640b42f8994acf25f2b40be9d942dcceff62b0a1",
+      "artifact-06.png": "ce2e155329bb393d0ac62baea104e89f9b57b88a69f226ddda73e16de34c7e5e",
+      "artifact-07.png": "b91c40c83fc4be88d04347261936d9f1a9f7373f970cf63121addbd3409be163",
+      "artifact-08.png": "922a3ac0bdfebfe2ca0bf64c11c7e84021fdcd3b4cc94beb409b0cdc14fc541c",
+      "artifact-09.png": "922a3ac0bdfebfe2ca0bf64c11c7e84021fdcd3b4cc94beb409b0cdc14fc541c",
+      "artifact-10.png": "01505801594169c0e4bb8e7b15979269d75cec79d9311c6f7abe9020b325c433"
+    },
+    "decoded_extent_exact": true,
+    "demosaic_adapters": [
+      "Apple M1"
+    ],
+    "geometry_exact": true,
+    "group_artifact_adapter_shape_exact": true,
+    "group_geometry": [
+      {
+        "admitted_peak_memory_bytes": 4601728941,
+        "crop_origin_x": 0,
+        "crop_origin_y": 0,
+        "decoded_megapixels": 959.8176,
+        "frame_count": 21,
+        "height": 5520,
+        "input_arena_released_before_postprocess": 1919635200,
+        "major_page_faults": 0,
+        "native_input_bytes": 1919635200,
+        "width": 8280
+      }
+    ],
+    "groups": 1,
+    "oversized_input_released": true,
+    "primary_artifacts": 11,
+    "primary_artifacts_exact": true,
+    "semantic_provenance_exact": true
+  },
+  "failures": [],
+  "fixture": {
+    "aggregate_sha256": "8af4d8470895edea9e5f71a220bfd17228eda6084053f8c993686607fa44fef7",
+    "private_fixture_retained": false,
+    "source_bytes": 994391434,
+    "source_count": 21
+  },
+  "gates": {
+    "maximum_energy_joules": 800.0,
+    "maximum_pagein_amplification": 1.25,
+    "maximum_peak_physical_footprint_bytes": 4294967296,
+    "maximum_regression_fraction": 0.15,
+    "maximum_resident_set_size_bytes": 4294967296,
+    "maximum_thermal_state": "fair",
+    "maximum_wall_p95_seconds": 120.0,
+    "minimum_free_disk_bytes": 2147483648,
+    "minimum_independent_runs": 3,
+    "require_admitted_memory_within_budget": true,
+    "require_clean_tracked_source": true,
+    "require_exact_decoded_extent": true,
+    "require_exact_primary_artifacts": true,
+    "require_exact_semantic_provenance": true,
+    "require_expected_geometry": true,
+    "require_low_power_mode_off": true,
+    "require_measured_only_archival": true,
+    "require_metal_ahd_without_fallback": true,
+    "require_native_energy": true,
+    "require_oversized_input_release": true
+  },
+  "generated_at": "2026-07-27T15:30:30.582191+00:00",
+  "host": {
+    "architecture": "arm64",
+    "hardware_model": "MacBookPro17,1",
+    "macos_build": "24A5320a",
+    "macos_version": "15.0",
+    "memory_bytes": 17179869184,
+    "page_size_bytes": 16384
+  },
+  "low_power_mode_observed": false,
+  "metrics": {
+    "disk_bytes_read": {
+      "p50": 953720832.0,
+      "p95": 955432960.0
+    },
+    "disk_bytes_written": {
+      "p50": 497852416.0,
+      "p95": 497852416.0
+    },
+    "energy_joules": {
+      "available": true,
+      "maximum": 609.781990444,
+      "p50": 609.137466423,
+      "p95": 609.781990444
+    },
+    "free_disk_bytes_before": 5836009472,
+    "maximum_admitted_memory_bytes": 4601728941,
+    "maximum_decode_pagein_amplification": 0.9458117838130935,
+    "maximum_major_page_faults": 57404,
+    "maximum_process_pagein_amplification": 0.9458117838130935,
+    "maximum_resident_set_size_bytes": {
+      "maximum": 3637297152.0,
+      "p50": 3594076160.0,
+      "p95": 3637297152.0
+    },
+    "peak_physical_footprint_bytes": {
+      "maximum": 3402983104.0,
+      "p50": 3402360704.0,
+      "p95": 3402983104.0
+    },
+    "performance_energy_joules": {
+      "maximum": 577.771507028,
+      "p50": 577.629488674,
+      "p95": 577.771507028
+    },
+    "stages_seconds": {
+      "decode_seconds": {
+        "p50": 2.402076667,
+        "p95": 2.421927
+      },
+      "demosaic_and_postprocess_seconds": {
+        "p50": 1.010769083,
+        "p95": 1.011861084
+      },
+      "fusion_seconds": {
+        "p50": 41.683812459,
+        "p95": 41.702790084
+      },
+      "processing_before_export_seconds": {
+        "p50": 45.175640917,
+        "p95": 45.253759042
+      }
+    },
+    "wall_seconds": {
+      "maximum": 91.206193125,
+      "minimum": 83.861284833,
+      "p50": 88.555552916,
+      "p95": 91.206193125
+    }
+  },
+  "passed": true,
+  "profile": "release-dev-license",
+  "schema": "trueshot.apple-nef-fusion-qualification.v2",
+  "scope": "Production process --mode burst on one private real NEF group; aggregate performance, determinism, Metal, and measured-only integration evidence. The complete native sensor frame is decoded and geometry-gated. This is not calibrated sensor/lens ground truth or competitor quality evidence.",
+  "source_revision": "d279040017484cb7e34eda611f598801478af11c",
+  "source_tracked_tree_clean": true,
+  "thermal_states": [
+    "nominal",
+    "nominal",
+    "nominal"
+  ]
+}
