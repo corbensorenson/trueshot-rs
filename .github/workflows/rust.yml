@@ -79,7 +79,7 @@ jobs:
       run: cargo clippy --workspace --all-targets -- -D warnings
 
     - name: Check All Rust Targets
-      run: cargo check --workspace --all-targets
+      run: ./scripts/check_rust_future_incompat.sh
 
     - name: Build Backend
       run: cargo build --verbose --workspace
@@ -98,6 +98,38 @@ jobs:
 
     - name: Check Local-First Boundary Classification
       run: python ./scripts/check_local_first_boundary.py
+
+  redis-integration:
+    name: Redis Integration
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TRUESHOT_REDIS_TEST_URL: redis://127.0.0.1:6379/
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libudev-dev libssl-dev pkg-config libasound2-dev cmake
+
+    - name: Test Redis cache, reconnect, relay, and offline behavior
+      run: |
+        cargo test -p trueshot-redis-cache
+        cargo test -p trueshot-server redis_runtime::tests
+        cargo test -p trueshot-server distributed_bus::tests
 
   security:
     name: Security Audit
@@ -130,7 +162,9 @@ jobs:
         cache-dependency-path: trueshot-dashboard/package-lock.json
 
     - name: Install cargo-deny and cargo-cyclonedx
-      run: cargo install cargo-deny cargo-cyclonedx
+      run: |
+        cargo install cargo-deny --version 0.19.0 --locked
+        cargo install cargo-cyclonedx
 
     - name: Run cargo-deny
       run: cargo deny check bans licenses sources advisories

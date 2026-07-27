@@ -14,16 +14,12 @@ skip = [
 skip-tree = []
 
 [licenses]
-unlicensed = "deny"
 allow = [
   "MIT",
   "Apache-2.0",
   "BSD-3-Clause",
   "Unicode-DFS-2016"
 ]
-deny = ["GPL-3.0"]
-copyleft = "deny"
-default = "deny"
 
 [sources]
 unknown-registry = "deny"
@@ -33,6 +29,3 @@ allow-git = []
 
 [advisories]
 ignore = []
-unmaintained = "warn"
-unsound = "deny"
-vulnerability = "deny"

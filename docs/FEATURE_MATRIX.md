@@ -44,7 +44,7 @@ Legend: **Shipping**, **In Progress**, **Planned**
 | Platform | API server + dashboard | Shipping | Actix + React stack |
 | Platform | CLI workflows | Shipping | Headless processing + export |
 | Platform | gRPC SDK surface | Planned | Proto crate is a stub |
-| Platform | Distributed event bus | Planned | NATS/Redis integration not wired |
+| Platform | Optional Redis distributed event bus | Shipping | Bounded loop-safe relay, forced-disconnect recovery, shared calibration cache, and fail-fast local-only degradation |
 | Platform | OpenAPI generation | Shipping | Generated at runtime from route annotations |
 | Platform | Role-based access + SSO | Planned | User/role management still missing |
 | Release | Signed installers + auto-update | Planned | Launcher signing not implemented |

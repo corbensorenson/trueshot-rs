@@ -36,6 +36,11 @@ min_free_bytes = 2147483648
 # antivirus_command = "clamscan"
 # antivirus_args = ["--no-summary", "{path}"]
 # redis_url = "redis://127.0.0.1:6379"
+# redis_connect_timeout_ms = 750
+# redis_response_timeout_ms = 1000
+# redis_reconnect_initial_ms = 100
+# redis_reconnect_max_ms = 5000
+# redis_event_buffer_capacity = 1024
 
 [server.tls]
 # cert_path = "./certs/server.crt"

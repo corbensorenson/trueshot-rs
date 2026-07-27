@@ -1,7 +1,6 @@
 use actix_web::{delete, get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use utoipa::{IntoParams, ToSchema};
@@ -792,30 +791,22 @@ fn calibration_warnings(
 }
 
 async fn cache_calibration(state: &AppState, calibration: &InventoryCalibration) {
-    let Some(client) = state.redis_client.as_ref() else {
+    let Some(pool) = state.redis_pool.as_ref() else {
         return;
     };
-    let payload = match serde_json::to_string(calibration) {
-        Ok(payload) => payload,
-        Err(_) => return,
-    };
     let key = format!("calib:{}", calibration.camera_id);
-    if let Ok(mut conn) = client.get_async_connection().await {
-        let _: Result<(), _> = conn.set(key, payload).await;
+    if let Err(error) = pool.set_json(&key, calibration).await {
+        tracing::debug!("Redis calibration cache write skipped: {}", error);
     }
 }
 
 async fn cache_color_calibration(state: &AppState, calibration: &InventoryColorCalibration) {
-    let Some(client) = state.redis_client.as_ref() else {
+    let Some(pool) = state.redis_pool.as_ref() else {
         return;
     };
-    let payload = match serde_json::to_string(calibration) {
-        Ok(payload) => payload,
-        Err(_) => return,
-    };
     let key = format!("calib_color:{}", calibration.camera_id);
-    if let Ok(mut conn) = client.get_async_connection().await {
-        let _: Result<(), _> = conn.set(key, payload).await;
+    if let Err(error) = pool.set_json(&key, calibration).await {
+        tracing::debug!("Redis color-calibration cache write skipped: {}", error);
     }
 }
 
@@ -823,24 +814,18 @@ async fn fetch_cached_calibration(
     state: &AppState,
     camera_id: &str,
 ) -> Option<InventoryCalibration> {
-    let client = state.redis_client.as_ref()?;
+    let pool = state.redis_pool.as_ref()?;
     let key = format!("calib:{camera_id}");
-    let mut conn = client.get_async_connection().await.ok()?;
-    let payload: Option<String> = conn.get(key).await.ok()?;
-    let payload = payload?;
-    serde_json::from_str(&payload).ok()
+    pool.get_json(&key).await.ok().flatten()
 }
 
 async fn fetch_cached_color_calibration(
     state: &AppState,
     camera_id: &str,
 ) -> Option<InventoryColorCalibration> {
-    let client = state.redis_client.as_ref()?;
+    let pool = state.redis_pool.as_ref()?;
     let key = format!("calib_color:{camera_id}");
-    let mut conn = client.get_async_connection().await.ok()?;
-    let payload: Option<String> = conn.get(key).await.ok()?;
-    let payload = payload?;
-    serde_json::from_str(&payload).ok()
+    pool.get_json(&key).await.ok().flatten()
 }
 
 async fn select_camera(

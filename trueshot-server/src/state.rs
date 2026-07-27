@@ -4,6 +4,7 @@ use crate::config::AppConfig;
 use crate::guest::SlavePhoneState;
 use crate::intervalometer::IntervalometerState;
 use crate::queue::JobQueue;
+use crate::redis_runtime::RedisPool;
 use crate::scan_wizard::ScanWizardState;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -43,7 +44,7 @@ pub struct AppState {
     pub calibration_session: Arc<AsyncMutex<CalibrationSession>>,
     pub audit: Arc<AuditLog>,
     pub license_gate: Arc<Mutex<crate::licensing::LicenseGate>>,
-    pub redis_client: Option<redis::Client>,
+    pub redis_pool: Option<Arc<RedisPool>>,
     /// Phone state for guest/slave phone management
     pub phone_state: Option<Arc<SlavePhoneState>>,
 }

@@ -10,6 +10,7 @@ This checklist is the minimum bar for a production deployment. It assumes `TRUES
   - `cargo fmt --all -- --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
+  - `./scripts/check_rust_future_incompat.sh`
 - Optional OpenCV and platform-specific feature combinations require their native SDKs and dedicated feature-matrix runners; they are not implied by the default workspace gate.
 
 ### Required Security Configuration
@@ -39,6 +40,14 @@ This checklist is the minimum bar for a production deployment. It assumes `TRUES
 - Ensure `paths.projects_dir` and `paths.auth_db`/`jobs_db`/`inventory_db` live on durable storage.
 - Set `server.max_upload_bytes`, `server.max_project_bytes`, `server.min_free_bytes`.
 - Use external storage backups (NAS/S3/GCS/Azure) and validate restores.
+
+### Optional Multi-Node Redis
+
+- Leave `server.redis_url` unset for the default local-only deployment; Redis is never required for capture, processing, reconstruction, or export.
+- Configure Redis only when multiple local TrueShot nodes need shared calibration caching and event relay.
+- Tune `redis_connect_timeout_ms`, `redis_response_timeout_ms`, `redis_reconnect_initial_ms`, `redis_reconnect_max_ms`, and `redis_event_buffer_capacity` for the studio network.
+- Redis failure is bounded and non-fatal: cache requests fail open to local storage and the event bridge reconnects with capped backoff.
+- Release validation runs cache, degraded-offline, cross-node relay, and forced-disconnect recovery against pinned `redis:7.4.10-alpine`.
 
 ### High-Volume NEF Processing
 
@@ -76,6 +85,12 @@ This checklist is the minimum bar for a production deployment. It assumes `TRUES
   integration, and documentation test. Hardware/keychain-dependent tests remain
   explicitly ignored and require dedicated runners.
 - Strict default-feature Clippy passes across every workspace target.
+- The workspace has zero Cargo future-incompatibility warnings; optional Redis
+  cache and relay behavior passes pinned-container disconnect/recovery tests.
+- Production release is blocked by `upgrade_list.md` P0 #155: the current
+  all-feature Linux dependency graph has unresolved vulnerability,
+  maintenance, license-policy, and duplicate-version findings from
+  `cargo-deny` 0.19.0.
 - Optional OpenCV feature validation remains release work: the workspace
   currently resolves three incompatible `opencv` crate generations and does
   not provision a complete native binding toolchain in CI.

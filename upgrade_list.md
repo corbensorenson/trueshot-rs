@@ -2136,7 +2136,7 @@ Scope: local-first product architecture + monetization operations reconciliation
 - Acceptance criteria:
   - Workspace validation emits no future-incompatibility warning.
   - Redis bridge behavior and local-first operation without Redis both pass integration tests.
-- Status: Open
+- Status: Done (2026-07-26) - upgraded the sole workspace Redis client to MSRV-compatible `redis` 0.32.7; added lazy timeout-bounded connection management, capped reconnect supervision, bounded relay buffering, counted loop suppression, and at-least-once retention for the in-flight event. Local and pinned `redis:7.4.10-alpine` tests pass cache round trips, forced Pub/Sub disconnect/recovery, stream relay, malformed/offline configuration, and bounded degraded operation. Release CI now fails on current future-incompatibility warnings, runs the pinned Redis integration suite, and Dependabot reviews Cargo, dashboard, and workflow updates weekly.
 
 154. Optional OpenCV features resolve three incompatible binding stacks and are not CI-validated
 - Evidence:
@@ -2154,3 +2154,22 @@ Scope: local-first product architecture + monetization operations reconciliation
   - Provisioned feature-matrix runners build and test every advertised native integration.
   - Default local-first binaries remain functional without OpenCV or camera vendor SDKs.
 - Status: Open
+
+155. Supply-chain policy was nonfunctional and the resolved graph contains release-blocking advisories
+- Evidence:
+  - `deny.toml` used fields removed by `cargo-deny` 0.19.0, so CI stopped at configuration parsing and never audited the graph.
+  - After schema repair, the all-feature Linux graph reports 37 vulnerability advisories and 22 unmaintained advisories.
+  - Vulnerable families include Wasmtime 14 sandboxing/runtime defects, AWS-LC and rustls-webpki certificate-validation defects, `rsa` timing leakage, and memory-safety or denial-of-service findings in `slab`, `lz4_flex`, `bytes`, `time`, `tar`, `quick-xml`, and `crossbeam-epoch`.
+  - The graph also contains yanked transitive versions, extensive duplicate versions, and permissive licenses absent from the current narrow allowlist.
+- Risk: untrusted assets, plugins, network traffic, or archives may reach known-vulnerable code; a green-looking supply-chain job cannot be trusted; lifetime-license binaries could ship dependencies that cannot be safely supported.
+- Upgrade actions:
+  - Upgrade or replace direct dependency families until every exploitable vulnerability is removed, prioritizing Wasmtime, rustls/AWS-LC, archive/XML parsers, and cryptographic crates.
+  - Replace unmaintained direct/transitive families where maintained upgrade paths exist; isolate unavoidable platform dependencies and document time-bounded exceptions with owners.
+  - Review every additional SPDX license with product counsel, then explicitly allow only commercially acceptable terms; do not add blanket copyleft allowances.
+  - Collapse materially duplicated runtime stacks and replace yanked versions; use narrowly justified `bans.skip` entries only when no supported convergence path exists.
+  - Keep `cargo-deny` pinned, generate machine-readable SARIF/JSON artifacts, and make vulnerability/license/source failures release-blocking on every supported target graph.
+- Acceptance criteria:
+  - `cargo deny check advisories licenses sources bans` passes with no vulnerability, yanked, unknown-source, or unreviewed-license findings.
+  - Any accepted unmaintained advisory or duplicate version has a documented owner, exposure analysis, removal deadline, and exact-version exception.
+  - Linux, macOS, and Windows dependency graphs are audited independently and their reports are retained with release evidence.
+- Status: Open (P0 release blocker, discovered 2026-07-26)

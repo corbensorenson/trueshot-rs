@@ -56,6 +56,11 @@ pub struct ServerConfig {
     pub calibration_max_age_days: Option<i64>,
     pub calibration_max_deltae: Option<f32>,
     pub redis_url: Option<String>,
+    pub redis_connect_timeout_ms: Option<u64>,
+    pub redis_response_timeout_ms: Option<u64>,
+    pub redis_reconnect_initial_ms: Option<u64>,
+    pub redis_reconnect_max_ms: Option<u64>,
+    pub redis_event_buffer_capacity: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -39,6 +39,7 @@ mod intervalometer;
 mod licensing;
 mod queue;
 mod rate_limit;
+mod redis_runtime;
 mod retention;
 mod scan_types;
 mod scan_wizard;
@@ -178,15 +179,23 @@ async fn main() -> std::io::Result<()> {
     let observer: Arc<dyn SchedulerObserver> = Arc::new(QueueObserver::new(job_queue.clone()));
     let scheduler = Arc::new(Scheduler::with_observer(worker_count, Some(observer)));
 
-    let redis_client = config
-        .server
-        .redis_url
-        .as_ref()
-        .and_then(|url| redis::Client::open(url.as_str()).ok());
+    let redis_config = redis_runtime::RedisRuntimeConfig::from_server(&config.server);
+    let redis_pool = config.server.redis_url.as_deref().and_then(|url| {
+        match redis_runtime::RedisPool::new(url, redis_config.clone()) {
+            Ok(pool) => Some(pool),
+            Err(error) => {
+                warn!("Redis disabled because its URL is invalid: {}", error);
+                None
+            }
+        }
+    });
     if let Some(redis_url) = config.server.redis_url.clone() {
         let bus = event_bus.clone();
+        let redis_config = redis_config.clone();
         tokio::spawn(async move {
-            if let Err(err) = distributed_bus::start_redis_bridge(bus, redis_url).await {
+            if let Err(err) =
+                distributed_bus::start_redis_bridge(bus, redis_url, redis_config).await
+            {
                 warn!("Redis event bus bridge failed: {}", err);
             }
         });
@@ -494,7 +503,7 @@ async fn main() -> std::io::Result<()> {
         calibration_session: Arc::new(AsyncMutex::new(state::CalibrationSession::default())),
         audit,
         license_gate,
-        redis_client,
+        redis_pool,
         phone_state: Some(phone_state.clone()),
     });
 
