@@ -228,11 +228,38 @@ fn validate_group(
     if config.black_level.is_some_and(|level| level < 0.0) || config.read_noise_dn <= 0.0 {
         anyhow::bail!("Native fusion calibration values must be positive");
     }
-    if group.metadata[0].cfa_pattern != RGGB {
-        anyhow::bail!(
-            "Native AHD currently requires RGGB CFA, found {:?}",
-            group.metadata[0].cfa_pattern
-        );
+    let exposures_per_focus = group.len() / focus_steps;
+    let reference = &group.metadata[0];
+    for (index, metadata) in group.metadata.iter().enumerate() {
+        if metadata.cfa_pattern != RGGB {
+            anyhow::bail!(
+                "Native AHD requires RGGB CFA; frame {} is {:?}",
+                index,
+                metadata.cfa_pattern
+            );
+        }
+        if metadata.bits_per_sample != reference.bits_per_sample
+            || metadata.sensor_levels != reference.sensor_levels
+        {
+            anyhow::bail!("Native group mixes incompatible sensor encodings");
+        }
+        if metadata
+            .cam_mul
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            anyhow::bail!("Frame {} has invalid white-balance calibration", index);
+        }
+        if exposures_per_focus > 1
+            && (metadata.exposure_time.is_none()
+                || metadata.aperture.is_none()
+                || metadata.iso.is_none())
+        {
+            anyhow::bail!(
+                "HDR frame {} is missing shutter, aperture, or ISO metadata",
+                index
+            );
+        }
     }
     Ok(())
 }
@@ -1193,6 +1220,32 @@ mod tests {
         assert!((calibrations[0].inverse_range - 1.0 / (15311.0 - 1008.0)).abs() < 1e-9);
         assert_eq!(normalize_raw(1008, calibrations[0]), 0.0);
         assert!((normalize_raw(15311, calibrations[0]) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hdr_groups_fail_closed_without_complete_exposure_metadata() {
+        let pixels = vec![2048u16; 2 * 16 * 16];
+        let mut incomplete = metadata(1.0);
+        incomplete.iso = None;
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            2,
+            16,
+            16,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            vec![metadata(1.0), incomplete],
+        )
+        .unwrap();
+        let error = fuse_native_group(
+            &group,
+            &meta(1, 2),
+            &NativeFusionConfig {
+                regularize_depth: false,
+                ..NativeFusionConfig::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing shutter"));
     }
 
     #[test]

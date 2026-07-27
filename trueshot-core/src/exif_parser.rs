@@ -102,9 +102,10 @@ pub fn extract_z9_metadata(path: &Path) -> Result<FileMeta> {
     let aperture = metadata.aperture.unwrap_or(5.6) as f64;
     let iso = metadata.iso.unwrap_or(100);
 
-    // Calculate EV (relative to 1/125s, f/5.6, ISO 100)
-    let exposure_ev = (exposure_time / (1.0 / 125.0)).log2() + (aperture / 5.6).powi(2).log2()
-        - (iso as f64 / 100.0).log2();
+    // Positive values represent proportionally more sensor signal than the
+    // reference capture after shutter, aperture, and analog gain.
+    let exposure_ev =
+        crate::raw_io::relative_sensor_exposure_ev(exposure_time, aperture, f64::from(iso))?;
 
     Ok(FileMeta {
         path: path.to_path_buf(),

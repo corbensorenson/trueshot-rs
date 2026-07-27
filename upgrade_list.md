@@ -2177,3 +2177,27 @@ Scope: local-first product architecture + monetization operations reconciliation
   - Any accepted unmaintained advisory or duplicate version has a documented owner, exposure analysis, removal deadline, and exact-version exception.
   - Linux, macOS, and Windows dependency graphs are audited independently and their reports are retained with release evidence.
 - Status: Open (P0 release blocker, discovered 2026-07-26)
+
+156. Demosaic and Bayer fusion lacked a defensible correctness/performance contract
+- Evidence:
+  - AHD averaged unlike CFA colors into its input border, replaced real zero samples with epsilon, allocated approximately 7 MiB of scratch for every serial 512x512 tile, and had no isolated quality/throughput benchmark.
+  - Legacy RAW exposure normalization applied shutter/aperture/ISO with incorrect signs, so bracketed frames were not represented on one scene-radiance scale.
+  - Focus-breathing scale search subtracted unsigned coordinates left of image center, panicking on a valid private Z9 group; its score was an unnormalized dot product with nearest-neighbor coordinate truncation.
+  - Joint demosaic allocated exposure-weight vectors per output pixel, accepted malformed groups, and injected zero-valued out-of-bounds samples that darkened image edges.
+- Risk: false color, zippering, dark borders, exposure-dependent HDR brightness, focus-stack crashes, excessive allocation pressure, and unsubstantiated speed/quality claims on Apple hardware.
+- Upgrade actions:
+  - Implement banded multi-pass WGPU compute on Metal for directional candidates, camera-to-Lab homogeneity, 3x3 direction selection, and RGB output with bounded buffers and automatic CPU fallback.
+  - Establish exact CPU/GPU measured-sample parity plus PSNR, DeltaE, zipper/moire, chart, low-light, saturated-edge, and pathological-frequency gates against legally usable RAW/RGB references.
+  - Extend native fusion with calibrated per-channel noise profiles, defect-pixel rejection, lens shading, motion/ghost confidence, depth-consistent focus-plane regularization, and explicit ordering/schema validation.
+  - Benchmark release builds at common ROI/full-frame tiers on supported Apple Silicon generations; retain thermal, memory, wall-time percentile, checksum, and quality artifacts in CI.
+- Acceptance criteria:
+  - Every measured CFA sample and true black are preserved; HDR brackets are exposure invariant within calibrated tolerance; no malformed group silently uses fabricated calibration.
+  - Metal and CPU paths meet declared pixel/quality tolerances with deterministic mode available, and unsupported adapters fall back without output changes.
+  - Dedicated Apple Silicon release runners block material PSNR/DeltaE, seam, throughput, memory, or thermal regressions.
+- Status: In Progress (2026-07-26)
+  - Corrected CFA-safe border interpolation, true-black handling, invalid-input rejection, per-band scratch reuse, and lock-free Rayon row-band execution.
+  - Reduced the deterministic 1310x1304 debug benchmark from 4928.37 ms on the old single-core/512-tile geometry to 1006.26 ms on ten threads with identical output; current synthetic-scene PSNR is 43.893/47.285/43.878 dB RGB.
+  - Corrected legacy shutter/aperture/ISO radiance normalization and added exposure-invariance/fail-closed tests.
+  - Replaced panic-prone scale coordinates and unnormalized scoring with signed bilinear zero-mean NCC; a private 4612x2776 Z9 crop now completes decode, fusion, and demosaic without the former alignment panic.
+  - Removed joint-demosaic per-pixel exposure allocations, added structural/calibration validation, and replaced zero edge padding with same-CFA-parity boundary sampling.
+  - Remaining: exact multi-pass Metal AHD, calibrated sensor-noise/lens/defect corrections, real chart/corpus quality gates, and release-mode Apple hardware baselines.

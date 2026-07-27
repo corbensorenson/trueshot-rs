@@ -371,21 +371,10 @@ fn estimate_scale(reference: &Array2<f64>, frame: &Array2<f64>) -> f64 {
     let mut best_scale = 1.0;
     let mut best_score = -1.0;
 
-    // Compute reference statistics
-    let mut ref_sum = 0.0;
-    let mut ref_count = 0;
-    for y in start_y..(start_y + crop_h) {
-        for x in start_x..(start_x + crop_w) {
-            ref_sum += reference[[y, x]];
-            ref_count += 1;
-        }
-    }
-    let ref_mean = ref_sum / ref_count as f64;
-
     // Coarse search
     for &scale in &coarse_scales {
         let score = compute_scale_score(
-            reference, frame, scale, ref_mean, start_x, start_y, crop_w, crop_h, width, height,
+            reference, frame, scale, start_x, start_y, crop_w, crop_h, width, height,
         );
         if score > best_score {
             best_score = score;
@@ -401,7 +390,7 @@ fn estimate_scale(reference: &Array2<f64>, frame: &Array2<f64>) -> f64 {
     let mut fine_scale = fine_start;
     while fine_scale <= fine_end {
         let score = compute_scale_score(
-            reference, frame, fine_scale, ref_mean, start_x, start_y, crop_w, crop_h, width, height,
+            reference, frame, fine_scale, start_x, start_y, crop_w, crop_h, width, height,
         );
         if score > best_score {
             best_score = score;
@@ -418,7 +407,6 @@ fn compute_scale_score(
     reference: &Array2<f64>,
     frame: &Array2<f64>,
     scale: f64,
-    ref_mean: f64,
     start_x: usize,
     start_y: usize,
     crop_w: usize,
@@ -426,28 +414,83 @@ fn compute_scale_score(
     width: usize,
     height: usize,
 ) -> f64 {
-    let mut score = 0.0;
-    let mut count = 0;
+    let center_x = width.saturating_sub(1) as f64 * 0.5;
+    let center_y = height.saturating_sub(1) as f64 * 0.5;
+    let mut count = 0usize;
+    let mut reference_mean = 0.0f64;
+    let mut frame_mean = 0.0f64;
+    let mut covariance = 0.0f64;
+    let mut reference_variance = 0.0f64;
+    let mut frame_variance = 0.0f64;
 
-    // Sample points and compare
     for y in start_y..(start_y + crop_h) {
         for x in start_x..(start_x + crop_w) {
-            // Map to scaled coordinates in frame (relative to center)
-            let fx = ((x - width / 2) as f64 * scale + width as f64 / 2.0) as usize;
-            let fy = ((y - height / 2) as f64 * scale + height as f64 / 2.0) as usize;
-
-            if fx < width && fy < height {
-                let ref_val = reference[[y, x]] - ref_mean;
-                let frame_val = frame[[fy, fx]] - ref_mean;
-                score += ref_val * frame_val;
+            let frame_x = (x as f64 - center_x) * scale + center_x;
+            let frame_y = (y as f64 - center_y) * scale + center_y;
+            if let Some(frame_value) = bilinear_sample(frame, frame_x, frame_y) {
+                let reference_value = reference[[y, x]];
                 count += 1;
+                let count_f64 = count as f64;
+                let reference_delta = reference_value - reference_mean;
+                reference_mean += reference_delta / count_f64;
+                let frame_delta = frame_value - frame_mean;
+                frame_mean += frame_delta / count_f64;
+                covariance += reference_delta * (frame_value - frame_mean);
+                reference_variance += reference_delta * (reference_value - reference_mean);
+                frame_variance += frame_delta * (frame_value - frame_mean);
             }
         }
     }
 
-    if count > 0 {
-        score / count as f64
-    } else {
-        -1.0
+    let denominator = (reference_variance * frame_variance).sqrt();
+    if count < 16 || denominator <= 1e-12 {
+        return -1.0;
+    }
+    covariance / denominator
+}
+
+fn bilinear_sample(image: &Array2<f64>, x: f64, y: f64) -> Option<f64> {
+    let (height, width) = image.dim();
+    if width == 0
+        || height == 0
+        || x < 0.0
+        || y < 0.0
+        || x > width.saturating_sub(1) as f64
+        || y > height.saturating_sub(1) as f64
+    {
+        return None;
+    }
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let tx = x - x0 as f64;
+    let ty = y - y0 as f64;
+    let top = image[[y0, x0]] + (image[[y0, x1]] - image[[y0, x0]]) * tx;
+    let bottom = image[[y1, x0]] + (image[[y1, x1]] - image[[y1, x0]]) * tx;
+    Some(top + (bottom - top) * ty)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_scale_score, estimate_scale};
+    use ndarray::Array2;
+
+    fn textured_image(size: usize) -> Array2<f64> {
+        Array2::from_shape_fn((size, size), |(y, x)| {
+            let dx = x as f64 - size as f64 * 0.5;
+            let dy = y as f64 - size as f64 * 0.5;
+            (dx * 0.17).sin() + (dy * 0.11).cos() + (dx * dx + dy * dy).sqrt() * 0.003
+        })
+    }
+
+    #[test]
+    fn scale_score_handles_coordinates_left_of_center_without_overflow() {
+        let image = textured_image(64);
+        let exact = compute_scale_score(&image, &image, 1.0, 16, 16, 32, 32, 64, 64);
+        let wrong = compute_scale_score(&image, &image, 0.97, 16, 16, 32, 32, 64, 64);
+        assert!(exact > 0.999_999);
+        assert!(exact > wrong);
+        assert!((estimate_scale(&image, &image) - 1.0).abs() < 1e-9);
     }
 }

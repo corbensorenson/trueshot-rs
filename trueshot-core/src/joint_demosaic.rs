@@ -7,7 +7,7 @@
 //! create a merged Bayer mosaic (which has discontinuities that confuse demosaicing).
 //! Instead, we accumulate Bayer pixels directly to RGB channels during fusion.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ndarray::{Array2, Array3};
 
 /// Get Bayer color channel for a pixel position (RGGB pattern)
@@ -76,6 +76,7 @@ pub fn joint_demosaic_with_focus_selection(
     selection: PixelSelection,
     blend_radius: usize,
 ) -> Result<Array3<f64>> {
+    validate_joint_inputs(frames, image_weights, best_plane_map, num_exposures)?;
     let (height, width, _) = frames[0].dim();
     let mut rgb = Array3::<f64>::zeros((height, width, 3));
 
@@ -146,28 +147,16 @@ pub fn joint_demosaic_with_focus_selection(
             let start_frame = plane_idx * num_exposures;
             let end_frame = (start_frame + num_exposures).min(frames.len());
 
-            // Use per-image weights (passed from caller)
-            // These are global Mertens weights computed once per frame
-            let mut exposure_weights = Vec::with_capacity(end_frame - start_frame);
-            for frame_idx in start_frame..end_frame {
-                exposure_weights.push(image_weights[frame_idx]);
-            }
-
-            // Normalize weights within this plane
-            let weight_sum: f64 = exposure_weights.iter().sum();
-            if weight_sum > 0.0 {
-                for w in &mut exposure_weights {
-                    *w /= weight_sum;
-                }
-            } else {
-                // If all weights are zero, use uniform
-                let uniform = 1.0 / (end_frame - start_frame) as f64;
-                exposure_weights.fill(uniform);
-            }
+            let weight_sum: f64 = image_weights[start_frame..end_frame].iter().sum();
+            let uniform_weight = 1.0 / (end_frame - start_frame) as f64;
 
             // Accumulate weighted RGB from each exposure
-            for (i, frame_idx) in (start_frame..end_frame).enumerate() {
-                let hdr_weight = exposure_weights[i];
+            for frame_idx in start_frame..end_frame {
+                let hdr_weight = if weight_sum > 0.0 {
+                    image_weights[frame_idx] / weight_sum
+                } else {
+                    uniform_weight
+                };
                 let combined_weight = hdr_weight * plane_weight;
 
                 // Get full RGB triplet for this pixel from this frame
@@ -229,6 +218,53 @@ pub fn joint_demosaic_with_focus_selection(
     }
 
     Ok(rgb)
+}
+
+fn validate_joint_inputs(
+    frames: &[Array3<f64>],
+    image_weights: &[f64],
+    best_plane_map: &Array2<usize>,
+    num_exposures: usize,
+) -> Result<()> {
+    let first = frames
+        .first()
+        .context("Joint demosaic requires at least one frame")?;
+    if num_exposures == 0 {
+        anyhow::bail!("Joint demosaic requires at least one exposure per focus plane");
+    }
+    if image_weights.len() != frames.len() {
+        anyhow::bail!(
+            "Joint demosaic has {} frames but {} image weights",
+            frames.len(),
+            image_weights.len()
+        );
+    }
+    if image_weights
+        .iter()
+        .any(|weight| !weight.is_finite() || *weight < 0.0)
+    {
+        anyhow::bail!("Joint demosaic weights must be finite and non-negative");
+    }
+    let (height, width, channels) = first.dim();
+    if height == 0 || width == 0 || channels != 1 {
+        anyhow::bail!("Joint demosaic expects non-empty HxWx1 Bayer frames");
+    }
+    if best_plane_map.dim() != (height, width) {
+        anyhow::bail!("Focus plane map dimensions do not match Bayer frames");
+    }
+    for (index, frame) in frames.iter().enumerate() {
+        if frame.dim() != (height, width, 1) {
+            anyhow::bail!("Joint demosaic frame {} has inconsistent dimensions", index);
+        }
+        if frame.iter().any(|value| !value.is_finite() || *value < 0.0) {
+            anyhow::bail!("Joint demosaic frame {} has invalid sensor values", index);
+        }
+    }
+    let plane_count = frames.len().div_ceil(num_exposures);
+    if best_plane_map.iter().any(|plane| *plane >= plane_count) {
+        anyhow::bail!("Focus plane map references a plane outside the frame stack");
+    }
+    Ok(())
 }
 
 /// Demosaic an entire Bayer frame to RGB
@@ -322,10 +358,27 @@ fn get_rgb_from_bayer_frame(
 /// Helper to safely get pixel value with bounds checking
 #[inline]
 fn get_pixel(frame: &Array3<f64>, y: isize, x: isize, height: usize, width: usize) -> f64 {
-    if y < 0 || x < 0 || y >= height as isize || x >= width as isize {
-        return 0.0;
+    let row = nearest_same_parity_coordinate(y, height);
+    let col = nearest_same_parity_coordinate(x, width);
+    frame[[row, col, 0]]
+}
+
+#[inline]
+fn nearest_same_parity_coordinate(coordinate: isize, limit: usize) -> usize {
+    if limit <= 1 {
+        return 0;
     }
-    frame[[y as usize, x as usize, 0]]
+    let parity = coordinate.rem_euclid(2) as usize;
+    let maximum = limit - 1;
+    let mut clamped = coordinate.clamp(0, maximum as isize) as usize;
+    if clamped & 1 != parity {
+        if clamped < maximum {
+            clamped += 1;
+        } else {
+            clamped = clamped.saturating_sub(1);
+        }
+    }
+    clamped
 }
 
 /// Compute gradient in a direction (for edge detection)
@@ -769,4 +822,43 @@ fn interpolate_green_at_blue_bilinear(
     let g_e = get_pixel(frame, yi, xi + 1, height, width);
 
     (g_n + g_s + g_w + g_e) / 4.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_bayer_has_no_dark_border_bias() {
+        let frame = Array3::<f64>::from_elem((8, 8, 1), 0.75);
+        let rgb = demosaic_bayer_frame(&frame, &[1.0; 4]).unwrap();
+        assert!(rgb.iter().all(|value| (*value - 0.75).abs() < 1e-12));
+    }
+
+    #[test]
+    fn joint_demosaic_rejects_incomplete_or_invalid_groups() {
+        let plane_map = Array2::<usize>::zeros((4, 4));
+        assert!(joint_demosaic_with_focus_selection(
+            &[],
+            &[],
+            &plane_map,
+            1,
+            &[1.0; 4],
+            PixelSelection::All,
+            0,
+        )
+        .is_err());
+
+        let frame = Array3::<f64>::zeros((4, 4, 1));
+        assert!(joint_demosaic_with_focus_selection(
+            &[frame],
+            &[],
+            &plane_map,
+            1,
+            &[1.0; 4],
+            PixelSelection::All,
+            0,
+        )
+        .is_err());
+    }
 }

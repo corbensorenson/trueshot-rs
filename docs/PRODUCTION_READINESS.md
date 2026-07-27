@@ -56,6 +56,7 @@ This checklist is the minimum bar for a production deployment. It assumes `TRUES
 - Keep `TRUESHOT_NEF_ACCESS_MODE` unset for sidecar-free one-pass ingestion.
 - Use `TRUESHOT_RESUME_VERIFY=sampled` for normal operation and `full` for validation or regulated workflows.
 - Run `capture_manifest_scale_benchmark`, `nef_group_benchmark --verify-full`, and `nef_corruption_runner` on release hardware before advertising a camera/storage combination.
+- Run `demosaic_benchmark` in release mode at the advertised ROI tiers and retain its adapter/CPU, throughput, PSNR, and checksum evidence.
 - Treat `docs/NEF_SUPPORT_MATRIX.md` as the authoritative advertised camera/layout boundary.
 - Do not advertise Nikon bodies, firmware, compression modes or bit depths until item 148 in `upgrade_list.md` is satisfied for that combination.
 

@@ -19,6 +19,7 @@ Legend: **Shipping**, **In Progress**, **Planned**
 | Capture | Streaming capture manifests | Shipping | Incremental atomic JSONL writer records explicit HDR/focus/burst order, one reference frame, stable content IDs and one reusable crop plan per group |
 | Processing | Native HDR + focus fusion | Shipping | Tiled `f32` fusion consumes the `u16` arena directly with lazy exposure/WB calibration, subpixel alignment, confidence and depth |
 | Processing | Camera-profiled RAW normalization | Shipping | Real TIFF make/model identity selects verified sensor black/saturation levels; Z9 firmware 5.00 uses measured 1008/15311 levels and explicit overrides remain available |
+| Processing | CFA-exact adaptive demosaic | In Progress | AHD preserves measured RGGB samples and true black, uses cache-sized parallel row bands, and has deterministic PSNR/throughput baselines; exact-parity Apple Metal acceleration and real chart/corpus gates remain |
 | Processing | Hierarchical Bayer-preserving super-resolution | Shipping | Native mode retains Bayer output; requested SR uses alignment diversity and joint high-resolution demosaic |
 | Processing | Native FAST/BRIEF + robust geometry | Shipping | FAST-9, BRIEF, adaptive RANSAC, MAGSAC, triangulation, and regression tests run without OpenCV |
 | Processing | Million-file bounded execution | Shipping | Memory-credit admission, adaptive decode workers, one-deep async export, durable retries/cancellation and crash-safe artifact-verified resume |

@@ -2,10 +2,16 @@
 // Based on the work of Keigo Hirakawa, Thomas Parks, and Paul Lee
 // Reference implementation: dcraw by Dave Coffin
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ndarray::Array3;
+use rayon::prelude::*;
 
-const TS: usize = 512; // Tile size for processing
+// Sized to keep each worker's directional RGB/Lab/homogeneity working set near
+// Apple Silicon's private cache while exposing enough independent row bands.
+const TS: usize = 160;
+const TILE_OVERLAP: usize = 6;
+const TILE_STEP: usize = TS - TILE_OVERLAP;
+const OUTPUT_BORDER: usize = 5;
 
 #[inline]
 fn tile_rgb_index(direction: usize, row: usize, col: usize, channel: usize) -> usize {
@@ -127,109 +133,50 @@ impl CieLabConverter {
     }
 }
 
-/// Border interpolation using a local smoothing filter to stabilize edge values
-fn border_interpolate(image: &mut Array3<f32>, width: usize, height: usize, border: usize) {
-    if width == 0 || height == 0 {
-        return;
-    }
-    let clamp_row = |r: isize| -> usize { r.max(0).min(height as isize - 1) as usize };
-    let clamp_col = |c: isize| -> usize { c.max(0).min(width as isize - 1) as usize };
-    let mut border_values = Vec::with_capacity(
-        width
-            .saturating_mul(border.saturating_add(1))
-            .saturating_mul(2)
-            .saturating_add(
-                height
-                    .saturating_mul(border.saturating_add(1))
-                    .saturating_mul(2),
-            ),
-    );
-    for row in 0..height {
-        for col in 0..width {
-            if row <= border || row + border >= height || col <= border || col + border >= width {
-                let mut sum = 0.0f32;
-                let mut count = 0.0f32;
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        let rr = clamp_row(row as isize + dy);
-                        let cc = clamp_col(col as isize + dx);
-                        sum += image[[rr, cc, 0]];
-                        count += 1.0;
-                    }
-                }
-                border_values.push((row, col, sum / count.max(1.0)));
-            }
-        }
-    }
-    for (row, col, value) in border_values {
-        image[[row, col, 0]] = value;
-    }
-}
-
 fn demosaic_bilinear_pixel(image: &Array3<f32>, row: usize, col: usize) -> [f32; 3] {
     let (height, width, _) = image.dim();
-    let clamp_row = |r: isize| -> usize { r.max(0).min(height as isize - 1) as usize };
-    let clamp_col = |c: isize| -> usize { c.max(0).min(width as isize - 1) as usize };
-    let sample = |r: isize, c: isize| -> f32 { image[[clamp_row(r), clamp_col(c), 0]] };
+    let direct_channel = fc_rgb(row, col);
+    let mut rgb = [0.0f32; 3];
+    rgb[direct_channel] = image[[row, col, 0]];
 
-    let center = image[[row, col, 0]];
-    let is_row_even = row % 2 == 0;
-    let is_col_even = col % 2 == 0;
-
-    match fc_rgb(row, col) {
-        0 => {
-            // Red pixel
-            let g = (sample(row as isize - 1, col as isize)
-                + sample(row as isize + 1, col as isize)
-                + sample(row as isize, col as isize - 1)
-                + sample(row as isize, col as isize + 1))
-                * 0.25;
-            let b = (sample(row as isize - 1, col as isize - 1)
-                + sample(row as isize - 1, col as isize + 1)
-                + sample(row as isize + 1, col as isize - 1)
-                + sample(row as isize + 1, col as isize + 1))
-                * 0.25;
-            [center, g, b]
+    for (channel, value) in rgb.iter_mut().enumerate() {
+        if channel == direct_channel {
+            continue;
         }
-        1 => {
-            // Green pixel
-            let (r, b) = if is_row_even && !is_col_even {
-                // Green on red row
-                let r = (sample(row as isize, col as isize - 1)
-                    + sample(row as isize, col as isize + 1))
-                    * 0.5;
-                let b = (sample(row as isize - 1, col as isize)
-                    + sample(row as isize + 1, col as isize))
-                    * 0.5;
-                (r, b)
-            } else {
-                // Green on blue row
-                let r = (sample(row as isize - 1, col as isize)
-                    + sample(row as isize + 1, col as isize))
-                    * 0.5;
-                let b = (sample(row as isize, col as isize - 1)
-                    + sample(row as isize, col as isize + 1))
-                    * 0.5;
-                (r, b)
-            };
-            [r, center, b]
+        let mut weighted_sum = 0.0f32;
+        let mut weight_sum = 0.0f32;
+        for radius in 1..=2isize {
+            let row_start = (row as isize - radius).max(0);
+            let row_end = (row as isize + radius).min(height as isize - 1);
+            let col_start = (col as isize - radius).max(0);
+            let col_end = (col as isize + radius).min(width as isize - 1);
+            for source_row in row_start..=row_end {
+                for source_col in col_start..=col_end {
+                    if fc_rgb(source_row as usize, source_col as usize) != channel {
+                        continue;
+                    }
+                    let dy = source_row - row as isize;
+                    let dx = source_col - col as isize;
+                    let distance_squared = (dx * dx + dy * dy) as f32;
+                    if distance_squared == 0.0 {
+                        continue;
+                    }
+                    let weight = distance_squared.recip();
+                    weighted_sum += weight * image[[source_row as usize, source_col as usize, 0]];
+                    weight_sum += weight;
+                }
+            }
+            if weight_sum > 0.0 {
+                break;
+            }
         }
-        2 => {
-            // Blue pixel
-            let g = (sample(row as isize - 1, col as isize)
-                + sample(row as isize + 1, col as isize)
-                + sample(row as isize, col as isize - 1)
-                + sample(row as isize, col as isize + 1))
-                * 0.25;
-            let r = (sample(row as isize - 1, col as isize - 1)
-                + sample(row as isize - 1, col as isize + 1)
-                + sample(row as isize + 1, col as isize - 1)
-                + sample(row as isize + 1, col as isize + 1))
-                * 0.25;
-            [r, g, center]
-        }
-        _ => [center, center, center],
+        *value = if weight_sum > 0.0 {
+            weighted_sum / weight_sum
+        } else {
+            image[[row, col, 0]]
+        };
     }
+    rgb
 }
 
 /// AHD demosaicing algorithm
@@ -263,45 +210,67 @@ pub fn ahd_demosaic_f32_owned(
 
     tracing::info!("Starting f32 AHD demosaicing on {}x{} image", height, width);
 
-    // Prevent exact zeros from destabilizing color-difference interpolation.
-    const EPSILON: f32 = 1e-6;
-    let range_scale = image_f32
+    if image_f32
         .iter()
-        .copied()
-        .filter(|value| value.is_finite())
-        .fold(1.0f32, f32::max);
-    image_f32.mapv_inplace(|value| (value / range_scale).max(EPSILON));
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        anyhow::bail!("AHD input must contain finite, non-negative linear sensor values");
+    }
+    let range_scale = image_f32.iter().copied().fold(1.0f32, f32::max);
+    if range_scale != 1.0 {
+        image_f32.mapv_inplace(|value| value / range_scale);
+    }
 
     // Initialize CIELab converter
     let cielab = CieLabConverter::new(rgb_cam);
 
-    // Border interpolation (stabilize edges before tile processing)
-    border_interpolate(&mut image_f32, width, height, 5);
-
     // Allocate output image (f32 for precision)
     let mut output = Array3::<f32>::zeros((height, width, 3));
 
-    // Process image in tiles
-    let mut top = 2;
-    let mut tile_count = 0;
-    while top < height.saturating_sub(5) {
-        let mut left = 2;
-        while left < width.saturating_sub(5) {
-            tile_count += 1;
-            process_tile(&image_f32, &mut output, &cielab, top, left, width, height);
-            left += TS - 6;
-        }
-        top += TS - 6;
+    // Each row band owns a disjoint output slice, so AHD can use every CPU core
+    // without locks or an additional full-frame output allocation.
+    let interior_start = OUTPUT_BORDER.min(height);
+    let interior_end = height.saturating_sub(OUTPUT_BORDER);
+    let row_stride = width * 3;
+    if interior_start < interior_end && width > OUTPUT_BORDER * 2 {
+        let output_pixels = output
+            .as_slice_mut()
+            .context("AHD output allocation is not contiguous")?;
+        let interior = &mut output_pixels[interior_start * row_stride..interior_end * row_stride];
+        interior
+            .par_chunks_mut(TILE_STEP * row_stride)
+            .enumerate()
+            .for_each(|(band_index, output_band)| {
+                let output_y0 = interior_start + band_index * TILE_STEP;
+                let top = output_y0 - 3;
+                let mut scratch = AhdScratch::new();
+                let mut left = 2;
+                while left < width.saturating_sub(OUTPUT_BORDER) {
+                    process_tile(
+                        &image_f32,
+                        output_band,
+                        output_y0,
+                        &cielab,
+                        &mut scratch,
+                        top,
+                        left,
+                        width,
+                        height,
+                    );
+                    left += TILE_STEP;
+                }
+            });
     }
-    tracing::info!("Processed {} tiles", tile_count);
 
-    // Border interpolation for output
-    // CRITICAL: Must cover all pixels not processed by tiles
-    // Tiles start at top=2 and process from (top+3) onwards, so rows [0,4] need border handling
-    // Similarly for bottom and left/right edges
+    // The edge fallback never changes measured CFA samples and never substitutes
+    // a differently colored clamped neighbor.
     for row in 0..height {
         for col in 0..width {
-            if row <= 4 || row + 5 >= height || col <= 4 || col + 5 >= width {
+            if row < OUTPUT_BORDER
+                || row >= interior_end
+                || col < OUTPUT_BORDER
+                || col + OUTPUT_BORDER >= width
+            {
                 let rgb = demosaic_bilinear_pixel(&image_f32, row, col);
                 output[[row, col, 0]] = rgb[0];
                 output[[row, col, 1]] = rgb[1];
@@ -333,10 +302,34 @@ pub fn ahd_demosaic_f32_owned(
     Ok(output)
 }
 
+struct AhdScratch {
+    rgb: Vec<f32>,
+    lab: Vec<i16>,
+    homo: Vec<u8>,
+}
+
+impl AhdScratch {
+    fn new() -> Self {
+        Self {
+            rgb: vec![0.0; 2 * TS * TS * 3],
+            lab: vec![0; 2 * TS * TS * 3],
+            homo: vec![0; 2 * TS * TS],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.rgb.fill(0.0);
+        self.lab.fill(0);
+        self.homo.fill(0);
+    }
+}
+
 fn process_tile(
     image: &Array3<f32>,
-    output: &mut Array3<f32>,
+    output_band: &mut [f32],
+    output_y0: usize,
     cielab: &CieLabConverter,
+    scratch: &mut AhdScratch,
     top: usize,
     left: usize,
     width: usize,
@@ -345,16 +338,12 @@ fn process_tile(
     let tile_height = (top + TS).min(height - 2);
     let tile_width = (left + TS).min(width - 2);
 
-    // Flat heap buffers avoid multi-megabyte stack temporaries on worker
-    // threads. Two directions are stored for horizontal/vertical candidates.
-    let mut rgb = vec![0.0f32; 2 * TS * TS * 3];
-    let mut lab = vec![0i16; 2 * TS * TS * 3];
-    let mut homo = vec![0u8; 2 * TS * TS];
+    scratch.clear();
 
     // Step 1: Interpolate green horizontally and vertically
     interpolate_green(
         image,
-        &mut rgb,
+        &mut scratch.rgb,
         top,
         left,
         tile_height,
@@ -366,8 +355,8 @@ fn process_tile(
     // Step 2: Interpolate red and blue, convert to CIELab
     interpolate_rb_and_lab(
         image,
-        &mut rgb,
-        &mut lab,
+        &mut scratch.rgb,
+        &mut scratch.lab,
         cielab,
         top,
         left,
@@ -377,13 +366,21 @@ fn process_tile(
     );
 
     // Step 3: Build homogeneity maps
-    build_homogeneity_maps(&lab, &mut homo, top, left, tile_height, tile_width);
+    build_homogeneity_maps(
+        &scratch.lab,
+        &mut scratch.homo,
+        top,
+        left,
+        tile_height,
+        tile_width,
+    );
 
     // Step 4: Combine most homogenous pixels
     combine_homogenous(
-        output,
-        &rgb,
-        &homo,
+        output_band,
+        output_y0,
+        &scratch.rgb,
+        &scratch.homo,
         top,
         left,
         tile_height,
@@ -711,7 +708,8 @@ fn build_homogeneity_maps(
 }
 
 fn combine_homogenous(
-    output: &mut Array3<f32>,
+    output_band: &mut [f32],
+    output_y0: usize,
     rgb: &[f32],
     homo: &[u8],
     top: usize,
@@ -720,15 +718,18 @@ fn combine_homogenous(
     tile_width: usize,
     _width: usize,
 ) {
-    let (img_height, img_width, _) = output.dim();
-
-    for row in (top + 3)..(tile_height.saturating_sub(3)).min(img_height) {
+    let output_rows = output_band.len() / (_width * 3);
+    let output_y1 = output_y0 + output_rows;
+    for row in (top + 3)..(tile_height.saturating_sub(3)).min(output_y1) {
+        if row < output_y0 {
+            continue;
+        }
         let tr = row - top;
         if !(3..TS - 3).contains(&tr) {
             continue;
         } // Bounds check
 
-        for col in (left + 3)..(tile_width.saturating_sub(3)).min(img_width) {
+        for col in (left + 3)..(tile_width.saturating_sub(3)).min(_width) {
             let tc = col - left;
             if !(3..TS - 3).contains(&tc) {
                 continue;
@@ -748,12 +749,14 @@ fn combine_homogenous(
             if hm[0] != hm[1] {
                 let best_d = if hm[1] > hm[0] { 1 } else { 0 };
                 for c in 0..3 {
-                    output[[row, col, c]] = rgb[tile_rgb_index(best_d, tr, tc, c)];
+                    let output_index = ((row - output_y0) * _width + col) * 3 + c;
+                    output_band[output_index] = rgb[tile_rgb_index(best_d, tr, tc, c)];
                 }
             } else {
                 // Average both directions
                 for c in 0..3 {
-                    output[[row, col, c]] = (rgb[tile_rgb_index(0, tr, tc, c)]
+                    let output_index = ((row - output_y0) * _width + col) * 3 + c;
+                    output_band[output_index] = (rgb[tile_rgb_index(0, tr, tc, c)]
                         + rgb[tile_rgb_index(1, tr, tc, c)])
                         * 0.5;
                 }
@@ -788,5 +791,39 @@ mod tests {
         let bayer = Array3::<f32>::from_elem((12, 12, 1), 1.5);
         let output = ahd_demosaic_f32_owned(bayer, &identity_camera_matrix()).unwrap();
         assert!(output.iter().copied().fold(0.0f32, f32::max) > 1.0);
+    }
+
+    #[test]
+    fn ahd_preserves_every_measured_cfa_sample_including_borders() {
+        const SIZE: usize = 340;
+        let mut bayer = Array3::<f32>::zeros((SIZE, SIZE, 1));
+        for row in 0..SIZE {
+            for col in 0..SIZE {
+                bayer[[row, col, 0]] = 0.05 + row as f32 * 0.001 + col as f32 * 0.0001;
+            }
+        }
+        let expected = bayer.clone();
+        let output = ahd_demosaic_f32_owned(bayer, &identity_camera_matrix()).unwrap();
+
+        for row in 0..SIZE {
+            for col in 0..SIZE {
+                let channel = fc_rgb(row, col);
+                assert!(
+                    (output[[row, col, channel]] - expected[[row, col, 0]]).abs() < 1e-6,
+                    "measured sample changed at ({row}, {col})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ahd_preserves_true_black_and_rejects_invalid_sensor_values() {
+        let black = Array3::<f32>::zeros((12, 12, 1));
+        let output = ahd_demosaic_f32_owned(black, &identity_camera_matrix()).unwrap();
+        assert!(output.iter().all(|value| *value == 0.0));
+
+        let mut invalid = Array3::<f32>::zeros((12, 12, 1));
+        invalid[[4, 4, 0]] = f32::NAN;
+        assert!(ahd_demosaic_f32_owned(invalid, &identity_camera_matrix()).is_err());
     }
 }

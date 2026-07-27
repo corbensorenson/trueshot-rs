@@ -17,13 +17,29 @@ fn main() -> Result<()> {
         .next()
         .map(PathBuf::from)
         .context("usage: nef_native_fusion_benchmark <nef_dir> [output_dir] [--workers N]")?;
-    let output = arguments.next().map(PathBuf::from);
-    let remaining: Vec<_> = arguments.collect();
-    let workers = remaining
-        .windows(2)
-        .find(|pair| pair[0] == "--workers")
-        .and_then(|pair| pair[1].to_str())
-        .and_then(|value| value.parse::<usize>().ok());
+    let mut output = None;
+    let mut workers = None;
+    while let Some(argument) = arguments.next() {
+        if argument == "--workers" {
+            workers = Some(
+                arguments
+                    .next()
+                    .context("--workers requires a positive integer")?
+                    .to_string_lossy()
+                    .parse::<usize>()
+                    .context("--workers must be a positive integer")?,
+            );
+            if workers == Some(0) {
+                anyhow::bail!("--workers must be positive");
+            }
+        } else if argument.to_string_lossy().starts_with('-') {
+            anyhow::bail!("Unknown option {}", argument.to_string_lossy());
+        } else if output.is_none() {
+            output = Some(PathBuf::from(argument));
+        } else {
+            anyhow::bail!("Only one output directory may be supplied");
+        }
+    }
 
     run(&input, output.as_deref(), workers)
 }

@@ -10,6 +10,34 @@ use anyhow::{Context, Result};
 use ndarray::Array3;
 use std::path::Path;
 
+const REFERENCE_SHUTTER_SECONDS: f64 = 1.0 / 125.0;
+const REFERENCE_APERTURE: f64 = 5.6;
+const REFERENCE_ISO: f64 = 100.0;
+
+pub(crate) fn relative_sensor_exposure_ev(
+    shutter_seconds: f64,
+    aperture: f64,
+    iso: f64,
+) -> Result<f64> {
+    if !shutter_seconds.is_finite()
+        || !aperture.is_finite()
+        || !iso.is_finite()
+        || shutter_seconds <= 0.0
+        || aperture <= 0.0
+        || iso <= 0.0
+    {
+        anyhow::bail!(
+            "Invalid exposure metadata: shutter={} aperture={} iso={}",
+            shutter_seconds,
+            aperture,
+            iso
+        );
+    }
+    let sensor_exposure = shutter_seconds * (iso / REFERENCE_ISO) / aperture.powi(2);
+    let reference_exposure = REFERENCE_SHUTTER_SECONDS / REFERENCE_APERTURE.powi(2);
+    Ok((sensor_exposure / reference_exposure).log2())
+}
+
 /// Sidecar-free result for high-throughput NEF crop pipelines.
 ///
 /// Pixels remain in their native `u16` CFA representation so callers do not
@@ -133,15 +161,14 @@ fn convert_raw_buffer_to_bayer_frame(
     }
 
     // Calculate exposure scale FIRST (for HDR)
-    let shutter_speed = metadata.exposure_time.unwrap_or(1.0 / 125.0);
-    let iso = metadata.iso.unwrap_or(100) as u16;
+    let shutter_speed = metadata.exposure_time.unwrap_or(REFERENCE_SHUTTER_SECONDS);
+    let iso = metadata.iso.unwrap_or(100);
     let aperture = metadata.aperture.unwrap_or(5.6) as f64;
 
-    let exposure_ev = (shutter_speed / (1.0 / 125.0)).log2() + (aperture / 5.6).powi(2).log2()
-        - (iso as f64 / 100.0).log2();
+    let exposure_ev = relative_sensor_exposure_ev(shutter_speed, aperture, f64::from(iso))?;
 
-    // For HDR: scale pixel values by exposure to preserve relative brightness
-    let exposure_scale = 2.0f64.powf(exposure_ev);
+    // Normalize sensor signal to scene radiance at the reference exposure.
+    let exposure_scale = 2.0f64.powf(-exposure_ev);
     tracing::info!(
         "Exposure: EV={:.2}, scale={:.3}x (shutter={:.6}s, ISO={}, f/{:.1})",
         exposure_ev,
@@ -230,7 +257,7 @@ fn convert_raw_buffer_to_bayer_frame(
         focus_step: 0,     // Will be set by sequence grouper
         exposure_ev,
         shutter_speed,
-        iso,
+        iso: u16::try_from(iso).unwrap_or(u16::MAX),
         aperture,
         focal_length,
         rotation_deg,
@@ -375,5 +402,25 @@ mod tests {
         let eroded = rect.adjust(-0.1);
         assert!(eroded.width < rect.width);
         assert!(eroded.height < rect.height);
+    }
+
+    #[test]
+    fn exposure_ev_tracks_sensor_signal_and_radiance_inverse() {
+        let reference = relative_sensor_exposure_ev(1.0 / 125.0, 5.6, 100.0).unwrap();
+        let slower_shutter = relative_sensor_exposure_ev(2.0 / 125.0, 5.6, 100.0).unwrap();
+        let higher_iso = relative_sensor_exposure_ev(1.0 / 125.0, 5.6, 200.0).unwrap();
+        let stopped_down = relative_sensor_exposure_ev(1.0 / 125.0, 11.2, 100.0).unwrap();
+
+        assert!(reference.abs() < 1e-12);
+        assert!((slower_shutter - 1.0).abs() < 1e-12);
+        assert!((higher_iso - 1.0).abs() < 1e-12);
+        assert!((stopped_down + 2.0).abs() < 1e-12);
+        assert!((2.0f64.powf(-slower_shutter) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn invalid_exposure_metadata_fails_closed() {
+        assert!(relative_sensor_exposure_ev(0.0, 5.6, 100.0).is_err());
+        assert!(relative_sensor_exposure_ev(1.0 / 125.0, f64::NAN, 100.0).is_err());
     }
 }
