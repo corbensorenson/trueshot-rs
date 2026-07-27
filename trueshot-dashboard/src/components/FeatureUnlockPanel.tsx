@@ -35,19 +35,19 @@ export const FeatureUnlockPanel = ({
                 </div>
                 <div className="flex-1">
                     <div className="text-xs uppercase tracking-[0.18em] text-accent-cyan font-bold">Upgrade Available</div>
-                    <h4 className="text-2xl font-black text-white mt-1">{title}</h4>
-                    <p className="text-white/70 mt-1">{subtitle}</p>
+                    <h4 className="text-2xl font-black text-[color:var(--ts-text)] mt-1">{title}</h4>
+                    <p className="text-[color:var(--ts-muted)] mt-1">{subtitle}</p>
                 </div>
                 <div className="text-right">
-                    <div className="text-xs uppercase tracking-widest text-white/40">Bundle</div>
-                    <div className="font-bold text-white">{bundleName}</div>
+                    <div className="text-xs uppercase tracking-widest text-[color:var(--ts-muted)]">Bundle</div>
+                    <div className="font-bold text-[color:var(--ts-text)]">{bundleName}</div>
                     <div className="text-accent-cyan font-black mt-1">{priceLabel}</div>
                 </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
                 {capabilities.map(item => (
-                    <div key={item} className="flex items-center gap-2 text-sm text-white/80 bg-black/20 border border-white/10 rounded-lg px-3 py-2">
+                    <div key={item} className="flex items-center gap-2 text-sm text-[color:var(--ts-text)] bg-[color:var(--ts-surface-muted)] border border-[color:var(--ts-border)] rounded-lg px-3 py-2">
                         <CheckCircle2 className="w-4 h-4 text-accent-cyan" />
                         {item}
                     </div>
@@ -71,7 +71,7 @@ export const FeatureUnlockPanel = ({
                 </button>
                 <button
                     onClick={onBuy}
-                    className="px-5 py-3 rounded-xl bg-white/10 hover:bg-white/20 text-white font-bold uppercase tracking-wider border border-white/15 flex items-center gap-2"
+                    className="px-5 py-3 rounded-xl bg-[color:var(--ts-surface-muted)] hover:bg-[color:var(--ts-surface-elevated)] text-[color:var(--ts-text)] font-bold uppercase tracking-wider border border-[color:var(--ts-border)] flex items-center gap-2"
                 >
                     <BadgeDollarSign className="w-4 h-4" />
                     Buy Lifetime

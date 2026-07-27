@@ -95,6 +95,10 @@ This checklist is the minimum bar for a production deployment. It assumes `TRUES
   all-feature Linux dependency graph has unresolved vulnerability,
   maintenance, license-policy, and duplicate-version findings from
   `cargo-deny` 0.19.0.
+- Dashboard release is also blocked by P0 #155: `npm audit --omit=dev` reports
+  6 production advisories (5 high, 1 moderate), while the complete graph
+  reports 22. Installation currently needs `--legacy-peer-deps` because
+  `react-joyride` does not declare React 19 compatibility.
 - Optional OpenCV feature validation remains release work: the workspace
   currently resolves three incompatible `opencv` crate generations and does
   not provision a complete native binding toolchain in CI.

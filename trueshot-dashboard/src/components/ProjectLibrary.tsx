@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
-import { FolderOpen, Upload, Box, HardDrive, Clock, Share2, Scissors } from 'lucide-react';
+import { FolderOpen, Upload, Box, HardDrive, Clock, Share2, Scissors, ScanSearch } from 'lucide-react';
 import { getProjects, createProject, openProjectFolder, importModel, getImuDiagnostics, getProjectLicense, type ImuDiagnostics, type ProjectLicense } from '../api/client';
 import toast from 'react-hot-toast';
 import { ShareAssetModal } from './ShareAssetModal';
 import { EditAssetModal } from './EditAssetModal';
+import { FusionInspector } from './FusionInspector';
 
 interface ProjectLibraryProps {
     isOpen: boolean;
@@ -21,10 +22,15 @@ export const ProjectLibrary = ({ isOpen, onClose }: ProjectLibraryProps) => {
     const [licenseTerms, setLicenseTerms] = useState<Record<string, ProjectLicense | null>>({});
     const [shareProjectId, setShareProjectId] = useState<string | null>(null);
     const [editProjectId, setEditProjectId] = useState<string | null>(null);
+    const [fusionProjectId, setFusionProjectId] = useState<string | null>(null);
 
     useEffect(() => {
         if (isOpen) {
-            getProjects().then(setProjects).catch(e => {
+            getProjects().then(data => {
+                setProjects(data);
+                setImuDiagnostics({});
+                setLicenseTerms({});
+            }).catch(e => {
                 console.error(e);
                 toast.error("Failed to load projects");
             });
@@ -34,8 +40,6 @@ export const ProjectLibrary = ({ isOpen, onClose }: ProjectLibraryProps) => {
     useEffect(() => {
         if (!isOpen || projects.length === 0) return;
         let cancelled = false;
-        setImuDiagnostics({});
-        setLicenseTerms({});
         const loadDiagnostics = async () => {
             for (const project of projects) {
                 if (!project.name) continue;
@@ -155,15 +159,15 @@ export const ProjectLibrary = ({ isOpen, onClose }: ProjectLibraryProps) => {
                             </div>
 
                             {/* Actions Overlay */}
-                            <div className="absolute inset-0 bg-black/90 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-all duration-300 flex flex-col items-center justify-center gap-3 p-4 translate-y-4 group-hover:translate-y-0">
+                            <div className="absolute inset-0 grid grid-cols-2 content-center gap-2 bg-black/90 p-3 opacity-0 backdrop-blur-sm transition-all duration-300 translate-y-4 group-hover:translate-y-0 group-hover:opacity-100">
                                 <button
                                     onClick={() => {
                                         if (!p.name) return;
                                         openProjectFolder(p.name);
                                     }}
-                                    className="bg-white/10 hover:bg-white text-white hover:text-black px-4 py-3 rounded-xl text-xs font-bold uppercase tracking-widest flex items-center gap-2 transition-all w-full justify-center border border-white/10"
+                                    className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/10 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-white transition-all hover:bg-white hover:text-black"
                                 >
-                                    <FolderOpen className="w-4 h-4" /> Open Folder
+                                    <FolderOpen className="w-4 h-4" /> Folder
                                 </button>
                                 <button
                                     onClick={() => {
@@ -171,21 +175,27 @@ export const ProjectLibrary = ({ isOpen, onClose }: ProjectLibraryProps) => {
                                         setActiveImportId(p.name);
                                         fileInputRef.current?.click();
                                     }}
-                                    className="bg-accent-blue/10 hover:bg-accent-blue text-accent-blue hover:text-black px-4 py-3 rounded-xl text-xs font-bold uppercase tracking-widest flex items-center gap-2 transition-all w-full justify-center border border-accent-blue/20"
+                                    className="flex items-center justify-center gap-2 rounded-lg border border-accent-blue/20 bg-accent-blue/10 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-accent-blue transition-all hover:bg-accent-blue hover:text-black"
                                 >
-                                    <Upload className="w-4 h-4" /> Import Model
+                                    <Upload className="w-4 h-4" /> Import
                                 </button>
                                 <button
                                     onClick={() => setShareProjectId(p.name || null)}
-                                    className="bg-white/5 hover:bg-white text-white hover:text-black px-4 py-3 rounded-xl text-xs font-bold uppercase tracking-widest flex items-center gap-2 transition-all w-full justify-center border border-white/10"
+                                    className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-white transition-all hover:bg-white hover:text-black"
                                 >
-                                    <Share2 className="w-4 h-4" /> Share Asset
+                                    <Share2 className="w-4 h-4" /> Share
                                 </button>
                                 <button
                                     onClick={() => setEditProjectId(p.name || null)}
-                                    className="bg-white/5 hover:bg-white text-white hover:text-black px-4 py-3 rounded-xl text-xs font-bold uppercase tracking-widest flex items-center gap-2 transition-all w-full justify-center border border-white/10"
+                                    className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-white transition-all hover:bg-white hover:text-black"
                                 >
-                                    <Scissors className="w-4 h-4" /> Edit Asset
+                                    <Scissors className="w-4 h-4" /> Edit
+                                </button>
+                                <button
+                                    onClick={() => setFusionProjectId(p.name || null)}
+                                    className="col-span-2 flex items-center justify-center gap-2 rounded-lg border border-accent-cyan/25 bg-accent-cyan/10 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-accent-cyan transition-all hover:bg-accent-cyan hover:text-black"
+                                >
+                                    <ScanSearch className="w-4 h-4" /> Inspect Fusion
                                 </button>
                             </div>
                         </div>
@@ -208,6 +218,11 @@ export const ProjectLibrary = ({ isOpen, onClose }: ProjectLibraryProps) => {
                 projectId={editProjectId}
                 open={Boolean(editProjectId)}
                 onClose={() => setEditProjectId(null)}
+            />
+            <FusionInspector
+                projectId={fusionProjectId}
+                open={Boolean(fusionProjectId)}
+                onClose={() => setFusionProjectId(null)}
             />
         </div>
     );

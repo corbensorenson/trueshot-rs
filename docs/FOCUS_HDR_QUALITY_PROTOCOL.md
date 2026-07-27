@@ -109,6 +109,10 @@ Implemented:
   measured-reference fallback.
 - Exact 16-bit source maps, exact 8-bit fusion-state maps, a bounded visible
   provenance overlay, and a machine-readable fusion report.
+- A local Fusion Inspector discovers validated schema-v2 reports, displays
+  source/deghost/frequency/glare/aperture-boundary/sensor-correction evidence,
+  exposes calibration and fallback status, and downloads exact archival maps.
+  Encrypted report and PNG reads are bounded and decrypted only in memory.
 - Confidence- and edge-aware depth regularization with dominant-plane refusion.
 - Synthetic focus, radiance invariance, deghost, tile-boundary, and fail-closed
   gates.
@@ -140,7 +144,9 @@ Not yet qualified:
 - Direct Helicon/Lightroom corpus results.
 - Z9 camera-to-standard color matrix, ICC/DNG profile tagging, and DeltaE 2000
   release gate.
-- Interactive source/deghost retouching in the dashboard.
+- Interactive source/glare/trimap edit documents and deterministic
+  measured-source refusion in the dashboard. Read-only inspection is
+  implemented.
 - Hair/thin-structure halo gates and multi-method automatic focus strategy.
 - Retained real per-ISO Z9 dark/flat calibration and real-sensor posterior
   uncertainty coverage. The capture/fit CLI, independent holdout gates,

@@ -601,9 +601,95 @@ export interface ProjectAsset {
 }
 
 export const listProjectAssets = async (projectId: string, scope: 'output' | 'processed' | 'all' = 'output') => {
-    const res = await fetchAuthed(`${API_Base}/projects/${projectId}/assets?scope=${scope}`, { headers: authHeaders() });
+    const res = await fetchAuthed(`${API_Base}/projects/${encodeURIComponent(projectId)}/assets?scope=${scope}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(await res.text());
     return res.json() as Promise<ProjectAsset[]>;
+};
+
+export interface FusionArtifactRef {
+    path: string;
+    present: boolean;
+    bytes?: number | null;
+}
+
+export interface FusionFlagSummary {
+    bit: number;
+    pixels: number;
+}
+
+export interface FusionReportSummary {
+    report_path: string;
+    label: string;
+    modified_at?: string | null;
+    schema: string;
+    width: number;
+    height: number;
+    integrity_complete: boolean;
+    warnings: string[];
+    artifacts: Record<string, FusionArtifactRef>;
+    flags: Record<string, FusionFlagSummary>;
+    frequency_flags: Record<string, FusionFlagSummary>;
+    boundary_trimap_legend: Record<string, number>;
+    sensor_correction_legend: Record<string, number>;
+    metrics: Record<string, number>;
+    policy: {
+        archival: string;
+        focus: string;
+        boundary: string;
+        glare: string;
+        frequency: string;
+    };
+    calibration: {
+        noise_model_calibrated: boolean;
+        lens_psf_calibrated: boolean;
+        sensor_correction_id?: string | null;
+        lens_psf_calibration_id?: string | null;
+    };
+    demosaic: {
+        backend?: string | null;
+        adapter?: string | null;
+        fallback: boolean;
+        generative_reconstruction: boolean;
+    };
+    performance: {
+        decode_seconds?: number | null;
+        fusion_seconds?: number | null;
+        demosaic_and_postprocess_seconds?: number | null;
+        processing_before_export_seconds?: number | null;
+        decoded_megapixels?: number | null;
+        admitted_peak_memory_bytes?: number | null;
+        major_page_faults?: number | null;
+    };
+}
+
+export interface FusionReportInventory {
+    reports: FusionReportSummary[];
+    rejected_reports: number;
+    truncated: boolean;
+}
+
+export const listFusionReports = async (projectId: string, limit = 32): Promise<FusionReportInventory> => {
+    const params = new URLSearchParams({ limit: String(Math.max(1, Math.min(128, limit))) });
+    const res = await fetchAuthed(
+        `${API_Base}/projects/${encodeURIComponent(projectId)}/fusion-reports?${params.toString()}`,
+        { headers: authHeaders() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+};
+
+export const fetchFusionArtifact = async (projectId: string, artifactPath: string): Promise<Blob> => {
+    const encodedPath = artifactPath
+        .split('/')
+        .filter(Boolean)
+        .map(segment => encodeURIComponent(segment))
+        .join('/');
+    const res = await fetchAuthed(
+        `${API_Base}/projects/${encodeURIComponent(projectId)}/fusion-artifact/${encodedPath}`,
+        { headers: authHeaders() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return res.blob();
 };
 
 export type MeshEditOp =
@@ -630,7 +716,7 @@ export interface EditHistoryEntry {
     asset_type: string;
     input_path: string;
     output_path: string;
-    operations: any;
+    operations: unknown;
 }
 
 export const applyMeshEdits = async (projectId: string, payload: {

@@ -11177,6 +11177,7 @@ dependencies = [
  "sysinfo 0.37.2",
  "tantivy",
  "tar",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

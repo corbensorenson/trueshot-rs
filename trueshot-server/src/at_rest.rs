@@ -474,6 +474,73 @@ pub fn decrypt_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBuf> {
     Ok(original_path)
 }
 
+/// Decrypt a file into memory without materializing plaintext beside the
+/// encrypted artifact. Intended for bounded API reads of reports and previews.
+pub fn decrypt_file_to_bytes(
+    path: &Path,
+    key: &[u8; 32],
+    max_plaintext_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open encrypted file: {}", path.display()))?;
+    let mut header = [0u8; 4];
+    file.read_exact(&mut header)?;
+    if &header != MAGIC {
+        anyhow::bail!("Invalid encryption header");
+    }
+    let mut version = [0u8; 1];
+    file.read_exact(&mut version)?;
+    if version[0] != VERSION {
+        anyhow::bail!("Unsupported encryption version");
+    }
+    let mut chunk_bytes = [0u8; 4];
+    file.read_exact(&mut chunk_bytes)?;
+    let chunk_size = u32::from_le_bytes(chunk_bytes) as usize;
+    if chunk_size == 0 || chunk_size > DEFAULT_CHUNK_SIZE {
+        anyhow::bail!("Invalid encrypted chunk size");
+    }
+    let mut nonce_prefix = [0u8; 8];
+    file.read_exact(&mut nonce_prefix)?;
+
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let capacity = std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| usize::try_from(meta.len()).ok())
+        .unwrap_or(0)
+        .min(max_plaintext_bytes);
+    let mut output = Vec::with_capacity(capacity);
+    let mut chunk_index = 0u32;
+    loop {
+        let mut len_buf = [0u8; 4];
+        let first = file.read(&mut len_buf[..1])?;
+        if first == 0 {
+            break;
+        }
+        file.read_exact(&mut len_buf[1..])?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len < 16 || len > chunk_size.saturating_add(16) {
+            anyhow::bail!("Invalid encrypted chunk length");
+        }
+        let mut cipher_buf = vec![0u8; len];
+        file.read_exact(&mut cipher_buf)?;
+        let nonce = build_nonce(&nonce_prefix, chunk_index);
+        let plaintext = cipher
+            .decrypt(Nonce::from_slice(&nonce), cipher_buf.as_ref())
+            .with_context(|| format!("Decryption failed for {}", path.display()))?;
+        if output.len().saturating_add(plaintext.len()) > max_plaintext_bytes {
+            anyhow::bail!(
+                "Decrypted file exceeds {} byte read limit",
+                max_plaintext_bytes
+            );
+        }
+        output.extend_from_slice(&plaintext);
+        chunk_index = chunk_index
+            .checked_add(1)
+            .context("Encrypted file contains too many chunks")?;
+    }
+    Ok(output)
+}
+
 fn encrypt_tree(
     root: &Path,
     key: &[u8; 32],
@@ -675,4 +742,41 @@ fn set_key_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_key_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_decryption_does_not_materialize_plaintext() {
+        let directory = tempfile::tempdir().unwrap();
+        let plaintext_path = directory.path().join("report.json");
+        let encrypted_path = directory.path().join("report.json.enc");
+        let payload = br#"{"schema":"trueshot.fusion.provenance.v2"}"#;
+        let key = [0x5au8; 32];
+        std::fs::write(&plaintext_path, payload).unwrap();
+        encrypt_file(&plaintext_path, &encrypted_path, &key).unwrap();
+        std::fs::remove_file(&plaintext_path).unwrap();
+
+        let decoded = decrypt_file_to_bytes(&encrypted_path, &key, payload.len()).unwrap();
+
+        assert_eq!(decoded, payload);
+        assert!(!plaintext_path.exists());
+        assert!(encrypted_path.exists());
+    }
+
+    #[test]
+    fn bounded_decryption_rejects_oversized_plaintext() {
+        let directory = tempfile::tempdir().unwrap();
+        let plaintext_path = directory.path().join("map.png");
+        let encrypted_path = directory.path().join("map.png.enc");
+        let key = [0x33u8; 32];
+        std::fs::write(&plaintext_path, [7u8; 32]).unwrap();
+        encrypt_file(&plaintext_path, &encrypted_path, &key).unwrap();
+
+        let error = decrypt_file_to_bytes(&encrypted_path, &key, 31).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds 31 byte read limit"));
+    }
 }

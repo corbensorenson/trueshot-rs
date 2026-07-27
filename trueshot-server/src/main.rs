@@ -701,11 +701,13 @@ async fn main() -> std::io::Result<()> {
             .service(api::project::import_model)
             .service(api::project::download_raw_file)
             .service(api::project::download_output_file)
+            .service(api::project::download_fusion_artifact)
             .service(api::project::download_processed_file)
             .service(api::project::get_imu_diagnostics)
             .service(api::project::get_project_license)
             .service(api::project::update_project_license)
             .service(api::project::list_project_assets)
+            .service(api::project::list_fusion_reports)
             .service(api::project::encrypt_project)
             .service(api::project::decrypt_project)
             // Annotations
