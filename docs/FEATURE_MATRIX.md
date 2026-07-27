@@ -15,9 +15,10 @@ Legend: **Shipping**, **In Progress**, **Planned**
 | Capture | Burst capture + best-frame selection | In Progress | Capture path wired; full selection policy tuning pending |
 | Capture | Explicit, deadlock-safe scan workflows | Shipping | Project load is side-effect free; file-backed and no-camera integration tests enforce bounded startup/capture behavior |
 | Capture | Thread-affine webcam and 360-camera lifecycle | Shipping | Nokhwa handles stay on bounded dedicated actors with deadline, panic, shutdown, and atomic-capture tests; no unsafe thread assertions |
-| Capture | Group-amortized Nikon NEF ROI decode | Shipping | One scaled preview/bbox per HDR-focus group; bounded parallel decoders fill ordered slots in one reusable contiguous `u16` arena with no per-frame crop allocation or sidecar |
+| Capture | Group-amortized Nikon Z9 NEF ROI decode | Shipping | One scaled preview/bbox per HDR-focus group; bounded parallel decoders fill ordered slots in one reusable contiguous `u16` arena with no per-frame crop allocation or sidecar; advertised layouts are restricted by the NEF support matrix |
 | Capture | Streaming capture manifests | Shipping | Incremental atomic JSONL writer records explicit HDR/focus/burst order, one reference frame, stable content IDs and one reusable crop plan per group |
 | Processing | Native HDR + focus fusion | Shipping | Tiled `f32` fusion consumes the `u16` arena directly with lazy exposure/WB calibration, subpixel alignment, confidence and depth |
+| Processing | Camera-profiled RAW normalization | Shipping | Real TIFF make/model identity selects verified sensor black/saturation levels; Z9 firmware 5.00 uses measured 1008/15311 levels and explicit overrides remain available |
 | Processing | Hierarchical Bayer-preserving super-resolution | Shipping | Native mode retains Bayer output; requested SR uses alignment diversity and joint high-resolution demosaic |
 | Processing | Native FAST/BRIEF + robust geometry | Shipping | FAST-9, BRIEF, adaptive RANSAC, MAGSAC, triangulation, and regression tests run without OpenCV |
 | Processing | Million-file bounded execution | Shipping | Memory-credit admission, adaptive decode workers, one-deep async export, durable retries/cancellation and crash-safe artifact-verified resume |

@@ -16,10 +16,11 @@ use super::preview::PreviewExtractor;
 use super::raw_data::{RawBuffer, Roi, WarpMatrix};
 use super::tiff::TiffParser;
 use super::{
-    TIFF_TAG_BITS_PER_SAMPLE, TIFF_TAG_COMPRESSION, TIFF_TAG_IMAGE_LENGTH, TIFF_TAG_IMAGE_WIDTH,
-    TIFF_TAG_JPEG_INTERCHANGE_FORMAT, TIFF_TAG_JPEG_INTERCHANGE_FORMAT_LENGTH,
-    TIFF_TAG_ROWS_PER_STRIP, TIFF_TAG_STRIP_BYTE_COUNTS, TIFF_TAG_STRIP_OFFSETS, Z9_CFA_PATTERN,
-    Z9_HEIGHT, Z9_WIDTH,
+    TIFF_TAG_BITS_PER_SAMPLE, TIFF_TAG_CFA_PATTERN, TIFF_TAG_CFA_REPEAT_PATTERN_DIM,
+    TIFF_TAG_COMPRESSION, TIFF_TAG_IMAGE_LENGTH, TIFF_TAG_IMAGE_WIDTH,
+    TIFF_TAG_JPEG_INTERCHANGE_FORMAT, TIFF_TAG_JPEG_INTERCHANGE_FORMAT_LENGTH, TIFF_TAG_MAKE,
+    TIFF_TAG_MODEL, TIFF_TAG_ROWS_PER_STRIP, TIFF_TAG_STRIP_BYTE_COUNTS, TIFF_TAG_STRIP_OFFSETS,
+    Z9_CFA_PATTERN,
 };
 
 /// EXIF data structure for metadata extraction
@@ -42,6 +43,8 @@ pub struct Z9Metadata {
     pub cfa_pattern: [u8; 4],
     pub camera_make: String,
     pub camera_model: String,
+    /// Verified sensor-domain normalization limits for this camera profile.
+    pub sensor_levels: Option<SensorLevels>,
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
     pub rows_per_strip: u32,
@@ -54,6 +57,45 @@ pub struct Z9Metadata {
     pub iso: Option<u32>,
     pub focal_length: Option<f32>,
     pub focus_distance: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SensorLevels {
+    pub black: u16,
+    pub white: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SensorProfile {
+    levels: SensorLevels,
+    cfa_pattern: [u8; 4],
+}
+
+fn is_nikon_z9(make: &str, model: &str) -> bool {
+    let make = make
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    let model = model
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    (make.eq_ignore_ascii_case("nikon") || make.eq_ignore_ascii_case("nikoncorporation"))
+        && (model.eq_ignore_ascii_case("z9") || model.eq_ignore_ascii_case("nikonz9"))
+}
+
+fn verified_sensor_profile(make: &str, model: &str, bits_per_sample: u16) -> Option<SensorProfile> {
+    if is_nikon_z9(make, model) && bits_per_sample == 14 {
+        return Some(SensorProfile {
+            // Validated against RawSpeed/LibRaw on local Z9 firmware 5.00 captures.
+            levels: SensorLevels {
+                black: 1008,
+                white: 15311,
+            },
+            cfa_pattern: Z9_CFA_PATTERN,
+        });
+    }
+    None
 }
 
 pub struct Z9NefParser {
@@ -144,6 +186,23 @@ impl Z9NefParser {
         // Read main IFD (IFD0)
         let ifd0 = self.tiff_parser.read_ifd(&mut reader, header.ifd_offset)?;
         tracing::info!("IFD0 contains {} entries", ifd0.len());
+        let camera_make = self
+            .tiff_parser
+            .read_ascii(
+                &mut reader,
+                ifd0.get(&TIFF_TAG_MAKE)
+                    .context("NEF IFD0 is missing camera make")?,
+            )
+            .context("Unable to read NEF camera make")?;
+        let camera_model = self
+            .tiff_parser
+            .read_ascii(
+                &mut reader,
+                ifd0.get(&TIFF_TAG_MODEL)
+                    .context("NEF IFD0 is missing camera model")?,
+            )
+            .context("Unable to read NEF camera model")?;
+        tracing::info!("NEF camera identity: {} {}", camera_make, camera_model);
 
         // Check for additional IFDs that might contain RAW data
         let mut current_ifd_offset = header.ifd_offset;
@@ -281,6 +340,8 @@ impl Z9NefParser {
                                             &subifd,
                                             makernote_offset,
                                             makernote_size,
+                                            &camera_make,
+                                            &camera_model,
                                         )?;
                                         self.metadata = Some(metadata);
 
@@ -310,8 +371,14 @@ impl Z9NefParser {
                 // Use this IFD for RAW data if it's not IFD0 (which is usually metadata/preview)
                 if ifd_index > 0 {
                     tracing::info!("Using IFD{} for RAW data extraction", ifd_index);
-                    let metadata =
-                        self.extract_metadata(&mut reader, &ifd, makernote_offset, makernote_size)?;
+                    let metadata = self.extract_metadata(
+                        &mut reader,
+                        &ifd,
+                        makernote_offset,
+                        makernote_size,
+                        &camera_make,
+                        &camera_model,
+                    )?;
                     self.metadata = Some(metadata);
                     return Ok(());
                 }
@@ -321,9 +388,7 @@ impl Z9NefParser {
             reader.seek(SeekFrom::Start(
                 current_ifd_offset + 2 + (ifd.len() as u64 * 12),
             ))?;
-            let mut next_offset_bytes = [0u8; 4];
-            reader.read_exact(&mut next_offset_bytes)?;
-            let next_offset = u32::from_le_bytes(next_offset_bytes) as u64;
+            let next_offset = self.tiff_parser.read_next_ifd_offset(&mut reader)?;
 
             tracing::info!("Next IFD offset: {}", next_offset);
 
@@ -342,8 +407,14 @@ impl Z9NefParser {
 
         // Fallback to IFD0 if no better IFD found
         tracing::warn!("No dedicated RAW IFD found, falling back to IFD0");
-        let metadata =
-            self.extract_metadata(&mut reader, &ifd0, makernote_offset, makernote_size)?;
+        let metadata = self.extract_metadata(
+            &mut reader,
+            &ifd0,
+            makernote_offset,
+            makernote_size,
+            &camera_make,
+            &camera_model,
+        )?;
         self.metadata = Some(metadata);
 
         // Store MakerNote info
@@ -446,7 +517,11 @@ impl Z9NefParser {
     pub fn supports_selective_loading(&self) -> bool {
         self.metadata
             .as_ref()
-            .map(|metadata| matches!(metadata.compression, 1 | 6 | 34713))
+            .map(|metadata| {
+                is_nikon_z9(&metadata.camera_make, &metadata.camera_model)
+                    && metadata.sensor_levels.is_some()
+                    && matches!(metadata.compression, 1 | 6 | 34713)
+            })
             .unwrap_or(false)
     }
 
@@ -458,32 +533,86 @@ impl Z9NefParser {
         ifd: &std::collections::HashMap<u16, super::tiff::IfdEntry>,
         makernote_offset: Option<u64>,
         makernote_size: Option<u64>,
+        camera_make: &str,
+        camera_model: &str,
     ) -> Result<Z9Metadata> {
-        // Extract basic image dimensions
-        let width = ifd
-            .get(&TIFF_TAG_IMAGE_WIDTH)
-            .map(|entry| entry.value_offset)
-            .unwrap_or(Z9_WIDTH);
-
-        let height = ifd
-            .get(&TIFF_TAG_IMAGE_LENGTH)
-            .map(|entry| entry.value_offset)
-            .unwrap_or(Z9_HEIGHT);
-
-        let bits_per_sample = ifd
-            .get(&TIFF_TAG_BITS_PER_SAMPLE)
-            .map(|entry| entry.value_offset as u16)
-            .unwrap_or(14); // Z9 uses 14-bit
-
-        let compression = ifd
-            .get(&TIFF_TAG_COMPRESSION)
-            .map(|entry| entry.value_offset as u16)
-            .unwrap_or(1); // Default to uncompressed
-
-        let rows_per_strip = ifd
-            .get(&TIFF_TAG_ROWS_PER_STRIP)
-            .map(|entry| entry.value_offset)
-            .unwrap_or(height); // Default to full height
+        let width = self
+            .tiff_parser
+            .read_unsigned_scalar(
+                reader,
+                ifd.get(&TIFF_TAG_IMAGE_WIDTH)
+                    .context("RAW IFD is missing image width")?,
+            )
+            .context("Unable to read RAW image width")?;
+        let height = self
+            .tiff_parser
+            .read_unsigned_scalar(
+                reader,
+                ifd.get(&TIFF_TAG_IMAGE_LENGTH)
+                    .context("RAW IFD is missing image height")?,
+            )
+            .context("Unable to read RAW image height")?;
+        let bits_per_sample = u16::try_from(
+            self.tiff_parser
+                .read_unsigned_scalar(
+                    reader,
+                    ifd.get(&TIFF_TAG_BITS_PER_SAMPLE)
+                        .context("RAW IFD is missing bits per sample")?,
+                )
+                .context("Unable to read RAW bits per sample")?,
+        )
+        .context("RAW bits per sample exceeds u16")?;
+        let compression = u16::try_from(
+            self.tiff_parser
+                .read_unsigned_scalar(
+                    reader,
+                    ifd.get(&TIFF_TAG_COMPRESSION)
+                        .context("RAW IFD is missing compression")?,
+                )
+                .context("Unable to read RAW compression")?,
+        )
+        .context("RAW compression exceeds u16")?;
+        let rows_per_strip = if let Some(entry) = ifd.get(&TIFF_TAG_ROWS_PER_STRIP) {
+            self.tiff_parser
+                .read_unsigned_scalar(reader, entry)
+                .context("Unable to read RAW rows per strip")?
+        } else {
+            height
+        };
+        if width == 0 || height == 0 || rows_per_strip == 0 {
+            anyhow::bail!(
+                "RAW dimensions/strip layout are invalid: {}x{}, rows_per_strip={}",
+                width,
+                height,
+                rows_per_strip
+            );
+        }
+        let profile = verified_sensor_profile(camera_make, camera_model, bits_per_sample);
+        let cfa_pattern = match (
+            ifd.get(&TIFF_TAG_CFA_REPEAT_PATTERN_DIM),
+            ifd.get(&TIFF_TAG_CFA_PATTERN),
+        ) {
+            (Some(dimensions), Some(pattern)) => {
+                let dimensions = self.tiff_parser.read_u16_array(reader, dimensions)?;
+                let pattern = self.tiff_parser.read_tag_data(reader, pattern)?;
+                if dimensions.as_slice() != [2, 2] || pattern.len() < 4 {
+                    anyhow::bail!(
+                        "Unsupported CFA layout {:?} with {} pattern entries",
+                        dimensions,
+                        pattern.len()
+                    );
+                }
+                [pattern[0], pattern[1], pattern[2], pattern[3]]
+            }
+            _ => profile
+                .map(|profile| profile.cfa_pattern)
+                .with_context(|| {
+                    format!(
+                        "No verified CFA profile for {} {} {}-bit RAW",
+                        camera_make, camera_model, bits_per_sample
+                    )
+                })?,
+        };
 
         // Read RAW data location - Z9 NEF files use JPEG Interchange Format tags
         let strip_offsets = if let Some(entry) = ifd.get(&TIFF_TAG_STRIP_OFFSETS) {
@@ -496,9 +625,13 @@ impl Z9NefParser {
         } else if let Some(entry) = ifd.get(&TIFF_TAG_JPEG_INTERCHANGE_FORMAT) {
             // Z9 NEF uses JPEG Interchange Format for RAW data
             tracing::info!("Using JPEG Interchange Format for RAW data");
-            vec![entry.value_offset as u64]
+            vec![u64::from(
+                self.tiff_parser
+                    .read_unsigned_scalar(reader, entry)
+                    .context("Unable to read RAW JPEG offset")?,
+            )]
         } else {
-            vec![8192] // Fallback offset after headers
+            anyhow::bail!("RAW IFD is missing strip/JPEG data offsets");
         };
 
         let strip_byte_counts = if let Some(entry) = ifd.get(&TIFF_TAG_STRIP_BYTE_COUNTS) {
@@ -511,11 +644,13 @@ impl Z9NefParser {
         } else if let Some(entry) = ifd.get(&TIFF_TAG_JPEG_INTERCHANGE_FORMAT_LENGTH) {
             // Z9 NEF uses JPEG Interchange Format Length for RAW data size
             tracing::info!("Using JPEG Interchange Format Length for RAW data size");
-            vec![entry.value_offset as u64]
+            vec![u64::from(
+                self.tiff_parser
+                    .read_unsigned_scalar(reader, entry)
+                    .context("Unable to read RAW JPEG byte count")?,
+            )]
         } else {
-            // Estimate based on image size
-            let estimated_size = (width * height * 2) as u64; // 16-bit storage
-            vec![estimated_size]
+            anyhow::bail!("RAW IFD is missing strip/JPEG byte counts");
         };
 
         // Extract white balance from MakerNote if available
@@ -538,9 +673,10 @@ impl Z9NefParser {
             height,
             bits_per_sample,
             compression,
-            cfa_pattern: Z9_CFA_PATTERN,
-            camera_make: "NIKON CORPORATION".to_string(),
-            camera_model: "NIKON Z 9".to_string(),
+            cfa_pattern,
+            camera_make: camera_make.to_owned(),
+            camera_model: camera_model.to_owned(),
+            sensor_levels: profile.map(|profile| profile.levels),
             strip_offsets,
             strip_byte_counts,
             rows_per_strip,
@@ -844,10 +980,10 @@ impl Z9NefParser {
     /// Extract ROI from LJPEG compressed strip (compression tag 6)
     /// Check if this is a Z9 camera
     fn is_z9_camera(&self) -> bool {
-        // Check maker and model to identify Z9 cameras
-        // For now, assume Z9 based on metadata characteristics
-        // Maker/model detection from TIFF metadata will be enhanced in future versions
-        true // Temporary - assume all files processed here are Z9
+        self.metadata
+            .as_ref()
+            .map(|metadata| is_nikon_z9(&metadata.camera_make, &metadata.camera_model))
+            .unwrap_or(false)
     }
 
     /// Extract ROI from packed format strip (LibRaw packed_load_raw equivalent)
@@ -2173,5 +2309,33 @@ impl Z9NefParser {
         } else {
             Err(anyhow::anyhow!("MakerNote not found"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_nikon_z9, verified_sensor_profile, SensorLevels};
+
+    #[test]
+    fn z9_identity_matching_is_model_specific() {
+        assert!(is_nikon_z9("NIKON CORPORATION", "NIKON Z 9"));
+        assert!(is_nikon_z9("Nikon", "Z 9"));
+        assert!(!is_nikon_z9("Nikon", "Z 8"));
+        assert!(!is_nikon_z9("Canon", "Z 9"));
+    }
+
+    #[test]
+    fn verified_z9_profile_uses_capture_validated_levels() {
+        let profile = verified_sensor_profile("NIKON CORPORATION", "NIKON Z 9", 14)
+            .expect("verified Z9 profile");
+        assert_eq!(
+            profile.levels,
+            SensorLevels {
+                black: 1008,
+                white: 15311
+            }
+        );
+        assert!(verified_sensor_profile("NIKON CORPORATION", "NIKON Z 8", 14).is_none());
+        assert!(verified_sensor_profile("NIKON CORPORATION", "NIKON Z 9", 12).is_none());
     }
 }

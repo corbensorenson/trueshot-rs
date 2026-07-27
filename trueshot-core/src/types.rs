@@ -75,7 +75,7 @@ pub struct FrameMeta {
     pub focal_length: f64, // mm
     pub rotation_deg: f32, // Parsed from filename
     pub vantage: String,   // "low", "mid", "high"
-    pub black_level: f64,  // From EXIF, typically 1024 for Z9
+    pub black_level: f64,  // From the verified camera sensor profile
     pub cam_mul: [f32; 4], // Camera white balance multipliers [R, G, B, G2]
 }
 

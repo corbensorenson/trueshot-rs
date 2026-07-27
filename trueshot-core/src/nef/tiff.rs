@@ -143,14 +143,18 @@ impl TiffParser {
         reader: &mut BufReader<&mut File>,
         entry: &IfdEntry,
     ) -> Result<Vec<u8>> {
-        let data_size = self.get_data_type_size(entry.data_type)? * entry.count as usize;
+        let data_size = self
+            .get_data_type_size(entry.data_type)?
+            .checked_mul(entry.count as usize)
+            .context("TIFF tag data size overflow")?;
 
         if data_size <= 4 {
             // Data is stored in the value_offset field itself
-            let mut data = Vec::new();
-            let bytes = entry.value_offset.to_le_bytes();
-            data.extend_from_slice(&bytes[0..data_size]);
-            Ok(data)
+            let bytes = match self.byte_order {
+                ByteOrder::LittleEndian => entry.value_offset.to_le_bytes(),
+                ByteOrder::BigEndian => entry.value_offset.to_be_bytes(),
+            };
+            Ok(bytes[..data_size].to_vec())
         } else {
             // Data is stored at the offset
             reader.seek(SeekFrom::Start(entry.value_offset as u64))?;
@@ -158,6 +162,39 @@ impl TiffParser {
             reader.read_exact(&mut data)?;
             Ok(data)
         }
+    }
+
+    pub fn read_ascii(
+        &self,
+        reader: &mut BufReader<&mut File>,
+        entry: &IfdEntry,
+    ) -> Result<String> {
+        if entry.data_type != TiffDataType::Ascii as u16 {
+            anyhow::bail!(
+                "TIFF tag {} is type {}, expected ASCII",
+                entry.tag,
+                entry.data_type
+            );
+        }
+        if entry.count == 0 || entry.count > 4096 {
+            anyhow::bail!(
+                "TIFF ASCII tag {} has invalid length {}",
+                entry.tag,
+                entry.count
+            );
+        }
+        let bytes = self.read_tag_data(reader, entry)?;
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        let value = std::str::from_utf8(&bytes[..end])
+            .context("TIFF ASCII tag is not valid UTF-8")?
+            .trim();
+        if value.is_empty() {
+            anyhow::bail!("TIFF ASCII tag {} is empty", entry.tag);
+        }
+        Ok(value.to_owned())
     }
 
     pub fn read_u32_array(
@@ -188,6 +225,31 @@ impl TiffParser {
         }
 
         Ok(result)
+    }
+
+    pub fn read_unsigned_scalar(
+        &self,
+        reader: &mut BufReader<&mut File>,
+        entry: &IfdEntry,
+    ) -> Result<u32> {
+        if entry.count == 0 {
+            anyhow::bail!("TIFF tag {} has no values", entry.tag);
+        }
+        let data = self.read_tag_data(reader, entry)?;
+        match entry.data_type {
+            1 => data
+                .first()
+                .copied()
+                .map(u32::from)
+                .context("TIFF BYTE tag has no data"),
+            3 => self.read_u16(&data).map(u32::from),
+            4 => self.read_u32(&data),
+            other => anyhow::bail!(
+                "TIFF tag {} has unsupported scalar type {}",
+                entry.tag,
+                other
+            ),
+        }
     }
 
     fn read_u16(&self, bytes: &[u8]) -> Result<u16> {
@@ -226,5 +288,70 @@ impl TiffParser {
 impl Default for TiffParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ByteOrder, IfdEntry, TiffParser};
+    use std::io::{BufReader, Seek, SeekFrom, Write};
+
+    #[test]
+    fn inline_scalars_respect_tiff_byte_order() {
+        let mut file = tempfile::tempfile().expect("temporary TIFF");
+        let mut reader = BufReader::new(&mut file);
+        let entry = IfdEntry {
+            tag: 258,
+            data_type: 3,
+            count: 1,
+            value_offset: 0x1234,
+        };
+        let little = TiffParser {
+            byte_order: ByteOrder::LittleEndian,
+        };
+        assert_eq!(
+            little
+                .read_unsigned_scalar(&mut reader, &entry)
+                .expect("little-endian SHORT"),
+            0x1234
+        );
+
+        let entry = IfdEntry {
+            value_offset: 0x1234_0000,
+            ..entry
+        };
+        let big = TiffParser {
+            byte_order: ByteOrder::BigEndian,
+        };
+        assert_eq!(
+            big.read_unsigned_scalar(&mut reader, &entry)
+                .expect("big-endian SHORT"),
+            0x1234
+        );
+    }
+
+    #[test]
+    fn ascii_reader_trims_nul_and_rejects_unbounded_lengths() {
+        let mut file = tempfile::tempfile().expect("temporary TIFF");
+        file.seek(SeekFrom::Start(32)).expect("seek");
+        file.write_all(b"NIKON CORPORATION\0").expect("write ASCII");
+        let parser = TiffParser::new();
+        let mut reader = BufReader::new(&mut file);
+        let entry = IfdEntry {
+            tag: 271,
+            data_type: 2,
+            count: 18,
+            value_offset: 32,
+        };
+        assert_eq!(
+            parser.read_ascii(&mut reader, &entry).expect("camera make"),
+            "NIKON CORPORATION"
+        );
+
+        let oversized = IfdEntry {
+            count: 4097,
+            ..entry
+        };
+        assert!(parser.read_ascii(&mut reader, &oversized).is_err());
     }
 }

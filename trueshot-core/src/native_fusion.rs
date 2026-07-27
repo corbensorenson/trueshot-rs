@@ -25,9 +25,9 @@ pub struct NativeFusionConfig {
     pub alignment_levels: usize,
     /// Reject uncertain focus-plane transforms below this normalized score.
     pub minimum_alignment_score: f32,
-    /// Sensor black point in native digital numbers.
-    pub black_level: f32,
-    /// Optional override; otherwise derived from bits per sample.
+    /// Optional sensor black-point override; metadata profile is the default.
+    pub black_level: Option<f32>,
+    /// Optional sensor saturation override; metadata profile is the default.
     pub white_level: Option<f32>,
     /// Approximate sensor read noise in native digital numbers.
     pub read_noise_dn: f32,
@@ -47,7 +47,7 @@ impl Default for NativeFusionConfig {
             // between levels. One high-resolution compact FFT is exact.
             alignment_levels: 1,
             minimum_alignment_score: 0.08,
-            black_level: 1024.0,
+            black_level: None,
             white_level: None,
             read_noise_dn: 3.0,
             highlight_rolloff_start: 0.88,
@@ -225,7 +225,7 @@ fn validate_group(
     if group.metadata.len() != group.len() {
         anyhow::bail!("Native group metadata is incomplete");
     }
-    if config.black_level < 0.0 || config.read_noise_dn <= 0.0 {
+    if config.black_level.is_some_and(|level| level < 0.0) || config.read_noise_dn <= 0.0 {
         anyhow::bail!("Native fusion calibration values must be positive");
     }
     if group.metadata[0].cfa_pattern != RGGB {
@@ -246,19 +246,20 @@ fn build_calibrations(
         .iter()
         .enumerate()
         .map(|(index, metadata)| {
-            let white = config.white_level.unwrap_or_else(|| {
-                if metadata.bits_per_sample >= 16 {
-                    u16::MAX as f32
-                } else {
-                    ((1u32 << metadata.bits_per_sample) - 1) as f32
-                }
-            });
-            if white <= config.black_level {
+            let profile = metadata.sensor_levels.with_context(|| {
+                format!(
+                    "Frame {} has no verified sensor calibration for {} {} {}-bit RAW",
+                    index, metadata.camera_make, metadata.camera_model, metadata.bits_per_sample
+                )
+            })?;
+            let black = config.black_level.unwrap_or(f32::from(profile.black));
+            let white = config.white_level.unwrap_or(f32::from(profile.white));
+            if white <= black {
                 anyhow::bail!(
                     "Frame {} white level {} does not exceed black level {}",
                     index,
                     white,
-                    config.black_level
+                    black
                 );
             }
             let shutter = metadata.exposure_time.unwrap_or(1.0 / 125.0).max(1e-7);
@@ -269,8 +270,8 @@ fn build_calibrations(
             let exposure = (shutter * (iso / 100.0) / aperture.powi(2)) as f32;
             let green = ((metadata.cam_mul[1] + metadata.cam_mul[3]) * 0.5).max(1e-6);
             Ok(FrameCalibration {
-                black: config.black_level,
-                inverse_range: 1.0 / (white - config.black_level),
+                black,
+                inverse_range: 1.0 / (white - black),
                 exposure,
                 // Local RGGB site order: R, G1, G2, B.
                 wb_by_site: [
@@ -1088,7 +1089,7 @@ fn bilinear_f64(image: &Array2<f64>, x: f64, y: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nef::parser::Z9Metadata;
+    use crate::nef::parser::{SensorLevels, Z9Metadata};
     use crate::smart_loader::NativeFrameGroup;
     use crate::types::Rect;
 
@@ -1101,6 +1102,10 @@ mod tests {
             cfa_pattern: RGGB,
             camera_make: "Nikon".to_string(),
             camera_model: "Z9".to_string(),
+            sensor_levels: Some(SensorLevels {
+                black: 0,
+                white: 16_383,
+            }),
             strip_offsets: vec![],
             strip_byte_counts: vec![],
             rows_per_strip: 16,
@@ -1152,7 +1157,7 @@ mod tests {
         )
         .unwrap();
         let config = NativeFusionConfig {
-            black_level: 0.0,
+            black_level: Some(0.0),
             white_level: Some(white),
             tile_size: 16,
             regularize_depth: false,
@@ -1163,6 +1168,31 @@ mod tests {
         assert!((result.bayer[[8, 9, 0]] - scene).abs() < 2e-3);
         // Red sites receive the lazy 2x camera multiplier.
         assert!((result.bayer[[8, 8, 0]] - scene * 2.0).abs() < 3e-3);
+    }
+
+    #[test]
+    fn metadata_sensor_levels_are_the_default_calibration() {
+        let pixels = vec![1008u16; 16 * 16];
+        let mut frame_metadata = metadata(1.0);
+        frame_metadata.sensor_levels = Some(SensorLevels {
+            black: 1008,
+            white: 15311,
+        });
+        let group = NativeFrameGroup::from_parts(
+            &pixels,
+            1,
+            16,
+            16,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            vec![frame_metadata],
+        )
+        .unwrap();
+
+        let calibrations = build_calibrations(&group, &NativeFusionConfig::default()).unwrap();
+        assert_eq!(calibrations[0].black, 1008.0);
+        assert!((calibrations[0].inverse_range - 1.0 / (15311.0 - 1008.0)).abs() < 1e-9);
+        assert_eq!(normalize_raw(1008, calibrations[0]), 0.0);
+        assert!((normalize_raw(15311, calibrations[0]) - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1188,7 +1218,7 @@ mod tests {
         )
         .unwrap();
         let base = NativeFusionConfig {
-            black_level: 0.0,
+            black_level: Some(0.0),
             white_level: Some(16_383.0),
             tile_size: 16,
             regularize_depth: false,

@@ -116,10 +116,21 @@ fn convert_raw_buffer_to_bayer_frame(
     let height = raw_buffer.height as usize;
     let width = raw_buffer.width as usize;
 
-    // Z9 14-bit levels
-    // Use standard black level for Z9 (1024 for 14-bit)
-    const BLACK_LEVEL: f64 = 1024.0;
-    const WHITE_LEVEL: f64 = 16383.0;
+    let sensor_levels = metadata.sensor_levels.with_context(|| {
+        format!(
+            "No verified sensor calibration for {} {} {}-bit RAW",
+            metadata.camera_make, metadata.camera_model, metadata.bits_per_sample
+        )
+    })?;
+    let black_level = f64::from(sensor_levels.black);
+    let white_level = f64::from(sensor_levels.white);
+    if white_level <= black_level {
+        anyhow::bail!(
+            "Invalid sensor calibration: black={} white={}",
+            black_level,
+            white_level
+        );
+    }
 
     // Calculate exposure scale FIRST (for HDR)
     let shutter_speed = metadata.exposure_time.unwrap_or(1.0 / 125.0);
@@ -152,7 +163,7 @@ fn convert_raw_buffer_to_bayer_frame(
             let pixel_value = raw_buffer.get_pixel(x as u32, y as u32).unwrap_or(0) as f64;
 
             // Subtract black level and normalize
-            let linear = ((pixel_value - BLACK_LEVEL) / (WHITE_LEVEL - BLACK_LEVEL)).max(0.0);
+            let linear = ((pixel_value - black_level) / (white_level - black_level)).max(0.0);
 
             // Scale by exposure to preserve HDR information
             // This ensures all exposures are on the same brightness scale
@@ -224,7 +235,7 @@ fn convert_raw_buffer_to_bayer_frame(
         focal_length,
         rotation_deg,
         vantage,
-        black_level: BLACK_LEVEL,
+        black_level,
         cam_mul: metadata.cam_mul, // Camera white balance multipliers
     };
 

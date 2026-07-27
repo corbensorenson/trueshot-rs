@@ -2051,7 +2051,10 @@ Scope: local-first product architecture + monetization operations reconciliation
   - CI blocks releases on pixel mismatch or selective-decode performance regression.
 - Status: In Progress (2026-07-26)
   - Verified: the local corruption runner catches panics, exercises descending truncations and mutates every critical TIFF header byte. The Z9 run completed 14 probes with zero panics, rejected all eight header mutations and accepted only two near-end truncations whose requested ROI data remained intact.
-  - Remaining: legally redistributable multi-body/multi-firmware Nikon corpus, LibRaw/RawSpeed differential coverage, sustained parser fuzzing, published support matrix and CI performance thresholds.
+  - Verified: TIFF make/model identity is now parsed from bounded ASCII tags instead of hardcoded as Z9; missing structural RAW tags fail closed instead of inventing Z9 dimensions, offsets, or byte counts, and packed compression routing is model-specific.
+  - Verified: the firmware 5.00 Z9 profile propagates measured black/saturation levels 1008/15311 into legacy normalization and native HDR/focus fusion by default. A private 8280x5520 lossless 14-bit capture retained exact ROI/full parity and all 45,705,600 full-decode samples matched dcraw's independent 16-bit document-mode mosaic with zero error; detection was 4.35-4.60 ms versus 2068.62-2302.33 ms ROI entropy decode in instrumented debug runs.
+  - Verified: `docs/NEF_SUPPORT_MATRIX.md` now limits shipping claims to the locally differential-tested Z9 layout instead of implying broad Nikon support.
+  - Remaining: legally redistributable multi-body/multi-firmware Nikon corpus, broader LibRaw/RawSpeed differential coverage, sustained parser fuzzing and CI performance thresholds.
 
 ## P0: Release Blockers
 
